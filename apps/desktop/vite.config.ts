@@ -19,9 +19,7 @@ export default defineConfig({
         cache: false,
       },
       dev: {
-        command:
-          "node scripts/build-preview-annotation-css.mjs && cross-env T3CODE_DESKTOP_DEV=1 vp pack --watch",
-        dependsOn: ["t3#build"],
+        command: "node scripts/dev-desktop.mjs",
         cache: false,
       },
       "dev:bundle": {
