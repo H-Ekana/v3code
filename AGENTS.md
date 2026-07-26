@@ -2,6 +2,9 @@
 
 ## Task Completion Requirements
 
+- When the user asks to bring in a fix that already exists upstream, prefer merging the upstream
+  implementation as-is. Do not independently redesign, re-diagnose, or validate that fix unless the
+  user explicitly requests it.
 - Keep local verification focused on the files and packages changed. Run the smallest relevant test set; do not run the full workspace test suite as a routine completion step.
   - Use `vp test run <test-files>` for focused built-in Vite+ tests. Use `vp run test` only when the affected package specifically requires its `test` script.
   - Backend changes must include and run focused tests for the changed behavior.
