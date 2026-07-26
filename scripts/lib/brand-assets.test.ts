@@ -31,29 +31,29 @@ describe("brand-assets", () => {
     ]);
   });
 
-  it("maps server build web assets to development icons", () => {
+  it("maps the V3 fork's server build web assets to production branding", () => {
     expect(DEVELOPMENT_ICON_OVERRIDES[0]).toEqual({
-      sourceRelativePath: BRAND_ASSET_PATHS.developmentWebFaviconIco,
+      sourceRelativePath: BRAND_ASSET_PATHS.productionWebFaviconIco,
       targetRelativePath: "dist/client/favicon.ico",
     });
   });
 
-  it("maps development web assets to the public splash and favicon files", () => {
+  it("maps V3 web assets to the development splash and favicon files", () => {
     expect(DEVELOPMENT_PUBLIC_ICON_OVERRIDES).toEqual([
       {
-        sourceRelativePath: BRAND_ASSET_PATHS.developmentWebFaviconIco,
+        sourceRelativePath: BRAND_ASSET_PATHS.productionWebFaviconIco,
         targetRelativePath: "apps/web/public/favicon.ico",
       },
       {
-        sourceRelativePath: BRAND_ASSET_PATHS.developmentWebFavicon16Png,
+        sourceRelativePath: BRAND_ASSET_PATHS.productionWebFavicon16Png,
         targetRelativePath: "apps/web/public/favicon-16x16.png",
       },
       {
-        sourceRelativePath: BRAND_ASSET_PATHS.developmentWebFavicon32Png,
+        sourceRelativePath: BRAND_ASSET_PATHS.productionWebFavicon32Png,
         targetRelativePath: "apps/web/public/favicon-32x32.png",
       },
       {
-        sourceRelativePath: BRAND_ASSET_PATHS.developmentWebAppleTouchIconPng,
+        sourceRelativePath: BRAND_ASSET_PATHS.productionWebAppleTouchIconPng,
         targetRelativePath: "apps/web/public/apple-touch-icon.png",
       },
     ]);
@@ -95,6 +95,6 @@ describe("brand-assets", () => {
     ]);
     expect(BRAND_ASSET_PATHS.developmentDesktopIconPng).toMatch(/^assets\/dev\/blueprint-/);
     expect(BRAND_ASSET_PATHS.nightlyMacIconPng).toMatch(/^assets\/nightly\/nightly-/);
-    expect(BRAND_ASSET_PATHS.productionMacIconPng).toMatch(/^assets\/prod\/black-/);
+    expect(BRAND_ASSET_PATHS.productionMacIconPng).toMatch(/^assets\/v3\/v3-code-nightly-v2-/);
   });
 });

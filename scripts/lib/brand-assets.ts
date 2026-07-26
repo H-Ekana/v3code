@@ -4,14 +4,14 @@ export const BRAND_ASSET_PATHS = {
   developmentUniversalIconPng: "assets/dev/blueprint-universal-1024.png",
 
   productionIconComposerProject: "assets/prod/app-icon.icon",
-  productionIosIconPng: "assets/prod/black-ios-1024.png",
-  productionMacIconPng: "assets/prod/black-macos-1024.png",
-  productionLinuxIconPng: "assets/prod/black-universal-1024.png",
-  productionWindowsIconIco: "assets/prod/t3-black-windows.ico",
-  productionWebFaviconIco: "assets/prod/t3-black-web-favicon.ico",
-  productionWebFavicon16Png: "assets/prod/t3-black-web-favicon-16x16.png",
-  productionWebFavicon32Png: "assets/prod/t3-black-web-favicon-32x32.png",
-  productionWebAppleTouchIconPng: "assets/prod/t3-black-web-apple-touch-180.png",
+  productionIosIconPng: "assets/v3/v3-code-nightly-v2-1024.png",
+  productionMacIconPng: "assets/v3/v3-code-nightly-v2-1024.png",
+  productionLinuxIconPng: "assets/v3/v3-code-nightly-v2-1024.png",
+  productionWindowsIconIco: "assets/v3/v3-code-nightly-v2-windows.ico",
+  productionWebFaviconIco: "assets/v3/v3-code-nightly-v2-web-favicon.ico",
+  productionWebFavicon16Png: "assets/v3/v3-code-nightly-v2-16.png",
+  productionWebFavicon32Png: "assets/v3/v3-code-nightly-v2-32.png",
+  productionWebAppleTouchIconPng: "assets/v3/v3-code-nightly-v2-180.png",
 
   nightlyIconComposerProject: "assets/nightly/app-icon.icon",
   nightlyIosIconPng: "assets/nightly/nightly-ios-1024.png",
@@ -103,9 +103,12 @@ export function resolveWebIconOverrides(
   ];
 }
 
-export const DEVELOPMENT_ICON_OVERRIDES = resolveWebIconOverrides("development", "dist/client");
+// This fork uses the V3 identity during local development as well as production.
+// Keep the original development Icon Composer outputs intact as upstream references,
+// but serve the V3 family in the renderer and boot shell.
+export const DEVELOPMENT_ICON_OVERRIDES = resolveWebIconOverrides("production", "dist/client");
 
 export const DEVELOPMENT_PUBLIC_ICON_OVERRIDES = resolveWebIconOverrides(
-  "development",
+  "production",
   "apps/web/public",
 );
