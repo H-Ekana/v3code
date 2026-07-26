@@ -402,7 +402,7 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
     const bootService = yield* BootService.BootService;
     yield* bootService.uninstall.pipe(
       Effect.tap((removed) =>
-        removed ? Console.log("Removed the T3 Code background service.") : Effect.void,
+        removed ? Console.log("Removed the V3 Code background service.") : Effect.void,
       ),
       Effect.catchTag("BootServiceUnsupportedError", () => Effect.succeed(false)),
       Effect.catch((error) =>
@@ -692,14 +692,14 @@ const offerBootService = Effect.gen(function* () {
     return false;
   }
   if (installed && current) {
-    yield* Console.log("T3 Code is already set up to run in the background on this machine.");
+    yield* Console.log("V3 Code is already set up to run in the background on this machine.");
     return true;
   }
   const wanted = yield* Prompt.run(
     Prompt.confirm({
       message: installed
-        ? "The installed T3 Code background service is from an older setup. Update it now?"
-        : "Run T3 Code in the background whenever this machine boots? " +
+        ? "The installed V3 Code background service is from an older setup. Update it now?"
+        : "Run V3 Code in the background whenever this machine boots? " +
           "It stays reachable through T3 Connect even after you log out.",
       initial: true,
     }),
@@ -751,7 +751,7 @@ export const connectCommand = Command.make("connect", {
         const background = yield* recoverBootServiceOffer(offerBootService);
         yield* Console.log(
           background
-            ? "\n✓ Background service ready\n\nT3 Code will stay reachable after you log out."
+            ? "\n✓ Background service ready\n\nV3 Code will stay reachable after you log out."
             : "\nNext\n  Start the server with `t3 serve` to make this machine reachable.",
         );
       }),
