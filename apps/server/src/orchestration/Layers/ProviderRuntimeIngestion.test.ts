@@ -9,6 +9,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  RuntimeItemId,
   RuntimeTaskId,
   type ThreadAgentSnapshot,
 } from "@t3tools/contracts";
@@ -29,6 +30,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -48,9 +50,13 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import {
   foldTaskAgentEvent,
+  getPendingTurnStartForEvent,
+  isUnprojectedContentDelta,
+  needsPendingTurnStartLookup,
   ProviderRuntimeIngestionLive,
   pruneSettledAgents,
   resolveDelegateProvider,
+  runtimeEventsForIngestion,
 } from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -59,14 +65,37 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
-function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
-  return ServerSettingsService.layerTest(overrides);
+function makeTestServerSettingsLayer(
+  overrides: Partial<ServerSettings> = {},
+  onGetSettings?: () => void,
+) {
+  const baseLayer = ServerSettingsService.layerTest(overrides);
+  return Layer.effect(
+    ServerSettingsService,
+    Effect.gen(function* () {
+      const base = yield* ServerSettingsService;
+      const changes = yield* PubSub.unbounded<ServerSettings>();
+      return {
+        start: base.start,
+        ready: base.ready,
+        getSettings: Effect.sync(() => onGetSettings?.()).pipe(Effect.andThen(base.getSettings)),
+        updateSettings: (patch) =>
+          base
+            .updateSettings(patch)
+            .pipe(Effect.tap((settings) => PubSub.publish(changes, settings))),
+        get streamChanges() {
+          return Stream.fromPubSub(changes);
+        },
+      } satisfies ServerSettingsService["Service"];
+    }),
+  ).pipe(Layer.provide(baseLayer));
 }
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
+const asRuntimeItemId = (value: string): RuntimeItemId => RuntimeItemId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 
@@ -226,7 +255,10 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    serverSettings?: Partial<ServerSettings>;
+    onGetSettings?: () => void;
+  }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
@@ -247,14 +279,20 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
-      Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
+      Layer.provideMerge(
+        makeTestServerSettingsLayer(options?.serverSettings, options?.onGetSettings),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
-    const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
-    const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
-    const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    const managedRuntime = ManagedRuntime.make(layer);
+    runtime = managedRuntime;
+    const engine = await managedRuntime.runPromise(Effect.service(OrchestrationEngineService));
+    const snapshotQuery = await managedRuntime.runPromise(Effect.service(ProjectionSnapshotQuery));
+    const ingestion = await managedRuntime.runPromise(
+      Effect.service(ProviderRuntimeIngestionService),
+    );
+    const settingsService = await managedRuntime.runPromise(Effect.service(ServerSettingsService));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -324,8 +362,140 @@ describe("ProviderRuntimeIngestion", () => {
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,
+      updateSettings: (patch: Parameters<typeof settingsService.updateSettings>[0]) =>
+        Effect.runPromise(settingsService.updateSettings(patch)),
     };
   }
+
+  it("keeps unprojected deltas and ordinary assistant deltas off lifecycle lookups", () => {
+    const baseEvent = {
+      eventId: asEventId("evt-delta-routing"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+    } as const;
+    const reasoningDelta = {
+      ...baseEvent,
+      type: "content.delta",
+      itemId: asRuntimeItemId("item-1"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "thinking",
+      },
+    } satisfies ProviderRuntimeEvent;
+    const assistantDelta = {
+      ...baseEvent,
+      type: "content.delta",
+      itemId: asRuntimeItemId("item-1"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "answer",
+      },
+    } satisfies ProviderRuntimeEvent;
+    const turnStarted = {
+      ...baseEvent,
+      type: "turn.started",
+      payload: {},
+    } satisfies ProviderRuntimeEvent;
+
+    expect(isUnprojectedContentDelta(reasoningDelta)).toBe(true);
+    expect(isUnprojectedContentDelta(assistantDelta)).toBe(false);
+    expect(needsPendingTurnStartLookup(reasoningDelta)).toBe(false);
+    expect(needsPendingTurnStartLookup(assistantDelta)).toBe(false);
+    expect(needsPendingTurnStartLookup(turnStarted)).toBe(true);
+  });
+
+  effectIt.effect("filters unprojected deltas before the runtime enqueue callback", () =>
+    Effect.gen(function* () {
+      const baseEvent = {
+        eventId: asEventId("evt-prequeue-filter"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asRuntimeItemId("item-1"),
+      } as const;
+      const events: ProviderRuntimeEvent[] = [
+        {
+          ...baseEvent,
+          type: "content.delta",
+          payload: { streamKind: "reasoning_text", delta: "thinking" },
+        },
+        {
+          ...baseEvent,
+          type: "content.delta",
+          payload: { streamKind: "command_output", delta: "tool output" },
+        },
+        {
+          ...baseEvent,
+          type: "content.delta",
+          payload: { streamKind: "assistant_text", delta: "answer" },
+        },
+      ];
+      let enqueueCount = 0;
+
+      yield* runtimeEventsForIngestion(Stream.fromIterable(events)).pipe(
+        Stream.runForEach(() =>
+          Effect.sync(() => {
+            enqueueCount += 1;
+          }),
+        ),
+      );
+
+      expect(enqueueCount).toBe(1);
+    }),
+  );
+
+  effectIt.effect("calls the pending-turn lookup only for lifecycle events that consume it", () =>
+    Effect.gen(function* () {
+      const baseEvent = {
+        eventId: asEventId("evt-pending-lookup"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+      } as const;
+      const assistantDelta = {
+        ...baseEvent,
+        type: "content.delta",
+        turnId: asTurnId("turn-1"),
+        itemId: asRuntimeItemId("item-1"),
+        payload: { streamKind: "assistant_text", delta: "answer" },
+      } satisfies ProviderRuntimeEvent;
+      const lifecycleEvents: ProviderRuntimeEvent[] = [
+        { ...baseEvent, type: "turn.started", turnId: asTurnId("turn-1"), payload: {} },
+        { ...baseEvent, type: "session.started", payload: {} },
+        {
+          ...baseEvent,
+          type: "session.state.changed",
+          payload: { state: "ready" },
+        },
+        { ...baseEvent, type: "thread.started", payload: {} },
+      ];
+      let lookupCalls = 0;
+      const getPendingTurnStartByThreadId = () =>
+        Effect.sync(() => {
+          lookupCalls += 1;
+          return Option.none();
+        });
+
+      yield* getPendingTurnStartForEvent(
+        assistantDelta,
+        baseEvent.threadId,
+        getPendingTurnStartByThreadId,
+      );
+      expect(lookupCalls).toBe(0);
+
+      for (const event of lifecycleEvents) {
+        yield* getPendingTurnStartForEvent(
+          event,
+          baseEvent.threadId,
+          getPendingTurnStartByThreadId,
+        );
+      }
+      expect(lookupCalls).toBe(4);
+    }),
+  );
 
   it("folds material transitions, reactivations, and settled retention", () => {
     const agents = new Map<string, ThreadAgentSnapshot>();
@@ -431,6 +601,66 @@ describe("ProviderRuntimeIngestion", () => {
       delegateProvider: "codex",
       agentType: "codex:codex-rescue",
     });
+  });
+
+  it("feeds progress step descriptions to the activity log without renaming the card", () => {
+    // Claude sends no `summary` while an agent runs: the step lives in
+    // `description` and `lastToolName` is nearly constant. A captured run
+    // carried 41 distinct descriptions against 3 distinct tool names, so the
+    // description is the feed and the title must not follow it.
+    const agents = new Map<string, ThreadAgentSnapshot>();
+    const started: Extract<ProviderRuntimeEvent, { type: "task.started" }> = {
+      type: "task.started",
+      eventId: asEventId("explore-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("explore-1"),
+        description: "Trace agent card title churn",
+        agentType: "Explore",
+      },
+    };
+    expect(foldTaskAgentEvent(agents, started)).toBe(true);
+
+    const step = (
+      eventId: string,
+      seconds: number,
+      stepDescription: string,
+      lastToolName: string,
+    ): Extract<ProviderRuntimeEvent, { type: "task.progress" }> => ({
+      ...started,
+      type: "task.progress",
+      eventId: asEventId(eventId),
+      createdAt: `2026-01-01T00:00:0${seconds}.000Z`,
+      payload: {
+        taskId: RuntimeTaskId.make("explore-1"),
+        description: stepDescription,
+        lastToolName,
+      },
+    });
+
+    expect(foldTaskAgentEvent(agents, step("s1", 1, "Reading ClaudeAdapter.ts", "Read"))).toBe(
+      true,
+    );
+    expect(
+      foldTaskAgentEvent(agents, step("s2", 2, "Running Find companion emitters", "Bash")),
+    ).toBe(true);
+    // Same step, different tool: the card renders `lastToolName` on its own, so
+    // this must not append a row that reads identically to the one above it.
+    expect(
+      foldTaskAgentEvent(agents, step("s3", 3, "Running Find companion emitters", "Grep")),
+    ).toBe(false);
+
+    const agent = agents.get("explore-1");
+    expect(agent?.recentActivity.map((entry) => entry.summary)).toEqual([
+      "Reading ClaudeAdapter.ts",
+      "Running Find companion emitters",
+    ]);
+    // The whole point of the swap: the title stays the spawn description
+    // instead of becoming whatever the agent last did.
+    expect(agent?.name).toBe("Trace agent card title churn");
+    expect(agent?.lastToolName).toBe("Grep");
   });
 
   it("revives a settled rescue forwarder while its detached Codex job keeps running", () => {
@@ -2565,6 +2795,67 @@ describe("ProviderRuntimeIngestion", () => {
           message.id === "assistant:item-streaming-request-segment:segment:1",
       )?.text,
     ).toBe(" after approval");
+  });
+
+  it("uses live settings changes without rematerializing settings per assistant delta", async () => {
+    let getSettingsCalls = 0;
+    const harness = await createHarness({
+      serverSettings: { enableAssistantStreaming: false },
+      onGetSettings: () => {
+        getSettingsCalls += 1;
+      },
+    });
+    const now = "2026-03-28T08:00:00.000Z";
+
+    expect(getSettingsCalls).toBe(1);
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-settings-ref-buffered"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      itemId: asItemId("item-settings-ref-buffered"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "held back",
+      },
+    });
+    await harness.drain();
+
+    const bufferedSnapshot = await harness.readModel();
+    const bufferedThread = bufferedSnapshot.threads.find(
+      (thread) => thread.id === asThreadId("thread-1"),
+    );
+    expect(
+      bufferedThread?.messages.some(
+        (message) => message.id === "assistant:item-settings-ref-buffered",
+      ),
+    ).toBe(false);
+    expect(getSettingsCalls).toBe(1);
+
+    await harness.updateSettings({ enableAssistantStreaming: true });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-settings-ref-streaming"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      itemId: asItemId("item-settings-ref-streaming"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "live now",
+      },
+    });
+
+    await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some(
+        (message) =>
+          message.id === "assistant:item-settings-ref-streaming" &&
+          message.streaming &&
+          message.text === "live now",
+      ),
+    );
+    expect(getSettingsCalls).toBe(1);
   });
 
   it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {
