@@ -19,6 +19,7 @@ import {
   syncDocumentElectronPlatformClasses,
   syncDocumentWindowControlsOverlayClass,
 } from "./lib/windowControlsOverlay";
+import { startStartupSplashTransition } from "./startupSplash";
 import { AppRoot } from "./AppRoot";
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
@@ -52,3 +53,5 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     )}
   </React.StrictMode>,
 );
+
+startStartupSplashTransition();

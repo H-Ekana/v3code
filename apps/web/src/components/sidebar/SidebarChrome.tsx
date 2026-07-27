@@ -62,6 +62,7 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
         alt=""
         aria-hidden="true"
         className="size-6 shrink-0 rounded-md shadow-[0_0_0_1px_color-mix(in_srgb,var(--primary)_18%,transparent)]"
+        data-startup-logo-target=""
         src="/apple-touch-icon.png"
       />
       <span

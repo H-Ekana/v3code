@@ -52,6 +52,7 @@ import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
 } from "../components/KeybindingsUpdateToast.logic";
+import { markStartupSplashAppReady } from "../startupSplash";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -84,6 +85,7 @@ export const Route = createRootRoute({
 });
 
 function RootRouteView() {
+  useStartupSplashReadySignal();
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
@@ -198,6 +200,7 @@ function HostedStaticEnvironmentBootstrap() {
 }
 
 function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
+  useStartupSplashReadySignal();
   const message = errorMessage(error);
   const details = errorDetails(error);
 
@@ -238,6 +241,15 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
       </section>
     </div>
   );
+}
+
+function useStartupSplashReadySignal() {
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(markStartupSplashAppReady);
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, []);
 }
 
 function errorMessage(error: unknown): string {
