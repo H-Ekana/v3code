@@ -365,32 +365,32 @@ export function resolveThreadRowClassName(input: {
   isSelected: boolean;
 }): string {
   const baseClassName =
-    "h-8 w-full translate-x-0 cursor-pointer justify-start rounded-md px-2 text-left text-sm select-none transition-[background-color,color,box-shadow] duration-200 ease-out focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none";
+    "h-8 w-full translate-x-0 cursor-pointer justify-start rounded-md px-2 text-left text-sm select-none transition-[background-color,color,box-shadow] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70 focus-visible:shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_38%,transparent)] motion-reduce:transition-none";
 
   if (input.isSelected && input.isActive) {
     return cn(
       baseClassName,
-      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_94%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/25 hover:text-sidebar-foreground",
+      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/50 shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_28%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/65",
     );
   }
 
   if (input.isSelected) {
     return cn(
       baseClassName,
-      "bg-[color-mix(in_srgb,var(--sidebar-row-selected)_95%,var(--primary))] text-sidebar-foreground ring-1 ring-inset ring-primary/20 hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_94%,var(--primary))] hover:text-sidebar-foreground",
+      "bg-[color-mix(in_srgb,var(--sidebar-row-selected)_88%,var(--primary))] text-sidebar-foreground ring-1 ring-inset ring-primary/35 shadow-[inset_0_0_10px_color-mix(in_srgb,var(--primary)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/50 hover:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_22%,transparent),inset_0_0_10px_color-mix(in_srgb,var(--astro-highlight)_7%,transparent)]",
     );
   }
 
   if (input.isActive) {
     return cn(
       baseClassName,
-      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_94%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/25 hover:text-sidebar-foreground",
+      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/50 shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_28%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/65",
     );
   }
 
   return cn(
     baseClassName,
-    "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+    "text-sidebar-muted-foreground/80 hover:bg-[color-mix(in_srgb,var(--sidebar-row-hover)_92%,var(--primary))] hover:text-sidebar-foreground hover:ring-1 hover:ring-inset hover:ring-primary/15",
   );
 }
 

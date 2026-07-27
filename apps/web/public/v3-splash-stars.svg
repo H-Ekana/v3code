@@ -9,43 +9,238 @@
       <stop stop-color="#ED5FB7" stop-opacity=".08"/>
       <stop offset="1" stop-color="#8B3BA4" stop-opacity="0"/>
     </radialGradient>
+    <linearGradient id="meteor-tail" x1="-168" y1="0" x2="0" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8350D9" stop-opacity="0"/>
+      <stop offset=".56" stop-color="#A77BFF" stop-opacity=".2"/>
+      <stop offset=".86" stop-color="#F27BC6" stop-opacity=".72"/>
+      <stop offset="1" stop-color="#FFF9FF" stop-opacity=".96"/>
+    </linearGradient>
   </defs>
 
   <style>
+    .sky-overscan {
+      transform-box: view-box;
+      transform-origin: center;
+      transform: scale(1.045);
+    }
+    .sky-rotation {
+      transform-box: view-box;
+      transform-origin: 260px 180px;
+      animation: sky-rotation 18s cubic-bezier(.45, 0, .55, 1) infinite alternate;
+      animation-delay: -4.5s;
+      will-change: transform;
+    }
     .spark-twinkle {
-      opacity: .68;
-      animation: star-twinkle 5.2s ease-in-out infinite;
+      opacity: .62;
+      animation: star-twinkle 4s cubic-bezier(.45, 0, .55, 1) infinite;
     }
     .spark-twinkle--a {
-      animation-duration: 4.7s;
-      animation-delay: -1.3s;
+      animation-duration: 3.4s;
+      animation-delay: -1.1s;
     }
     .spark-twinkle--b {
-      animation-duration: 6.1s;
-      animation-delay: -3.8s;
+      animation-duration: 4.8s;
+      animation-delay: -3.2s;
     }
     .spark-twinkle--c {
-      animation-duration: 5.6s;
-      animation-delay: -2.4s;
+      animation-duration: 4.1s;
+      animation-delay: -2.2s;
+    }
+    .meteor-origin,
+    .shooting-star {
+      animation-timing-function: linear;
+      animation-iteration-count: infinite;
+    }
+    .meteor-origin {
+      animation-name: meteor-origin-hide;
+    }
+    .meteor-origin--a,
+    .shooting-star--a {
+      animation-duration: 8.2s;
+      animation-delay: -5.55s;
+    }
+    .meteor-origin--b,
+    .shooting-star--b {
+      animation-duration: 10.7s;
+      animation-delay: -3.9s;
+    }
+    .meteor-origin--c,
+    .shooting-star--c {
+      animation-duration: 13.4s;
+      animation-delay: -7.9s;
+    }
+    .shooting-star {
+      opacity: 0;
+      transform-box: view-box;
+      transform-origin: 0 0;
+      will-change: transform, opacity;
+    }
+    .shooting-star--a {
+      animation-name: shooting-star-a;
+    }
+    .shooting-star--b {
+      animation-name: shooting-star-b;
+    }
+    .shooting-star--c {
+      animation-name: shooting-star-c;
+    }
+    .meteor-core {
+      stroke: #FFF9FF;
+      stroke-width: 1;
+      stroke-linecap: round;
+      stroke-opacity: .78;
+    }
+    .meteor-glow {
+      stroke: #B56FFF;
+      stroke-width: 7;
+      stroke-linecap: round;
+      stroke-opacity: .24;
+    }
+    .meteor-head {
+      fill: #FFF;
+      filter:
+        drop-shadow(0 0 4px rgb(255 232 255 / 100%))
+        drop-shadow(0 0 9px rgb(219 122 255 / 88%));
+    }
+    @keyframes sky-rotation {
+      from {
+        transform: rotate(-.7deg);
+      }
+
+      to {
+        transform: rotate(.7deg);
+      }
     }
     @keyframes star-twinkle {
       0%,
       100% {
-        opacity: .38;
+        opacity: .2;
         filter: drop-shadow(0 0 0 rgb(216 168 255 / 0%));
       }
-      38% {
-        opacity: .96;
-        filter: drop-shadow(0 0 8px rgb(216 168 255 / 76%));
+
+      20% {
+        opacity: .38;
+        filter: drop-shadow(0 0 2px rgb(216 168 255 / 24%));
       }
-      62% {
-        opacity: .58;
-        filter: drop-shadow(0 0 3px rgb(240 195 255 / 28%));
+
+      42% {
+        opacity: 1;
+        filter:
+          drop-shadow(0 0 4px rgb(244 223 255 / 88%))
+          drop-shadow(0 0 12px rgb(201 126 255 / 72%));
+      }
+
+      56% {
+        opacity: .68;
+        filter: drop-shadow(0 0 5px rgb(240 195 255 / 42%));
+      }
+
+      78% {
+        opacity: .3;
+        filter: drop-shadow(0 0 1px rgb(216 168 255 / 12%));
+      }
+    }
+    @keyframes meteor-origin-hide {
+      0%,
+      70.5%,
+      85%,
+      100% {
+        opacity: 1;
+      }
+
+      72%,
+      83.5% {
+        opacity: 0;
+      }
+    }
+    @keyframes shooting-star-a {
+      0%,
+      71% {
+        opacity: 0;
+        transform: translate(1386px, 206px) rotate(145deg) scaleX(.3);
+      }
+
+      72% {
+        opacity: .96;
+        transform: translate(1386px, 206px) rotate(145deg) scaleX(.42);
+      }
+
+      80.5% {
+        opacity: .88;
+        transform: translate(1034px, 453px) rotate(145deg) scaleX(1);
+      }
+
+      84%,
+      100% {
+        opacity: 0;
+        transform: translate(940px, 519px) rotate(145deg) scaleX(1.08);
+      }
+    }
+    @keyframes shooting-star-b {
+      0%,
+      71% {
+        opacity: 0;
+        transform: translate(844px, 142px) rotate(34deg) scaleX(.28);
+      }
+
+      72% {
+        opacity: .94;
+        transform: translate(844px, 142px) rotate(34deg) scaleX(.4);
+      }
+
+      80.5% {
+        opacity: .84;
+        transform: translate(1200px, 374px) rotate(34deg) scaleX(.96);
+      }
+
+      84%,
+      100% {
+        opacity: 0;
+        transform: translate(1292px, 434px) rotate(34deg) scaleX(1.04);
+      }
+    }
+    @keyframes shooting-star-c {
+      0%,
+      71% {
+        opacity: 0;
+        transform: translate(492px, 105px) rotate(35deg) scaleX(.3);
+      }
+
+      72% {
+        opacity: .92;
+        transform: translate(492px, 105px) rotate(35deg) scaleX(.42);
+      }
+
+      80.5% {
+        opacity: .82;
+        transform: translate(838px, 346px) rotate(35deg) scaleX(.94);
+      }
+
+      84%,
+      100% {
+        opacity: 0;
+        transform: translate(930px, 410px) rotate(35deg) scaleX(1.03);
       }
     }
     @media (prefers-reduced-motion: reduce) {
-      .spark-twinkle {
+      .sky-overscan,
+      .sky-rotation,
+      .spark-twinkle,
+      .meteor-origin,
+      .shooting-star {
         animation: none;
+      }
+      .sky-overscan {
+        transform: none;
+      }
+      .sky-rotation {
+        transform: none;
+      }
+      .meteor-origin {
+        opacity: 1;
+      }
+      .shooting-star {
+        opacity: 0;
       }
     }
   </style>
@@ -53,23 +248,31 @@
   <ellipse cx="1180" cy="220" rx="360" ry="250" fill="url(#violet-haze)"/>
   <ellipse cx="360" cy="360" rx="270" ry="190" fill="url(#pink-haze)"/>
 
+  <g class="sky-overscan">
+  <g class="sky-rotation">
   <g fill="#F8F4FF">
     <path class="spark-twinkle spark-twinkle--a" d="M0-16C1.8-4.5 4.5-1.8 16 0 4.5 1.8 1.8 4.5 0 16-1.8 4.5-4.5 1.8-16 0-4.5-1.8-1.8-4.5 0-16Z" transform="translate(164 168)"/>
     <path class="spark-twinkle spark-twinkle--c" d="M0-12C1.4-3.4 3.4-1.4 12 0 3.4 1.4 1.4 3.4 0 12-1.4 3.4-3.4 1.4-12 0-3.4-1.4-1.4-3.4 0-12Z" transform="translate(574 246)"/>
-    <path class="spark-twinkle spark-twinkle--b" d="M0-15C1.7-4.2 4.2-1.7 15 0 4.2 1.7 1.7 4.2 0 15-1.7 4.2-4.2 1.7-15 0-4.2-1.7-1.7-4.2 0-15Z" transform="translate(1386 206)"/>
+    <g class="meteor-origin meteor-origin--a" transform="translate(1386 206)">
+      <path class="spark-twinkle spark-twinkle--b" d="M0-15C1.7-4.2 4.2-1.7 15 0 4.2 1.7 1.7 4.2 0 15-1.7 4.2-4.2 1.7-15 0-4.2-1.7-1.7-4.2 0-15Z"/>
+    </g>
     <path class="spark-twinkle spark-twinkle--c" d="M0-9C1-2.5 2.5-1 9 0 2.5 1 1 2.5 0 9-1 2.5-2.5 1-9 0-2.5-1-1-2.5 0-9Z" transform="translate(1118 178)"/>
     <path class="spark-twinkle spark-twinkle--a" d="M0-8C.9-2.2 2.2-.9 8 0 2.2.9.9 2.2 0 8-.9 2.2-2.2.9-8 0-2.2-.9-.9-2.2 0-8Z" transform="translate(1502 318)"/>
   </g>
 
   <g fill="#D8C3FF">
     <path class="spark-twinkle spark-twinkle--b" d="M0-11C1.2-3.1 3.1-1.2 11 0 3.1 1.2 1.2 3.1 0 11-1.2 3.1-3.1 1.2-11 0-3.1-1.2-1.2-3.1 0-11Z" transform="translate(286 232)"/>
-    <path class="spark-twinkle spark-twinkle--a" d="M0-8C.9-2.2 2.2-.9 8 0 2.2.9.9 2.2 0 8-.9 2.2-2.2.9-8 0-2.2-.9-.9-2.2 0-8Z" transform="translate(844 142)"/>
+    <g class="meteor-origin meteor-origin--b" transform="translate(844 142)">
+      <path class="spark-twinkle spark-twinkle--a" d="M0-8C.9-2.2 2.2-.9 8 0 2.2.9.9 2.2 0 8-.9 2.2-2.2.9-8 0-2.2-.9-.9-2.2 0-8Z"/>
+    </g>
     <path class="spark-twinkle spark-twinkle--b" d="M0-10C1.1-2.8 2.8-1.1 10 0 2.8 1.1 1.1 2.8 0 10-1.1 2.8-2.8 1.1-10 0-2.8-1.1-1.1-2.8 0-10Z" transform="translate(1228 505)"/>
     <path d="M0-7C.8-2 2-.8 7 0 2 .8.8 2 0 7-.8 2-2 .8-7 0-2-.8-.8-2 0-7Z" transform="translate(362 442)"/>
   </g>
 
   <g fill="#FF8FD2">
-    <path class="spark-twinkle spark-twinkle--c" d="M0-10C1.1-2.8 2.8-1.1 10 0 2.8 1.1 1.1 2.8 0 10-1.1 2.8-2.8 1.1-10 0-2.8-1.1-1.1-2.8 0-10Z" transform="translate(492 105)"/>
+    <g class="meteor-origin meteor-origin--c" transform="translate(492 105)">
+      <path class="spark-twinkle spark-twinkle--c" d="M0-10C1.1-2.8 2.8-1.1 10 0 2.8 1.1 1.1 2.8 0 10-1.1 2.8-2.8 1.1-10 0-2.8-1.1-1.1-2.8 0-10Z"/>
+    </g>
     <path class="spark-twinkle spark-twinkle--a" d="M0-13C1.5-3.7 3.7-1.5 13 0 3.7 1.5 1.5 3.7 0 13-1.5 3.7-3.7 1.5-13 0-3.7-1.5-1.5-3.7 0-13Z" transform="translate(1162 302)"/>
     <path class="spark-twinkle spark-twinkle--b" d="M0-7C.8-2 2-.8 7 0 2 .8.8 2 0 7-.8 2-2 .8-7 0-2-.8-.8-2 0-7Z" transform="translate(78 360)"/>
     <path class="spark-twinkle spark-twinkle--c" d="M0-8C.9-2.2 2.2-.9 8 0 2.2.9.9 2.2 0 8-.9 2.2-2.2.9-8 0-2.2-.9-.9-2.2 0-8Z" transform="translate(1464 122)"/>
@@ -102,5 +305,26 @@
     <circle cx="1368" cy="552" r="1.7"/>
     <circle cx="1186" cy="238" r="1.2"/>
     <circle cx="1488" cy="182" r="1.2"/>
+  </g>
+
+  <g class="shooting-star shooting-star--a">
+    <path class="meteor-glow" d="M-138 0H-5"/>
+    <path d="M-168 0H0" stroke="url(#meteor-tail)" stroke-width="2.8" stroke-linecap="round"/>
+    <path class="meteor-core" d="M-72 0H0"/>
+    <circle class="meteor-head" r="3"/>
+  </g>
+  <g class="shooting-star shooting-star--b">
+    <path class="meteor-glow" d="M-124 0H-5"/>
+    <path d="M-150 0H0" stroke="url(#meteor-tail)" stroke-width="2.5" stroke-linecap="round"/>
+    <path class="meteor-core" d="M-62 0H0"/>
+    <circle class="meteor-head" r="2.8"/>
+  </g>
+  <g class="shooting-star shooting-star--c">
+    <path class="meteor-glow" d="M-130 0H-5"/>
+    <path d="M-158 0H0" stroke="url(#meteor-tail)" stroke-width="2.6" stroke-linecap="round"/>
+    <path class="meteor-core" d="M-66 0H0"/>
+    <circle class="meteor-head" r="2.9"/>
+  </g>
+  </g>
   </g>
 </svg>

@@ -776,3 +776,45 @@ sets only `includePartialMessages`. Enabling it would plausibly deliver:
 **One option flag, three blockers.** Probe this before spending effort on anything else.
 Caveat: enabling it increases stream volume — check the cost of forwarding full sub-agent
 conversations before turning it on unconditionally; it may need to be opt-in or filtered.
+
+---
+
+## VERIFIED IN THE APP (2026-07-27) — `forwardSubagentText` works
+
+Enabled `forwardSubagentText: true` in the Claude SDK query (`ClaudeAdapter.ts`, next to
+`includePartialMessages`). Confirmed live by the user in the Electron dev build.
+
+**Before:** Claude sub-agent feeds showed tool names only (`Read`, `Grep`).
+**After:** the feed carries assistant text too —
+`06:37:20  I have everything needed. Here are my findings. ## 1. Where the status dots are d…`
+
+### The complete matrix, all three empirically observed
+
+| Main agent | Sub-agent            | Rich feed?        | Mechanism                                                   |
+| ---------- | -------------------- | ----------------- | ----------------------------------------------------------- |
+| Claude     | Claude sub-agent     | ✅ **now works**  | `forwardSubagentText` — child text forwarded as messages    |
+| Codex      | Codex sub-agent      | ✅ already worked | in-session app-server `item/*` events (reasoning, commands) |
+| Claude     | `codex:codex-rescue` | ❌ still blind    | **detached** job — nothing streams into the session at all  |
+
+The third row is NOT an adapter granularity problem and `forwardSubagentText` cannot help it. The
+wrapper makes one Bash call, gets `Codex task launched in the background (ID: …)`, and exits. The
+real work happens in a separate process the session never observes. **Step 7-lite is the only fix.**
+
+### Other verification debt cleared (was F1)
+
+Observed working in the installed app:
+
+- `SUB-AGENTS` / `BACKGROUND TASKS` sections render, with the detached shell correctly in Background.
+- Provider icons resolve correctly per row.
+
+### Knock-on for C1 / B1
+
+C1 assumed sub-agent blocks are forwarded with `parent_tool_use_id` set. We now know child _text_ is
+forwarded. That raises confidence but still does not prove the field is populated on a nested Bash
+`tool_use`. Worth re-probing now that the stream is richer — shell nesting (B1) is currently dead code
+and this is the only route to reviving it.
+
+### Caveat still open
+
+Stream volume is higher now. No slowdown reported in a short test; watch on a long multi-agent run
+and gate behind a setting if the activity line thrashes.

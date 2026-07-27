@@ -30,37 +30,53 @@
     .cloud-drift {
       transform-box: fill-box;
       transform-origin: center bottom;
-      animation: cloud-drift 26s ease-in-out -5s infinite;
+      animation: cloud-drift 20s cubic-bezier(.45, 0, .55, 1) -4s infinite;
     }
 
     .cloud-bank-left {
       --cloud-scale: .92;
+      --cloud-start-x: -22px;
+      --cloud-end-x: 22px;
+      --cloud-start-y: 6px;
+      --cloud-end-y: -8px;
       opacity: .84;
     }
 
     .cloud-bank-right {
       --cloud-scale: .97;
+      --cloud-start-x: -18px;
+      --cloud-end-x: 18px;
+      --cloud-start-y: 4px;
+      --cloud-end-y: -6px;
       opacity: .78;
     }
 
     .cloud-bank-center {
       --cloud-scale: .89;
+      --cloud-start-x: -26px;
+      --cloud-end-x: 26px;
+      --cloud-start-y: 7px;
+      --cloud-end-y: -9px;
       opacity: .72;
     }
 
     .cloud-wisps {
       --cloud-scale: .86;
+      --cloud-start-x: -30px;
+      --cloud-end-x: 30px;
+      --cloud-start-y: 5px;
+      --cloud-end-y: -10px;
       opacity: .46;
     }
 
     @keyframes cloud-drift {
       0%,
       100% {
-        transform: translate(-12px, 4px) scale(var(--cloud-scale));
+        transform: translate(var(--cloud-start-x), var(--cloud-start-y)) scale(var(--cloud-scale));
       }
 
       50% {
-        transform: translate(12px, -5px) scale(var(--cloud-scale));
+        transform: translate(var(--cloud-end-x), var(--cloud-end-y)) scale(var(--cloud-scale));
       }
     }
 

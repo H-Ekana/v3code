@@ -919,32 +919,37 @@ describe("resolveThreadStatusPill", () => {
 });
 
 describe("resolveThreadRowClassName", () => {
-  it("uses the active sidebar surface when a thread is both selected and active", () => {
+  it("uses a vivid, bounded violet focus treatment when a thread is selected and active", () => {
     const className = resolveThreadRowClassName({ isActive: true, isSelected: true });
-    expect(className).toContain("var(--sidebar-row-active)_94%");
+    expect(className).toContain("var(--sidebar-row-active)_82%");
     expect(className).toContain("text-sidebar-foreground");
-    expect(className).toContain("ring-primary/25");
+    expect(className).toContain("ring-primary/50");
+    expect(className).toContain("var(--primary)_28%");
+    expect(className).toContain("var(--astro-highlight)_8%");
     expect(className).not.toContain("inset_2px");
     expect(className).not.toContain("bg-primary");
   });
 
   it("uses selected hover colors for selected threads", () => {
     const className = resolveThreadRowClassName({ isActive: false, isSelected: true });
-    expect(className).toContain("var(--sidebar-row-selected)_95%");
-    expect(className).toContain("var(--sidebar-row-active)_94%");
-    expect(className).toContain("ring-primary/20");
+    expect(className).toContain("var(--sidebar-row-selected)_88%");
+    expect(className).toContain("var(--sidebar-row-active)_82%");
+    expect(className).toContain("ring-primary/35");
+    expect(className).toContain("hover:ring-primary/50");
     expect(className).not.toContain("bg-primary");
   });
 
   it("uses the active sidebar surface for active-only threads", () => {
     const className = resolveThreadRowClassName({ isActive: true, isSelected: false });
-    expect(className).toContain("var(--sidebar-row-active)_94%");
-    expect(className).toContain("ring-primary/25");
+    expect(className).toContain("var(--sidebar-row-active)_82%");
+    expect(className).toContain("ring-primary/50");
+    expect(className).toContain("var(--astro-highlight)_8%");
   });
 
-  it("keeps hover feedback quiet and disables transitions for reduced-motion users", () => {
+  it("gives resting rows a quiet violet hover and disables transitions for reduced-motion users", () => {
     const className = resolveThreadRowClassName({ isActive: false, isSelected: false });
-    expect(className).toContain("hover:bg-sidebar-row-hover");
+    expect(className).toContain("var(--sidebar-row-hover)_92%");
+    expect(className).toContain("hover:ring-primary/15");
     expect(className).toContain("duration-200");
     expect(className).not.toContain("hover:translate");
     expect(className).not.toContain("inset_2px");

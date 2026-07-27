@@ -3769,6 +3769,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
+        // Forward sub-agent text/thinking blocks as messages tagged with
+        // `parent_tool_use_id`. Without this the SDK only emits child
+        // tool_use/tool_result ("enough for a heartbeat counter"), which is why
+        // Claude sub-agent cards show a far sparser activity feed than Codex
+        // ones — the roster appends a recentActivity entry per emission.
+        forwardSubagentText: true,
         canUseTool,
         env: claudeEnvironment,
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),

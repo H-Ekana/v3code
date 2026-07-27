@@ -50,8 +50,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
       disabled={Boolean(props.disabledReason)}
       contentClassName="flex w-full items-center gap-3"
       className={cn(
-        "group relative w-full !min-w-0 max-w-full cursor-pointer rounded-md px-2 py-2.5 transition-[background-color,box-shadow,color]",
-        "hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] data-highlighted:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] data-selected:bg-foreground/[0.08] data-selected:text-foreground data-selected:ring-0 [&[data-highlighted][data-selected]]:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))]",
+        "group relative w-full !min-w-0 max-w-full cursor-pointer rounded-md px-2 py-2.5 transition-[background-color,box-shadow,color] duration-200 ease-out motion-reduce:transition-none",
+        "hover:bg-primary/[0.08] hover:ring-1 hover:ring-inset hover:ring-primary/20 data-highlighted:bg-primary/[0.10] data-highlighted:ring-1 data-highlighted:ring-inset data-highlighted:ring-primary/30",
+        "data-selected:bg-primary/[0.18] data-selected:text-foreground data-selected:ring-1 data-selected:ring-inset data-selected:ring-astro-highlight/50 data-selected:shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_35%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_11%,transparent)] [&[data-highlighted][data-selected]]:bg-primary/[0.22] [&[data-highlighted][data-selected]]:ring-astro-highlight/65 [&[data-highlighted][data-selected]]:shadow-[0_0_12px_color-mix(in_srgb,var(--primary)_42%,transparent),inset_0_0_14px_color-mix(in_srgb,var(--astro-highlight)_14%,transparent)]",
         props.disabledReason &&
           "data-disabled:pointer-events-auto data-disabled:cursor-not-allowed data-disabled:hover:bg-transparent",
       )}
@@ -76,11 +77,14 @@ export const ModelListRow = memo(function ModelListRow(props: {
           ) : null}
         </div>
         {props.showProvider && (
-          <div className="mt-1 flex items-center gap-1.5">
+          <div
+            className={cn(
+              "mt-1 flex items-center gap-1.5 transition-colors duration-200 motion-reduce:transition-none",
+              props.isSelected ? "text-astro-highlight/85" : "text-muted-foreground/70",
+            )}
+          >
             {ProviderIcon ? <ProviderIcon className="size-3 shrink-0" /> : null}
-            <span className="truncate text-xs font-normal leading-snug text-muted-foreground/70">
-              {providerLabel}
-            </span>
+            <span className="truncate text-xs font-normal leading-snug">{providerLabel}</span>
           </div>
         )}
       </div>

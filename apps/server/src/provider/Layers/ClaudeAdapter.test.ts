@@ -356,6 +356,27 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("forwards sub-agent text so child activity reaches the agent roster", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      // Without this the SDK emits only child tool_use/tool_result, leaving
+      // Claude sub-agent cards with a far sparser activity feed than Codex ones.
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.forwardSubagentText, true);
+      assert.equal(createInput?.options.includePartialMessages, true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("derives auto permission mode from auto runtime policy without skip flag", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
