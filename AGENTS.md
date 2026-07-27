@@ -1,5 +1,8 @@
 # AGENTS.md
 
+Read `KNOWN-ISSUES.md` before debugging anything that looks like a hung thread, a stuck spinner, or
+an unresponsive stop button — that failure mode is already diagnosed and has a repair script.
+
 ## Task Completion Requirements
 
 - When the user asks to bring in a fix that already exists upstream, prefer merging the upstream
