@@ -47,6 +47,7 @@ import {
   EyeIcon,
   GlobeIcon,
   HammerIcon,
+  LoaderCircleIcon,
   MessageCircleIcon,
   MousePointerClickIcon,
   PaintbrushIcon,
@@ -1756,6 +1757,7 @@ type WorkEntryIconName =
   | "eye"
   | "globe"
   | "hammer"
+  | "loader"
   | "message-circle"
   | "square-pen"
   | "terminal"
@@ -1777,6 +1779,13 @@ function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; classN
       return <GlobeIcon className={className} aria-hidden />;
     case "hammer":
       return <HammerIcon className={className} aria-hidden />;
+    case "loader":
+      return (
+        <LoaderCircleIcon
+          className={cn(className, "animate-spin motion-reduce:animate-none")}
+          aria-hidden
+        />
+      );
     case "message-circle":
       return <MessageCircleIcon className={className} aria-hidden />;
     case "square-pen":
@@ -1930,7 +1939,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
-  const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
+  const entryIconName =
+    workEntry.sourceActivityKind === "context-compaction.started"
+      ? "loader"
+      : showWarningIndicator
+        ? "x"
+        : workEntryIconName(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
   const rawPreview = workEntryPreview(workEntry, workspaceRoot);
   const preview =

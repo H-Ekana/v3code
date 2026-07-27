@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EventId, type OrchestrationThreadActivity, TurnId } from "@t3tools/contracts";
 
-import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "./contextWindow";
+import {
+  deriveLatestContextCompactionStatus,
+  deriveLatestContextWindowSnapshot,
+  deriveVisibleContextCompactionStatus,
+  formatContextWindowTokens,
+  providerSupportsManualContextCompaction,
+} from "./contextWindow";
 
 function makeActivity(id: string, kind: string, payload: unknown): OrchestrationThreadActivity {
   return {
@@ -80,5 +86,64 @@ describe("contextWindow", () => {
 
     expect(snapshot?.usedTokens).toBe(81_659);
     expect(snapshot?.totalProcessedTokens).toBe(748_126);
+  });
+
+  it("derives the latest context compaction lifecycle state", () => {
+    expect(
+      deriveLatestContextCompactionStatus([
+        makeActivity("activity-1", "context-compaction.started", {}),
+      ]),
+    ).toMatchObject({ state: "compacting" });
+    expect(
+      deriveLatestContextCompactionStatus([
+        makeActivity("activity-1", "context-compaction.started", {}),
+        makeActivity("activity-2", "context-compaction", {}),
+      ]),
+    ).toMatchObject({ state: "completed" });
+    expect(
+      deriveLatestContextCompactionStatus([
+        makeActivity("activity-1", "context-compaction.started", {}),
+        makeActivity("activity-2", "provider.context.compact.failed", {}),
+      ]),
+    ).toMatchObject({ state: "failed" });
+  });
+
+  it("keeps completion visible until the next user message", () => {
+    const activities = [
+      {
+        ...makeActivity("activity-1", "context-compaction", {}),
+        createdAt: "2026-03-23T00:00:10.000Z",
+      },
+    ];
+
+    expect(
+      deriveVisibleContextCompactionStatus(activities, [
+        { role: "user", createdAt: "2026-03-23T00:00:09.000Z" },
+        { role: "assistant", createdAt: "2026-03-23T00:00:11.000Z" },
+      ]),
+    ).toMatchObject({ state: "completed" });
+    expect(
+      deriveVisibleContextCompactionStatus(activities, [
+        { role: "user", createdAt: "2026-03-23T00:00:11.000Z" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("detects native and provider-advertised compaction support", () => {
+    expect(providerSupportsManualContextCompaction({ driver: "codex", slashCommands: [] })).toBe(
+      true,
+    );
+    expect(providerSupportsManualContextCompaction({ driver: "grok", slashCommands: [] })).toBe(
+      true,
+    );
+    expect(
+      providerSupportsManualContextCompaction({
+        driver: "claudeAgent",
+        slashCommands: [{ name: "compact" }],
+      }),
+    ).toBe(true);
+    expect(
+      providerSupportsManualContextCompaction({ driver: "claudeAgent", slashCommands: [] }),
+    ).toBe(false);
   });
 });

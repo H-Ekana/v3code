@@ -629,6 +629,7 @@ export function deriveWorkLogEntries(
 ): WorkLogEntry[] {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const entries: DerivedWorkLogEntry[] = [];
+  let pendingContextCompactionIndex: number | null = null;
   for (const activity of ordered) {
     if (activity.kind === "tool.started") continue;
     if (activity.kind === "task.started") continue;
@@ -636,7 +637,31 @@ export function deriveWorkLogEntries(
     if (activity.kind === "agent.snapshot") continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
-    entries.push(toDerivedWorkLogEntry(activity));
+    const entry = toDerivedWorkLogEntry(activity);
+    if (activity.kind === "context-compaction.started") {
+      pendingContextCompactionIndex = entries.length;
+      entries.push(entry);
+      continue;
+    }
+    if (
+      activity.kind === "context-compaction" ||
+      activity.kind === "provider.context.compact.failed"
+    ) {
+      if (pendingContextCompactionIndex !== null) {
+        entries[pendingContextCompactionIndex] = entry;
+        pendingContextCompactionIndex = null;
+        continue;
+      }
+      const previous = entries.at(-1);
+      if (
+        previous?.activityKind === "context-compaction" ||
+        previous?.activityKind === "provider.context.compact.failed"
+      ) {
+        entries[entries.length - 1] = entry;
+        continue;
+      }
+    }
+    entries.push(entry);
   }
   return collapseDerivedWorkLogEntries(entries).map((entry) => {
     const { activityKind, collapseKey: _collapseKey, ...rest } = entry;

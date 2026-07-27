@@ -1576,6 +1576,45 @@ describe("deriveWorkLogEntries context window handling", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]?.label).toBe("Context compacted");
   });
+
+  it("keeps an active context compaction visibly in progress", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "compaction-started",
+        kind: "context-compaction.started",
+        summary: "Compacting context",
+        tone: "info",
+        payload: { status: "inProgress" },
+      }),
+    ]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.label).toBe("Compacting context");
+    expect(entries[0]?.toolLifecycleStatus).toBe("inProgress");
+    expect(entries[0]?.sourceActivityKind).toBe("context-compaction.started");
+  });
+
+  it("replaces the active context compaction row with its terminal result", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "compaction-started",
+        kind: "context-compaction.started",
+        summary: "Compacting context",
+        tone: "info",
+        payload: { status: "inProgress" },
+      }),
+      makeActivity({
+        id: "compaction-completed",
+        kind: "context-compaction",
+        summary: "Context compacted",
+        tone: "info",
+      }),
+    ]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.label).toBe("Context compacted");
+    expect(entries[0]?.sourceActivityKind).toBe("context-compaction");
+  });
 });
 
 describe("isLatestTurnSettled", () => {

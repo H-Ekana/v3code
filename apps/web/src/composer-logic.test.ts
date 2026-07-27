@@ -6,6 +6,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
+  isStandaloneCompactContextCommand,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
   shouldSubmitComposerOnEnter,
@@ -370,5 +371,13 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("isStandaloneCompactContextCommand", () => {
+  it("accepts only a standalone compact command", () => {
+    expect(isStandaloneCompactContextCommand(" /COMPACT ")).toBe(true);
+    expect(isStandaloneCompactContextCommand("/compact explain this")).toBe(false);
+    expect(isStandaloneCompactContextCommand("compact")).toBe(false);
   });
 });

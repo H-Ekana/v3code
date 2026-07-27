@@ -1,4 +1,8 @@
-import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@t3tools/contracts";
+import type {
+  OrchestrationMessage,
+  OrchestrationThreadActivity,
+  ThreadTokenUsageSnapshot,
+} from "@t3tools/contracts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -24,6 +28,71 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly remainingPercentage: number | null;
   readonly updatedAt: string;
 };
+
+export type ContextCompactionStatus = {
+  readonly state: "compacting" | "completed" | "failed";
+  readonly createdAt: string;
+};
+
+export function deriveLatestContextCompactionStatus(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ContextCompactionStatus | null {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index];
+    if (!activity) continue;
+
+    if (activity.kind === "context-compaction.started") {
+      return { state: "compacting", createdAt: activity.createdAt };
+    }
+    if (activity.kind === "context-compaction") {
+      return { state: "completed", createdAt: activity.createdAt };
+    }
+    if (activity.kind === "provider.context.compact.failed") {
+      return { state: "failed", createdAt: activity.createdAt };
+    }
+  }
+  return null;
+}
+
+export function deriveVisibleContextCompactionStatus(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  messages: ReadonlyArray<Pick<OrchestrationMessage, "role" | "createdAt">>,
+): ContextCompactionStatus | null {
+  const status = deriveLatestContextCompactionStatus(activities);
+  if (status?.state !== "completed") {
+    return status;
+  }
+
+  const completedAt = Date.parse(status.createdAt);
+  const hasUserMessageAfterCompletion = messages.some((message) => {
+    if (message.role !== "user") {
+      return false;
+    }
+    const messageCreatedAt = Date.parse(message.createdAt);
+    return Number.isFinite(completedAt) && Number.isFinite(messageCreatedAt)
+      ? messageCreatedAt > completedAt
+      : message.createdAt > status.createdAt;
+  });
+
+  return hasUserMessageAfterCompletion ? null : status;
+}
+
+export function providerSupportsManualContextCompaction(
+  provider:
+    | {
+        readonly driver: string;
+        readonly slashCommands: ReadonlyArray<{ readonly name: string }>;
+      }
+    | null
+    | undefined,
+): boolean {
+  return (
+    provider?.driver === "codex" ||
+    provider?.driver === "grok" ||
+    provider?.slashCommands.some((command) => command.name.trim().toLowerCase() === "compact") ===
+      true
+  );
+}
 
 /** Map a provider driver kind to a user-facing display name. */
 export function formatProviderDisplayName(provider: string | null | undefined): string {

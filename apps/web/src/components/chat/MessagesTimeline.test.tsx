@@ -527,6 +527,34 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Work Log");
   });
 
+  it("renders an active context compaction with a loading icon instead of a check", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-compacting",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-compacting",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Compacting context",
+              tone: "info",
+              toolLifecycleStatus: "inProgress",
+              sourceActivityKind: "context-compaction.started",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Compacting context");
+    expect(markup).toContain("lucide-loader-circle");
+    expect(markup).toContain("animate-spin");
+    expect(markup).not.toContain("lucide-check");
+  });
+
   it("formats changed file paths from the workspace root", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
