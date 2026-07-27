@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  applyManualThreadOrder,
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
+  moveThreadInManualOrder,
   createThreadJumpHintVisibilityController,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
@@ -681,6 +683,60 @@ describe("sortThreadsForSidebarV2", () => {
   });
 });
 
+describe("applyManualThreadOrder", () => {
+  const order = (ids: readonly string[], manualOrder: readonly string[]) =>
+    applyManualThreadOrder({
+      items: ids.map((id) => ({ id })),
+      manualOrder,
+      getKey: (item) => item.id,
+    }).map((item) => item.id);
+
+  it("leaves the natural order alone when nothing has been dragged", () => {
+    expect(order(["a", "b", "c"], [])).toEqual(["a", "b", "c"]);
+  });
+
+  it("applies the dragged order", () => {
+    expect(order(["a", "b", "c"], ["c", "a", "b"])).toEqual(["c", "a", "b"]);
+  });
+
+  it("keeps a brand-new thread on top instead of flushing it to the end", () => {
+    // "new" sorts newest-first into position 0 and has never been dragged.
+    expect(order(["new", "a", "b", "c"], ["c", "a", "b"])).toEqual(["new", "c", "a", "b"]);
+  });
+
+  it("keeps an unarranged thread with the arranged neighbour above it", () => {
+    // "b2" arrived directly under "b", so it travels with "b" to the top.
+    expect(order(["a", "b", "b2", "c"], ["b", "c", "a"])).toEqual(["b", "b2", "c", "a"]);
+  });
+
+  it("ignores dragged keys for threads that are no longer in the list", () => {
+    expect(order(["a", "c"], ["c", "gone", "a"])).toEqual(["c", "a"]);
+  });
+
+  it("falls back to natural order when no listed thread was ever dragged", () => {
+    expect(order(["a", "b"], ["x", "y"])).toEqual(["a", "b"]);
+  });
+});
+
+describe("moveThreadInManualOrder", () => {
+  it("moves a thread down into the target's slot", () => {
+    expect(moveThreadInManualOrder(["a", "b", "c", "d"], "a", "c")).toEqual(["b", "c", "a", "d"]);
+  });
+
+  it("moves a thread up into the target's slot", () => {
+    expect(moveThreadInManualOrder(["a", "b", "c", "d"], "d", "b")).toEqual(["a", "d", "b", "c"]);
+  });
+
+  it("is a no-op when the thread is dropped on itself", () => {
+    expect(moveThreadInManualOrder(["a", "b"], "a", "a")).toEqual(["a", "b"]);
+  });
+
+  it("is a no-op when either key is unknown", () => {
+    expect(moveThreadInManualOrder(["a", "b"], "a", "z")).toEqual(["a", "b"]);
+    expect(moveThreadInManualOrder(["a", "b"], "z", "a")).toEqual(["a", "b"]);
+  });
+});
+
 describe("sortSettledThreadsForSidebarV2", () => {
   const settled = (input: {
     id: string;
@@ -965,7 +1021,7 @@ describe("resolveThreadRowClassName", () => {
 });
 
 describe("resolveSidebarV2RowSurfaceClassName", () => {
-  it("gives completed unseen work a branded perimeter glow", () => {
+  it("keeps completed unseen work on a quiet neutral row surface", () => {
     const className = resolveSidebarV2RowSurfaceClassName({
       isActive: false,
       isSelected: false,
@@ -974,10 +1030,11 @@ describe("resolveSidebarV2RowSurfaceClassName", () => {
       shouldRecede: false,
     });
 
-    expect(className).toContain("ring-astro-highlight/55");
-    expect(className).toContain("var(--primary)_42%");
-    expect(className).toContain("var(--astro-highlight)_12%");
-    expect(className).toContain("shadow-[0_0_8px");
+    expect(className).toContain("bg-transparent");
+    expect(className).toContain("hover:bg-sidebar-row-hover");
+    expect(className).not.toContain("ring-astro-highlight");
+    expect(className).not.toContain("color-mix");
+    expect(className).not.toContain("shadow-[");
     expect(className).toContain("motion-reduce:transition-none");
   });
 
