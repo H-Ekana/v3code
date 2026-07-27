@@ -15,6 +15,7 @@ import {
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
   resolveSidebarStageBadgeLabel,
+  resolveSidebarV2RowSurfaceClassName,
   resolveThreadRowClassName,
   resolveSidebarV2Status,
   resolveThreadStatusPill,
@@ -924,8 +925,11 @@ describe("resolveThreadRowClassName", () => {
     expect(className).toContain("var(--sidebar-row-active)_82%");
     expect(className).toContain("text-sidebar-foreground");
     expect(className).toContain("ring-primary/50");
-    expect(className).toContain("var(--primary)_28%");
-    expect(className).toContain("var(--astro-highlight)_8%");
+    expect(className).toContain("data-[active=true]:ring-primary/50");
+    expect(className).toContain("var(--primary)_14%");
+    expect(className).toContain("var(--astro-highlight)_10%");
+    expect(className).toContain("w-[calc(100%-0.25rem)]");
+    expect(className).not.toContain("shadow-[0_");
     expect(className).not.toContain("inset_2px");
     expect(className).not.toContain("bg-primary");
   });
@@ -943,7 +947,9 @@ describe("resolveThreadRowClassName", () => {
     const className = resolveThreadRowClassName({ isActive: true, isSelected: false });
     expect(className).toContain("var(--sidebar-row-active)_82%");
     expect(className).toContain("ring-primary/50");
-    expect(className).toContain("var(--astro-highlight)_8%");
+    expect(className).toContain("data-[active=true]:ring-primary/50");
+    expect(className).toContain("var(--astro-highlight)_10%");
+    expect(className).not.toContain("shadow-[0_");
   });
 
   it("gives resting rows a quiet violet hover and disables transitions for reduced-motion users", () => {
@@ -952,8 +958,40 @@ describe("resolveThreadRowClassName", () => {
     expect(className).toContain("hover:ring-primary/15");
     expect(className).toContain("duration-200");
     expect(className).not.toContain("hover:translate");
+    expect(className).toContain("w-[calc(100%-0.25rem)]");
     expect(className).not.toContain("inset_2px");
     expect(className).toContain("motion-reduce:transition-none");
+  });
+});
+
+describe("resolveSidebarV2RowSurfaceClassName", () => {
+  it("gives completed unseen work a branded perimeter glow", () => {
+    const className = resolveSidebarV2RowSurfaceClassName({
+      isActive: false,
+      isSelected: false,
+      isUnread: true,
+      isInFlight: false,
+      shouldRecede: false,
+    });
+
+    expect(className).toContain("ring-astro-highlight/55");
+    expect(className).toContain("var(--primary)_42%");
+    expect(className).toContain("var(--astro-highlight)_12%");
+    expect(className).toContain("shadow-[0_0_8px");
+    expect(className).toContain("motion-reduce:transition-none");
+  });
+
+  it("keeps the active-route surface authoritative after unread completion", () => {
+    const className = resolveSidebarV2RowSurfaceClassName({
+      isActive: true,
+      isSelected: false,
+      isUnread: true,
+      isInFlight: false,
+      shouldRecede: false,
+    });
+
+    expect(className).toContain("bg-sidebar-row-active");
+    expect(className).not.toContain("ring-astro-highlight/55");
   });
 });
 

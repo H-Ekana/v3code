@@ -108,6 +108,7 @@ import {
   orderItemsByPreferredIds,
   resolveAdjacentThreadId,
   resolveSettledTimestamp,
+  resolveSidebarV2RowSurfaceClassName,
   resolveSidebarV2Status,
   resolveWorkingStartedAt,
   shouldNavigateAfterProjectRemoval,
@@ -167,6 +168,24 @@ const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> =
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
   return label.endsWith(" ago") ? label.slice(0, -4) : label;
+}
+
+function SidebarCompletionBadge() {
+  return (
+    <span
+      role="status"
+      aria-label="Completed, not yet viewed"
+      className="animate-sidebar-completion-arrive inline-flex h-5 items-center gap-1 rounded-full bg-primary/12 px-1.5 text-xs font-semibold text-primary ring-1 ring-inset ring-astro-highlight/55 shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_45%,transparent),inset_0_0_8px_color-mix(in_srgb,var(--astro-highlight)_14%,transparent)] motion-reduce:animate-none dark:bg-primary/18 dark:text-astro-highlight"
+    >
+      <span
+        aria-hidden
+        className="relative grid size-3.5 place-items-center rounded-full bg-astro-highlight/12 shadow-[0_0_6px_color-mix(in_srgb,var(--astro-highlight)_55%,transparent)]"
+      >
+        <CircleCheckIcon className="size-3.5" />
+      </span>
+      Done
+    </span>
+  );
 }
 
 function threadTimeLabel(thread: SidebarThreadSummary): string {
@@ -422,6 +441,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // flag must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarV2Status(thread);
+  const hasUnreadCompletion = status === "ready" && isUnread;
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so unlike Done, a never-visited woke thread still
@@ -480,7 +500,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                 ? {
                     label: "Done",
                     icon: "done" as const,
-                    className: "text-emerald-700 dark:text-emerald-300",
+                    className: "",
                   }
                 : null;
 
@@ -653,20 +673,13 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // like elevated cards while settled threads were plain rows, leaving neither
   // a useful hierarchy nor a reliable hover cue. Status now lives in the row
   // content; surface is reserved for interaction (hover, multi-select, route).
-  const rowSurfaceClassName = cn(
-    "group/v2-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none",
-    props.isActive
-      ? "bg-sidebar-row-active text-sidebar-foreground"
-      : isSelected
-        ? "bg-sidebar-row-selected text-sidebar-foreground"
-        : shouldRecede
-          ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
-          : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
-    isInFlight &&
-      !props.isActive &&
-      !isSelected &&
-      "opacity-70 transition-opacity hover:opacity-100",
-  );
+  const rowSurfaceClassName = resolveSidebarV2RowSurfaceClassName({
+    isActive: props.isActive,
+    isSelected,
+    isUnread: hasUnreadCompletion,
+    isInFlight,
+    shouldRecede,
+  });
 
   const title = isRenaming ? (
     <input
@@ -743,6 +756,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                 role="button"
                 tabIndex={0}
                 data-testid="sidebar-v2-row-slim"
+                data-unread-completion={hasUnreadCompletion || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
@@ -791,6 +805,8 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                     <AlarmClockIcon aria-hidden className="size-3" />
                     Woke
                   </span>
+                ) : hasUnreadCompletion ? (
+                  <SidebarCompletionBadge />
                 ) : (
                   <span className="text-xs">
                     {variantAction === "unsettle"
@@ -852,6 +868,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
               role="button"
               tabIndex={0}
               data-testid="sidebar-v2-row-card"
+              data-unread-completion={hasUnreadCompletion || undefined}
               className={rowSurfaceClassName}
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}
@@ -886,7 +903,9 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                     snoozeMenuOpen && "opacity-0",
                   )}
                 >
-                  {topStatus ? (
+                  {topStatus?.icon === "done" ? (
+                    <SidebarCompletionBadge />
+                  ) : topStatus ? (
                     <span
                       className={cn(
                         "inline-flex items-center gap-1 font-medium",
@@ -895,8 +914,6 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                     >
                       {topStatus.icon === "working" ? (
                         <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
-                      ) : topStatus.icon === "done" ? (
-                        <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
                       ) : topStatus.icon === "woke" ? (
                         <AlarmClockIcon aria-hidden className="size-4 shrink-0" />
                       ) : null}

@@ -365,32 +365,57 @@ export function resolveThreadRowClassName(input: {
   isSelected: boolean;
 }): string {
   const baseClassName =
-    "h-8 w-full translate-x-0 cursor-pointer justify-start rounded-md px-2 text-left text-sm select-none transition-[background-color,color,box-shadow] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70 focus-visible:shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_38%,transparent)] motion-reduce:transition-none";
+    "mx-0.5 h-8 w-[calc(100%-0.25rem)] translate-x-0 cursor-pointer justify-start rounded-md px-2 text-left text-sm select-none transition-[background-color,color,box-shadow] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70 focus-visible:shadow-[inset_0_0_10px_color-mix(in_srgb,var(--primary)_14%,transparent)] motion-reduce:transition-none";
 
   if (input.isSelected && input.isActive) {
     return cn(
       baseClassName,
-      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/50 shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_28%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/65",
+      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/50 shadow-[inset_0_0_12px_color-mix(in_srgb,var(--primary)_14%,transparent),inset_0_0_4px_color-mix(in_srgb,var(--astro-highlight)_10%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/65 data-[active=true]:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] data-[active=true]:ring-primary/50 data-[active=true]:shadow-[inset_0_0_12px_color-mix(in_srgb,var(--primary)_14%,transparent),inset_0_0_4px_color-mix(in_srgb,var(--astro-highlight)_10%,transparent)] dark:data-[active=true]:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))]",
     );
   }
 
   if (input.isSelected) {
     return cn(
       baseClassName,
-      "bg-[color-mix(in_srgb,var(--sidebar-row-selected)_88%,var(--primary))] text-sidebar-foreground ring-1 ring-inset ring-primary/35 shadow-[inset_0_0_10px_color-mix(in_srgb,var(--primary)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/50 hover:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_22%,transparent),inset_0_0_10px_color-mix(in_srgb,var(--astro-highlight)_7%,transparent)]",
+      "bg-[color-mix(in_srgb,var(--sidebar-row-selected)_88%,var(--primary))] text-sidebar-foreground ring-1 ring-inset ring-primary/35 shadow-[inset_0_0_10px_color-mix(in_srgb,var(--primary)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/50 hover:shadow-[inset_0_0_10px_color-mix(in_srgb,var(--primary)_12%,transparent),inset_0_0_4px_color-mix(in_srgb,var(--astro-highlight)_8%,transparent)]",
     );
   }
 
   if (input.isActive) {
     return cn(
       baseClassName,
-      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/50 shadow-[0_0_10px_color-mix(in_srgb,var(--primary)_28%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/65",
+      "bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] text-sidebar-foreground font-medium ring-1 ring-inset ring-primary/50 shadow-[inset_0_0_12px_color-mix(in_srgb,var(--primary)_14%,transparent),inset_0_0_4px_color-mix(in_srgb,var(--astro-highlight)_10%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:text-sidebar-foreground hover:ring-primary/65 data-[active=true]:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))] data-[active=true]:ring-primary/50 data-[active=true]:shadow-[inset_0_0_12px_color-mix(in_srgb,var(--primary)_14%,transparent),inset_0_0_4px_color-mix(in_srgb,var(--astro-highlight)_10%,transparent)] dark:data-[active=true]:bg-[color-mix(in_srgb,var(--sidebar-row-active)_82%,var(--primary))]",
     );
   }
 
   return cn(
     baseClassName,
     "text-sidebar-muted-foreground/80 hover:bg-[color-mix(in_srgb,var(--sidebar-row-hover)_92%,var(--primary))] hover:text-sidebar-foreground hover:ring-1 hover:ring-inset hover:ring-primary/15",
+  );
+}
+
+export function resolveSidebarV2RowSurfaceClassName(input: {
+  isActive: boolean;
+  isSelected: boolean;
+  isUnread: boolean;
+  isInFlight: boolean;
+  shouldRecede: boolean;
+}): string {
+  const baseClassName =
+    "group/v2-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none transition-[background-color,color,box-shadow,opacity] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70 motion-reduce:transition-none";
+
+  return cn(
+    baseClassName,
+    input.isActive
+      ? "bg-sidebar-row-active text-sidebar-foreground"
+      : input.isSelected
+        ? "bg-sidebar-row-selected text-sidebar-foreground"
+        : input.isUnread
+          ? "z-10 bg-[color-mix(in_srgb,var(--sidebar-row-active)_84%,var(--primary))] text-sidebar-foreground ring-1 ring-inset ring-astro-highlight/55 shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_42%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_12%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:ring-astro-highlight/70"
+          : input.shouldRecede
+            ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+            : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+    input.isInFlight && !input.isActive && !input.isSelected && "opacity-70 hover:opacity-100",
   );
 }
 
