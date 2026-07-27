@@ -1,8 +1,74 @@
 export const DRAFT_HERO_TRANSITION_ANIMATION_ID = "t3-draft-hero-transition";
-export const DRAFT_HERO_TRANSITION_DURATION_MS = 180;
-export const DRAFT_HERO_TRANSITION_EASING = "cubic-bezier(0.4, 0, 0.2, 1)";
+export const DRAFT_HERO_TRANSITION_DURATION_MS = 560;
+export const DRAFT_HERO_TRANSITION_EASING = "cubic-bezier(0.16, 1, 0.3, 1)";
+export const DRAFT_HERO_SEND_TO_DOCK_DELAY_MS = 240;
 export const MOBILE_COMPOSER_VIEW_TRANSITION_NAME = "t3-mobile-composer";
 export const MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME = "t3-mobile-draft-headline";
+
+export interface DraftHeroTransitionOffset {
+  readonly x: number;
+  readonly y: number;
+}
+
+export function resolveDraftHeroSendToDockDelay(prefersReducedMotion: boolean): number {
+  return prefersReducedMotion ? 0 : DRAFT_HERO_SEND_TO_DOCK_DELAY_MS;
+}
+
+export function resolveDraftHeroTransitionOffset(
+  previousRect: Pick<DOMRect, "left" | "top">,
+  nextRect: Pick<DOMRect, "left" | "top">,
+): DraftHeroTransitionOffset | null {
+  const offset = {
+    x: previousRect.left - nextRect.left,
+    y: previousRect.top - nextRect.top,
+  };
+  return Math.abs(offset.x) >= 0.5 || Math.abs(offset.y) >= 0.5 ? offset : null;
+}
+
+export function buildDraftHeroSwoopKeyframes({ x, y }: DraftHeroTransitionOffset): Keyframe[] {
+  return [
+    {
+      opacity: 0.98,
+      transform: `translate3d(${x}px, ${y}px, 0)`,
+      offset: 0,
+    },
+    {
+      opacity: 1,
+      transform: `translate3d(${x * 0.06}px, ${y * 0.1}px, 0)`,
+      offset: 0.72,
+    },
+    {
+      opacity: 1,
+      transform: "translate3d(0, 0, 0)",
+      offset: 1,
+    },
+  ];
+}
+
+export const DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES: Keyframe[] = [
+  {
+    filter: "brightness(1) saturate(1) drop-shadow(0 0 0 transparent)",
+    transform: "scale(1)",
+    offset: 0,
+  },
+  {
+    filter:
+      "brightness(1.02) saturate(1.04) drop-shadow(0 0 2px color-mix(in srgb, var(--primary) 14%, transparent))",
+    transform: "scale(0.996)",
+    offset: 0.68,
+  },
+  {
+    filter:
+      "brightness(1.09) saturate(1.14) drop-shadow(0 0 7px color-mix(in srgb, var(--primary) 36%, transparent))",
+    transform: "scale(1.006)",
+    offset: 0.88,
+  },
+  {
+    filter: "brightness(1) saturate(1) drop-shadow(0 0 0 transparent)",
+    transform: "scale(1)",
+    offset: 1,
+  },
+];
 
 type ComposerViewTransition = {
   readonly finished: Promise<void>;

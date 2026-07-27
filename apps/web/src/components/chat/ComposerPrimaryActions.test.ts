@@ -13,6 +13,7 @@ vi.mock("../SidebarStageBackdrop", async (importOriginal) => {
 });
 
 import {
+  COMPOSER_SEND_CELEBRATION_DURATION_MS,
   ComposerPrimaryActions,
   formatPendingPrimaryActionLabel,
   shouldShowComposerSendSpinner,
@@ -156,5 +157,32 @@ describe("composer send button", () => {
         isSendArrowAnimating: false,
       }),
     ).toBe(true);
+  });
+
+  it("renders the same controlled celebration for every accepted send entry point", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ComposerPrimaryActions, {
+        compact: false,
+        pendingAction: null,
+        isRunning: false,
+        showPlanFollowUpPrompt: false,
+        promptHasText: true,
+        isSendBusy: true,
+        isConnecting: false,
+        isEnvironmentUnavailable: false,
+        isPreparingWorktree: false,
+        hasSendableContent: true,
+        isSendCelebrating: true,
+        onPreviousPendingQuestion: vi.fn(),
+        onInterrupt: vi.fn(),
+        onImplementPlanInNewThread: vi.fn(),
+        onSendCelebrationEnd: vi.fn(),
+      }),
+    );
+
+    expect(COMPOSER_SEND_CELEBRATION_DURATION_MS).toBe(480);
+    expect(markup).toContain("composer-send-button--sending");
+    expect(markup).toContain("composer-send-arrow--sending");
+    expect(markup).not.toContain('aria-label="Loading"');
   });
 });

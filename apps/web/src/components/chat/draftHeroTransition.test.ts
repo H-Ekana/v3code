@@ -1,13 +1,76 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  buildDraftHeroSwoopKeyframes,
+  DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES,
+  DRAFT_HERO_SEND_TO_DOCK_DELAY_MS,
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
+  DRAFT_HERO_TRANSITION_DURATION_MS,
+  DRAFT_HERO_TRANSITION_EASING,
+  resolveDraftHeroTransitionOffset,
+  resolveDraftHeroSendToDockDelay,
   runMobileComposerTransition,
   waitForDraftHeroTransition,
 } from "./draftHeroTransition";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("draft hero swoop motion", () => {
+  it("lets the send launch lead the dock transition unless motion is reduced", () => {
+    expect(resolveDraftHeroSendToDockDelay(false)).toBe(DRAFT_HERO_SEND_TO_DOCK_DELAY_MS);
+    expect(resolveDraftHeroSendToDockDelay(true)).toBe(0);
+  });
+
+  it("derives the FLIP offset and ignores subpixel-only movement", () => {
+    expect(
+      resolveDraftHeroTransitionOffset({ left: 100, top: 240 }, { left: 100, top: 620 }),
+    ).toEqual({ x: 0, y: -380 });
+    expect(
+      resolveDraftHeroTransitionOffset({ left: 100, top: 240 }, { left: 100.25, top: 240.25 }),
+    ).toBeNull();
+  });
+
+  it("lands through a short deceleration segment with the product motion curve", () => {
+    const keyframes = buildDraftHeroSwoopKeyframes({ x: 0, y: -400 });
+
+    expect(keyframes).toEqual([
+      {
+        opacity: 0.98,
+        transform: "translate3d(0px, -400px, 0)",
+        offset: 0,
+      },
+      {
+        opacity: 1,
+        transform: "translate3d(0px, -40px, 0)",
+        offset: 0.72,
+      },
+      {
+        opacity: 1,
+        transform: "translate3d(0, 0, 0)",
+        offset: 1,
+      },
+    ]);
+    expect(DRAFT_HERO_TRANSITION_DURATION_MS).toBeLessThanOrEqual(800);
+    expect(DRAFT_HERO_TRANSITION_EASING).toBe("cubic-bezier(0.16, 1, 0.3, 1)");
+  });
+
+  it("reserves the brightest accent for the landing celebration", () => {
+    expect(DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES[0]).toMatchObject({
+      transform: "scale(1)",
+      offset: 0,
+    });
+    expect(DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES[2]).toMatchObject({
+      transform: "scale(1.006)",
+      offset: 0.88,
+    });
+    expect(DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES[2]?.filter).toContain("brightness(1.09)");
+    expect(DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES.at(-1)).toMatchObject({
+      transform: "scale(1)",
+      offset: 1,
+    });
+  });
 });
 
 describe("waitForDraftHeroTransition", () => {

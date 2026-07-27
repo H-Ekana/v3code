@@ -41,6 +41,7 @@ import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { nextTerminalId, resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
+import { isV3DemoResponderTarget } from "@t3tools/shared/v3Demo";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -71,6 +72,7 @@ import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
+  isStandaloneCompactContextCommand,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -236,11 +238,15 @@ import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { resolveThreadPr } from "./ThreadStatusIndicators";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import {
+  buildDraftHeroSwoopKeyframes,
+  DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES,
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
   DRAFT_HERO_TRANSITION_EASING,
   MOBILE_COMPOSER_VIEW_TRANSITION_NAME,
   MOBILE_DRAFT_HEADLINE_VIEW_TRANSITION_NAME,
+  resolveDraftHeroSendToDockDelay,
+  resolveDraftHeroTransitionOffset,
   runMobileComposerTransition,
 } from "./chat/draftHeroTransition";
 import {
@@ -310,7 +316,7 @@ function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
   const previousStateRef = useRef(isDraftHeroState);
   const previousComposerRectRef = useRef<DOMRect | null>(null);
-  const animationRef = useRef<Animation | null>(null);
+  const animationsRef = useRef<Animation[]>([]);
   const attachTransitionGroupRef = (element: HTMLDivElement | null) => {
     transitionGroupRef.current = element;
   };
@@ -332,42 +338,49 @@ function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
       typeof document !== "undefined" &&
       document.documentElement.dataset.mobileComposerRouteTransition === "true";
 
-    animationRef.current?.cancel();
-    animationRef.current = null;
+    for (const animation of animationsRef.current) {
+      animation.cancel();
+    }
+    animationsRef.current = [];
 
     const previousComposerRect = previousComposerRectRef.current;
+    const composerAnchor = composerAnchorRef.current;
     if (
       stateChanged &&
       !prefersReducedMotion &&
       !mobileComposerTransitionActive &&
       transitionGroup &&
+      composerAnchor &&
       previousComposerRect &&
       nextComposerRect &&
-      typeof transitionGroup.animate === "function"
+      typeof transitionGroup.animate === "function" &&
+      typeof composerAnchor.animate === "function"
     ) {
-      const translateX = previousComposerRect.left - nextComposerRect.left;
-      const translateY = previousComposerRect.top - nextComposerRect.top;
-      if (Math.abs(translateX) >= 0.5 || Math.abs(translateY) >= 0.5) {
-        const animation = transitionGroup.animate(
-          [
-            { transform: `translate3d(${translateX}px, ${translateY}px, 0)` },
-            { transform: "translate3d(0, 0, 0)" },
-          ],
-          {
-            duration: DRAFT_HERO_TRANSITION_DURATION_MS,
-            easing: DRAFT_HERO_TRANSITION_EASING,
-          },
-        );
-        animation.id = DRAFT_HERO_TRANSITION_ANIMATION_ID;
-        animationRef.current = animation;
-        void animation.finished
-          .catch(() => undefined)
-          .then(() => {
-            if (animationRef.current !== animation) {
-              return;
-            }
-            animationRef.current = null;
-          });
+      const offset = resolveDraftHeroTransitionOffset(previousComposerRect, nextComposerRect);
+      if (offset) {
+        const animationOptions = {
+          duration: DRAFT_HERO_TRANSITION_DURATION_MS,
+          easing: DRAFT_HERO_TRANSITION_EASING,
+        };
+        const animations = [
+          transitionGroup.animate(buildDraftHeroSwoopKeyframes(offset), animationOptions),
+          composerAnchor.animate(DRAFT_HERO_COMPOSER_ACCENT_KEYFRAMES, animationOptions),
+        ];
+        for (const animation of animations) {
+          animation.id = DRAFT_HERO_TRANSITION_ANIMATION_ID;
+        }
+        animationsRef.current = animations;
+        void Promise.all(
+          animations.map((animation) => animation.finished.catch(() => undefined)),
+        ).then(() => {
+          if (
+            animationsRef.current.length !== animations.length ||
+            animationsRef.current.some((animation, index) => animation !== animations[index])
+          ) {
+            return;
+          }
+          animationsRef.current = [];
+        });
       }
     }
 
@@ -1156,6 +1169,9 @@ function ChatViewContent(props: ChatViewProps) {
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
+  const compactThreadContext = useAtomCommand(threadEnvironment.compactContext, {
+    reportFailure: false,
+  });
   const respondToThreadApproval = useAtomCommand(threadEnvironment.respondToApproval, {
     reportFailure: false,
   });
@@ -1560,6 +1576,11 @@ function ChatViewContent(props: ChatViewProps) {
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
     : null;
   const activeProject = useProject(activeProjectRef);
+  const v3DemoResponderEnabled = isV3DemoResponderTarget({
+    enabled: import.meta.env.VITE_V3_DEMO_AGENT_SIDEBAR === "1",
+    projectId: activeProject?.id,
+    threadId: routeKind === "server" ? activeThread?.id : null,
+  });
   const activeEnvironmentShell = useEnvironmentQuery(
     activeThread ? environmentShell.stateAtom(activeThread.environmentId) : null,
   );
@@ -1802,11 +1823,13 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread?.modelSelection.instanceId ??
     activeProject?.defaultModelSelection?.instanceId ??
     null;
-  const lockedProvider = deriveLockedProvider({
-    thread: activeThread,
-    selectedProvider: selectedProviderByThreadId,
-    threadProvider,
-  });
+  const lockedProvider = v3DemoResponderEnabled
+    ? null
+    : deriveLockedProvider({
+        thread: activeThread,
+        selectedProvider: selectedProviderByThreadId,
+        threadProvider,
+      });
   // Once a thread selects an environment, never substitute the primary
   // environment's config while the selected environment is still loading.
   const serverConfig = activeThread
@@ -2280,10 +2303,26 @@ function ChatViewContent(props: ChatViewProps) {
     [activeThread?.proposedPlans, timelineMessages, workLogEntries],
   );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
+  const [draftHeroSendSequenceThreadKey, setDraftHeroSendSequenceThreadKey] = useState<
+    string | null
+  >(null);
+  const draftHeroSendToDockTimeoutRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (draftHeroSendToDockTimeoutRef.current !== null) {
+        window.clearTimeout(draftHeroSendToDockTimeoutRef.current);
+      }
+    },
+    [],
+  );
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
+  const draftHeroSendSequenceActive =
+    activeThreadKey !== null && draftHeroSendSequenceThreadKey === activeThreadKey;
   const isDraftHeroState =
-    isLocalDraftThread && timelineEntries.length === 0 && !isWorking && !draftHeroDockRequested;
+    isLocalDraftThread &&
+    !draftHeroDockRequested &&
+    (draftHeroSendSequenceActive || (timelineEntries.length === 0 && !isWorking));
   const [
     attachDraftHeroTransitionGroupRef,
     attachDraftHeroComposerAnchorRef,
@@ -4483,6 +4522,43 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  const onCompactContext = useCallback(async (): Promise<boolean> => {
+    if (
+      !activeThread ||
+      !activeThread.session ||
+      isSendBusy ||
+      isConnecting ||
+      activeEnvironmentUnavailable ||
+      phase === "running"
+    ) {
+      return false;
+    }
+    const result = await compactThreadContext({
+      environmentId,
+      input: {
+        threadId: activeThread.id,
+      },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setThreadError(
+        activeThread.id,
+        error instanceof Error ? error.message : "Failed to compact the context window.",
+      );
+      return false;
+    }
+    return result._tag === "Success";
+  }, [
+    activeEnvironmentUnavailable,
+    activeThread,
+    compactThreadContext,
+    environmentId,
+    isConnecting,
+    isSendBusy,
+    phase,
+    setThreadError,
+  ]);
+
   const onSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
     if (
@@ -4548,6 +4624,23 @@ function ChatViewContent(props: ChatViewProps) {
       composerReviewComments.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
+    const isStandaloneCompactCommand =
+      ctxSelectedProvider === "codex" &&
+      isStandaloneCompactContextCommand(trimmed) &&
+      composerImages.length === 0 &&
+      sendableComposerTerminalContexts.length === 0 &&
+      composerElementContexts.length === 0 &&
+      composerPreviewAnnotations.length === 0 &&
+      composerReviewComments.length === 0;
+    if (isStandaloneCompactCommand) {
+      const compacted = await onCompactContext();
+      if (compacted) {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      }
+      return;
+    }
     if (standaloneSlashCommand) {
       handleInteractionModeChange(standaloneSlashCommand);
       promptRef.current = "";
@@ -4597,21 +4690,33 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
 
+    composerRef.current?.triggerSendCelebration();
     sendInFlightRef.current = true;
     if (isDraftHeroState && activeThreadKey) {
-      let resolveDockStarted: (() => void) | undefined;
-      const dockStarted = new Promise<void>((resolve) => {
-        resolveDockStarted = resolve;
-      });
-      const dockTransition = runMobileComposerTransition(() => {
+      captureDraftHeroComposerRect();
+      setDraftHeroSendSequenceThreadKey(activeThreadKey);
+      if (draftHeroSendToDockTimeoutRef.current !== null) {
+        window.clearTimeout(draftHeroSendToDockTimeoutRef.current);
+      }
+      const commitDock = () => {
         flushSync(() => {
-          captureDraftHeroComposerRect();
           setDockedDraftHeroThreadKey(activeThreadKey);
+          setDraftHeroSendSequenceThreadKey(null);
         });
-        resolveDockStarted?.();
-      });
-      void dockTransition.catch(() => resolveDockStarted?.());
-      await dockStarted;
+      };
+      const startDockTransition = () => {
+        draftHeroSendToDockTimeoutRef.current = null;
+        const dockTransition = runMobileComposerTransition(commitDock);
+        void dockTransition.catch(commitDock);
+      };
+      const dockDelayMs = resolveDraftHeroSendToDockDelay(
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
+      );
+      if (dockDelayMs === 0) {
+        startDockTransition();
+      } else {
+        draftHeroSendToDockTimeoutRef.current = window.setTimeout(startDockTransition, dockDelayMs);
+      }
     }
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
@@ -5831,6 +5936,7 @@ function ChatViewContent(props: ChatViewProps) {
                     }
                   >
                     <div
+                      data-startup-composer-target=""
                       className={cn(
                         "chat-composer-glass-shell relative mx-auto w-full max-w-3xl",
                         showComposerContextStrip && "chat-composer-glass-shell-with-context",
@@ -5876,6 +5982,7 @@ function ChatViewContent(props: ChatViewProps) {
                             interactionMode={interactionMode}
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}
+                            v3DemoResponderEnabled={v3DemoResponderEnabled}
                             activeProjectDefaultModelSelection={
                               activeProject?.defaultModelSelection
                             }
@@ -5892,6 +5999,7 @@ function ChatViewContent(props: ChatViewProps) {
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
                             onInterrupt={onInterrupt}
+                            onCompactContext={onCompactContext}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}
                             onSelectActivePendingUserInputOption={

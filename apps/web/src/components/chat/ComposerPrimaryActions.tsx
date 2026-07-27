@@ -1,4 +1,4 @@
-import { memo, useState, type PointerEventHandler } from "react";
+import { memo, type PointerEventHandler } from "react";
 import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
@@ -25,11 +25,15 @@ interface ComposerPrimaryActionsProps {
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
+  isSendCelebrating?: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
+  onSendCelebrationEnd?: () => void;
 }
+
+export const COMPOSER_SEND_CELEBRATION_DURATION_MS = 480;
 
 export const formatPendingPrimaryActionLabel = (input: {
   compact: boolean;
@@ -70,12 +74,13 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isEnvironmentUnavailable,
   isPreparingWorktree,
   hasSendableContent,
+  isSendCelebrating = false,
   preserveComposerFocusOnPointerDown = false,
   onPreviousPendingQuestion,
   onInterrupt,
   onImplementPlanInNewThread,
+  onSendCelebrationEnd,
 }: ComposerPrimaryActionsProps) {
-  const [isSendArrowAnimating, setIsSendArrowAnimating] = useState(false);
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
@@ -207,7 +212,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       type="submit"
       className={cn(
         "relative isolate flex h-9 w-9 items-center justify-center overflow-visible rounded-full text-primary-foreground shadow-xs transition-all duration-200 enabled:cursor-pointer enabled:inset-shadow-[0_1px_--theme(--color-white/16%)] hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none disabled:pointer-events-none disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8",
-        isSendArrowAnimating && "composer-send-button--sending",
+        isSendCelebrating && "composer-send-button--sending",
         stageBackdropVariant === "nightly"
           ? "composer-send-button--nightly bg-[#2a245d] text-white enabled:shadow-[0_3px_8px_rgba(93,58,151,0.3)]"
           : stageBackdropVariant === "dev"
@@ -215,7 +220,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             : "bg-primary/90 enabled:shadow-primary/24 hover:bg-primary",
       )}
       {...pointerFocusProps}
-      onClick={() => setIsSendArrowAnimating(true)}
       disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
       aria-label={
         isEnvironmentUnavailable
@@ -243,18 +247,15 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       {shouldShowComposerSendSpinner({
         isConnecting,
         isSendBusy,
-        isSendArrowAnimating,
+        isSendArrowAnimating: isSendCelebrating,
       }) ? (
         <Spinner className="size-3.5" aria-hidden="true" />
       ) : (
         <span
-          className={cn(
-            "composer-send-arrow",
-            isSendArrowAnimating && "composer-send-arrow--sending",
-          )}
+          className={cn("composer-send-arrow", isSendCelebrating && "composer-send-arrow--sending")}
           onAnimationEnd={(event) => {
             if (event.animationName === "composer-send-arrow-launch") {
-              setIsSendArrowAnimating(false);
+              onSendCelebrationEnd?.();
             }
           }}
         >

@@ -23,6 +23,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "../ui/menu";
+import { DraftHeroProjectNameAccent } from "./DraftHeroProjectNameAccent";
 
 interface DraftHeroHeadlineProps {
   readonly activeProjectRef: ScopedProjectRef | null;
@@ -101,9 +102,11 @@ export function DraftHeroHeadline({
     <Menu>
       <MenuTrigger
         aria-label={hasResolvedProject ? "Change project" : "Choose a project"}
-        className="pointer-events-auto inline cursor-pointer border-current border-b border-dotted text-foreground underline-offset-8 transition-opacity hover:opacity-75 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        className="pointer-events-auto inline cursor-pointer text-foreground transition-[color,filter] duration-200 hover:text-foreground/90 hover:brightness-110 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
       >
-        {activeProjectDisplayName ?? "Choose a project"}
+        <DraftHeroProjectNameAccent>
+          {activeProjectDisplayName ?? "Choose a project"}
+        </DraftHeroProjectNameAccent>
       </MenuTrigger>
       <MenuPopup align="center" className="max-h-80 w-64 overflow-y-auto">
         <MenuRadioGroup
@@ -138,9 +141,11 @@ export function DraftHeroHeadline({
     <button
       type="button"
       onClick={openAddProject}
-      className="pointer-events-auto inline cursor-pointer border-current border-b border-dotted text-muted-foreground/60 underline-offset-8 transition-opacity hover:opacity-75 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      className="pointer-events-auto inline cursor-pointer text-muted-foreground/70 transition-[color,filter] duration-200 hover:text-foreground/80 hover:brightness-110 focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
     >
-      {activeProjectTitle ?? "Add a project"}
+      <DraftHeroProjectNameAccent>
+        {activeProjectTitle ?? "Add a project"}
+      </DraftHeroProjectNameAccent>
     </button>
   );
 
