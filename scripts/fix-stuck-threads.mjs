@@ -16,10 +16,10 @@
  *   node scripts/fix-stuck-threads.mjs --apply   # back up the DB, then fix
  *   node scripts/fix-stuck-threads.mjs --apply --db "C:/path/to/state.sqlite"
  */
-import { DatabaseSync } from "node:sqlite";
-import { copyFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 const args = process.argv.slice(2);
 const apply = args.includes("--apply");
@@ -27,9 +27,9 @@ const dbFlag = args.indexOf("--db");
 const dbPath =
   dbFlag !== -1 && args[dbFlag + 1]
     ? args[dbFlag + 1]
-    : join(homedir(), ".t3", "userdata", "state.sqlite");
+    : NodePath.join(NodeOS.homedir(), ".t3", "userdata", "state.sqlite");
 
-if (!existsSync(dbPath)) {
+if (!NodeFS.existsSync(dbPath)) {
   console.error(`No database at ${dbPath}\nPass --db <path> if yours lives elsewhere.`);
   process.exit(1);
 }
@@ -37,7 +37,7 @@ if (!existsSync(dbPath)) {
 // A turn is settled if it reached a terminal state or recorded a completion.
 const TERMINAL_TURN_STATES = new Set(["completed", "interrupted", "error"]);
 
-const db = new DatabaseSync(dbPath);
+const db = new NodeSqlite.DatabaseSync(dbPath);
 
 const candidates = db
   .prepare(
@@ -82,7 +82,7 @@ if (!apply) {
 }
 
 const backup = `${dbPath}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-copyFileSync(dbPath, backup);
+NodeFS.copyFileSync(dbPath, backup);
 console.log(`\nBacked up to:\n  ${backup}`);
 
 const clearSession = db.prepare(

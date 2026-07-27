@@ -22,11 +22,11 @@
  * re-emit its own in-memory roster over anything written underneath it.
  */
 
-import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "stopped"]);
 const args = process.argv.slice(2);
@@ -58,7 +58,7 @@ if (apply && NodeFS.existsSync(wal) && NodeFS.statSync(wal).size > 0) {
   if (!args.includes("--force")) process.exit(1);
 }
 
-const db = new DatabaseSync(dbPath);
+const db = new NodeSqlite.DatabaseSync(dbPath);
 // A live app holds the write lock in short bursts. Without a busy timeout the
 // first contended INSERT fails outright; with one, we wait for a gap instead.
 db.exec("PRAGMA busy_timeout = 10000");
@@ -141,7 +141,7 @@ for (const { thread_id: threadId } of threads) {
     threadId,
     turnId: row.turn_id,
     tone: row.tone ?? "info",
-    activityId: `${randomUUID()}:agent-snapshot:${randomUUID()}`,
+    activityId: `${NodeCrypto.randomUUID()}:agent-snapshot:${NodeCrypto.randomUUID()}`,
     summary: `${active} agent${active === 1 ? "" : "s"} active`,
     payload: {
       ...payload,

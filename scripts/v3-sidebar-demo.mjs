@@ -1,6 +1,6 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import * as Effect from "effect/Effect";
 import { V3_DEMO_PROJECT_ID, V3_DEMO_THREAD_ID } from "@t3tools/shared/v3Demo";
@@ -322,9 +322,9 @@ function seedDemoDatabase(database, workspaceRoot, now) {
 }
 
 export async function prepareV3SidebarDemo(workspaceRoot, dataHome) {
-  const userdata = join(dataHome, "userdata");
-  const databasePath = join(userdata, "state.sqlite");
-  mkdirSync(userdata, { recursive: true });
+  const userdata = NodePath.join(dataHome, "userdata");
+  const databasePath = NodePath.join(userdata, "state.sqlite");
+  NodeFS.mkdirSync(userdata, { recursive: true });
 
   await Effect.runPromise(
     runMigrations().pipe(
@@ -333,7 +333,7 @@ export async function prepareV3SidebarDemo(workspaceRoot, dataHome) {
     ),
   );
 
-  const database = new DatabaseSync(databasePath);
+  const database = new NodeSqlite.DatabaseSync(databasePath);
   try {
     resetDemoDatabase(database);
     seedDemoDatabase(database, workspaceRoot, new Date());

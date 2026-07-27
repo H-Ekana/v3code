@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 
 import { V3_DEMO_RESPONDER_ENV } from "@t3tools/shared/v3Demo";
 import { prepareV3SidebarDemo } from "./v3-sidebar-demo.mjs";
 
 function isV3Workspace(directory) {
-  const desktopPackagePath = join(directory, "apps", "desktop", "package.json");
-  if (!existsSync(desktopPackagePath)) return false;
+  const desktopPackagePath = NodePath.join(directory, "apps", "desktop", "package.json");
+  if (!NodeFS.existsSync(desktopPackagePath)) return false;
 
   try {
-    const desktopPackage = JSON.parse(readFileSync(desktopPackagePath, "utf8"));
+    const desktopPackage = JSON.parse(NodeFS.readFileSync(desktopPackagePath, "utf8"));
     return desktopPackage.productName === "V3 Code";
   } catch {
     return false;
@@ -20,7 +20,7 @@ function isV3Workspace(directory) {
 }
 
 export function resolveV3WorkspaceRoot(invocationRoot) {
-  const currentRoot = resolve(invocationRoot);
+  const currentRoot = NodePath.resolve(invocationRoot);
   if (isV3Workspace(currentRoot)) return currentRoot;
 
   throw new Error(
@@ -36,6 +36,7 @@ export function resolveV3WorkspaceRoot(invocationRoot) {
  * works and a direct `node scripts/v3-electron-dev.mjs` fails with
  * `spawn vp ENOENT`. Injecting it here makes both entry points behave the same.
  */
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev launcher has no Effect runtime.
 export function withWorkspaceBinOnPath(environment, binDirectory, platform = process.platform) {
   const delimiter = platform === "win32" ? ";" : ":";
   // Windows environments surface PATH under arbitrary casing (Path, PATH).
@@ -61,23 +62,27 @@ export function createV3ElectronDevLaunch(
   // Real-data mode reads a snapshot of the installed app's threads; the default
   // demo home is reseeded on every launch and would hide them.
   const useRealData = options.homeDir !== undefined;
-  const dataHome = options.homeDir ?? join(workspaceRoot, ".t3", "sidebar-preview");
-  const appData = join(
+  const dataHome = options.homeDir ?? NodePath.join(workspaceRoot, ".t3", "sidebar-preview");
+  const appData = NodePath.join(
     workspaceRoot,
     ".t3",
     useRealData ? "v3-electron-dev-appdata-real" : "v3-electron-dev-appdata",
   );
-  const binDirectory = join(workspaceRoot, "node_modules", ".bin");
-  const vpExecutable = join(binDirectory, process.platform === "win32" ? "vp.CMD" : "vp");
+  const binDirectory = NodePath.join(workspaceRoot, "node_modules", ".bin");
+  const vpExecutable = NodePath.join(
+    binDirectory,
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev launcher has no Effect runtime.
+    process.platform === "win32" ? "vp.CMD" : "vp",
+  );
 
-  if (!existsSync(vpExecutable)) {
+  if (!NodeFS.existsSync(vpExecutable)) {
     throw new Error(
       `Dependencies are missing in ${workspaceRoot}. Install them in that worktree before launching V3 Code.`,
     );
   }
 
-  mkdirSync(dataHome, { recursive: true });
-  mkdirSync(appData, { recursive: true });
+  NodeFS.mkdirSync(dataHome, { recursive: true });
+  NodeFS.mkdirSync(appData, { recursive: true });
 
   // Redirecting APPDATA sandboxes Electron's userData, but it also moves every
   // Windows CLI that stores credentials under it. `gh` reads its hosts.yml from
@@ -90,10 +95,10 @@ export function createV3ElectronDevLaunch(
       ? {
           ...(baseEnvironment.GH_CONFIG_DIR
             ? {}
-            : { GH_CONFIG_DIR: join(realAppData, "GitHub CLI") }),
+            : { GH_CONFIG_DIR: NodePath.join(realAppData, "GitHub CLI") }),
           ...(baseEnvironment.GLAB_CONFIG_DIR
             ? {}
-            : { GLAB_CONFIG_DIR: join(realAppData, "glab-cli") }),
+            : { GLAB_CONFIG_DIR: NodePath.join(realAppData, "glab-cli") }),
         }
       : {};
 
@@ -142,6 +147,7 @@ export function createV3ElectronDevLaunch(
     dataHome,
     appData,
     useRealData,
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev launcher has no Effect runtime.
     command: process.platform === "win32" ? "node.exe" : "node",
     args: ["scripts/dev-runner.ts", "dev:desktop", "--home-dir", dataHome],
     environment,
@@ -196,7 +202,7 @@ async function main() {
     );
   }
 
-  const child = spawn(launch.command, launch.args, {
+  const child = NodeChildProcess.spawn(launch.command, launch.args, {
     cwd: launch.workspaceRoot,
     env: launch.environment,
     stdio: "inherit",
@@ -220,6 +226,8 @@ async function main() {
   process.exitCode = exitCode;
 }
 
-if (basename(process.argv[1] ?? "") === basename(new URL(import.meta.url).pathname)) {
+if (
+  NodePath.basename(process.argv[1] ?? "") === NodePath.basename(new URL(import.meta.url).pathname)
+) {
   await main();
 }

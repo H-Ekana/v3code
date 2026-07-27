@@ -29,8 +29,11 @@ const LEGACY_BASELINE = new Map<string, number>([
   ["apps/server/src/orchestration/Layers/CheckpointReactor.test.ts", 42],
   ["apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts", 5],
   ["apps/server/src/orchestration/Layers/OrchestrationReactor.test.ts", 4],
-  ["apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts", 70],
-  ["apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts", 31],
+  // V3 fork: raised from upstream's 70/31 by the provider-native manual context
+  // compaction tests (fb96602c2), which follow the same manual-runner style as the
+  // surrounding suites. Convert these files to `it.effect` to ratchet back down.
+  ["apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts", 76],
+  ["apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts", 32],
   ["apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts", 2],
   ["apps/server/src/orchestration/projector.test.ts", 20],
   ["apps/server/src/project/Layers/ProjectSetupScriptRunner.test.ts", 4],

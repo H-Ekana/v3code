@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { createRequire } from "node:module";
-import { performance } from "node:perf_hooks";
-import { pathToFileURL } from "node:url";
+import * as NodeModule from "node:module";
+import * as NodePerfHooks from "node:perf_hooks";
+import * as NodeURL from "node:url";
 
 import { remarkNormalizeListItemIndentation } from "../apps/web/src/markdown-list-indentation.ts";
 
@@ -28,10 +28,12 @@ if (UNKNOWN_ARGS.length > 0) {
 
 // Resolve the exact dependency instances used by apps/web even though this
 // standalone script lives outside that package.
-const requireFromWeb = createRequire(new URL("../apps/web/package.json", import.meta.url));
+const requireFromWeb = NodeModule.createRequire(
+  new URL("../apps/web/package.json", import.meta.url),
+);
 
 async function importFromWeb(specifier) {
-  return import(pathToFileURL(requireFromWeb.resolve(specifier)).href);
+  return import(NodeURL.pathToFileURL(requireFromWeb.resolve(specifier)).href);
 }
 
 const [
@@ -212,11 +214,7 @@ function findOpenFence(markdown) {
 
 function renderMarkdown(markdown) {
   return renderToStaticMarkup(
-    createElement(ReactMarkdown, {
-      remarkPlugins,
-      rehypePlugins,
-      children: markdown,
-    }),
+    createElement(ReactMarkdown, { remarkPlugins, rehypePlugins }, markdown),
   );
 }
 
@@ -300,20 +298,20 @@ for (const finalSize of FINAL_SIZES) {
   for (let end = DELTA_CHARS; end < message.length + DELTA_CHARS; end += DELTA_CHARS) {
     const prefix = message.slice(0, Math.min(end, message.length));
 
-    const markdownStart = performance.now();
+    const markdownStart = NodePerfHooks.performance.now();
     const markdownHtml = renderMarkdown(prefix);
-    const markdownMs = performance.now() - markdownStart;
+    const markdownMs = NodePerfHooks.performance.now() - markdownStart;
     outputLengthSink ^= markdownHtml.length;
 
     const openFence = findOpenFence(prefix);
     let shikiMs = 0;
     if (!PLAIN_MODE && openFence) {
-      const shikiStart = performance.now();
+      const shikiStart = NodePerfHooks.performance.now();
       const highlightedHtml = highlighter.codeToHtml(openFence.code, {
         lang: openFence.language,
         theme: "pierre-dark",
       });
-      shikiMs = performance.now() - shikiStart;
+      shikiMs = NodePerfHooks.performance.now() - shikiStart;
       outputLengthSink ^= highlightedHtml.length;
     }
 
@@ -328,12 +326,12 @@ for (const finalSize of FINAL_SIZES) {
       const prefix = message.slice(0, Math.min(end, message.length));
       const openFence = findOpenFence(prefix);
       if (openFence) {
-        const shikiStart = performance.now();
+        const shikiStart = NodePerfHooks.performance.now();
         const highlightedHtml = highlighter.codeToHtml(openFence.code, {
           lang: openFence.language,
           theme: "pierre-dark",
         });
-        shikiSamples[index] = performance.now() - shikiStart;
+        shikiSamples[index] = NodePerfHooks.performance.now() - shikiStart;
         outputLengthSink ^= highlightedHtml.length;
       }
       index += 1;
