@@ -38,6 +38,17 @@ export class PreferredEditorUnavailableError extends Schema.TaggedErrorClass<Pre
   }
 }
 
+export class RevealPathEnvironmentRequiredError extends Schema.TaggedErrorClass<RevealPathEnvironmentRequiredError>()(
+  "RevealPathEnvironmentRequiredError",
+  {
+    targetPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Cannot reveal ${this.targetPath} because no environment is selected.`;
+  }
+}
+
 export function usePreferredEditor(availableEditors: ReadonlyArray<EditorId>) {
   const [lastEditor, setLastEditor] = useLocalStorage(LAST_EDITOR_KEY, null, EditorId);
 
@@ -111,5 +122,32 @@ export function useOpenInPreferredEditor(
       return mapAtomCommandResult(result, () => editor);
     },
     [availableEditors, environmentId, openInEditor],
+  );
+}
+
+export function useRevealPath(environmentId: EnvironmentId | null) {
+  const revealPath = useAtomCommand(shellEnvironment.revealPath, {
+    reportFailure: false,
+  });
+
+  return useCallback(
+    async (targetPath: string) => {
+      if (environmentId === null) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new RevealPathEnvironmentRequiredError({
+              targetPath,
+            }),
+          ),
+        );
+      }
+      return revealPath({
+        environmentId,
+        input: {
+          path: targetPath,
+        },
+      });
+    },
+    [environmentId, revealPath],
   );
 }

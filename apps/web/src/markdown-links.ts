@@ -5,8 +5,8 @@ const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/;
 const WINDOWS_UNC_PATH_PATTERN = /^\\\\/;
 const EXTERNAL_SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/;
 const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
-const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}$/;
-const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
+const RELATIVE_FILE_PATH_PATTERN = /^(?:[^/\\\r\n]+[\\/])+[^/\\\r\n]*$/u;
+const RELATIVE_FILE_NAME_PATTERN = /^[^/\\\r\n]+\.[^/\\.\r\n]+$/u;
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
 const POSIX_FILE_ROOT_PREFIXES = [
@@ -113,7 +113,11 @@ function isLikelyPathCandidate(path: string): boolean {
   if (WINDOWS_DRIVE_PATH_PATTERN.test(path) || WINDOWS_UNC_PATH_PATTERN.test(path)) return true;
   if (RELATIVE_PATH_PREFIX_PATTERN.test(path)) return true;
   if (path.startsWith("/")) return looksLikePosixFilesystemPath(path);
-  return RELATIVE_FILE_PATH_PATTERN.test(path) || RELATIVE_FILE_NAME_PATTERN.test(path);
+  const pathWithoutPosition = path.replace(POSITION_SUFFIX_PATTERN, "");
+  return (
+    RELATIVE_FILE_PATH_PATTERN.test(pathWithoutPosition) ||
+    RELATIVE_FILE_NAME_PATTERN.test(pathWithoutPosition)
+  );
 }
 
 function isRelativePath(path: string): boolean {
@@ -166,13 +170,17 @@ export function resolveMarkdownFileLinkTarget(
     return pathWithPosition;
   }
 
-  if (!cwd) return null;
+  if (!cwd) return pathWithPosition;
   return resolvePathLinkTarget(pathWithPosition, cwd);
 }
 
 function basenameOfPath(path: string): string {
-  const separatorIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
+  const normalizedPath = path.replace(/[\\/]+$/, "");
+  const separatorIndex = Math.max(
+    normalizedPath.lastIndexOf("/"),
+    normalizedPath.lastIndexOf("\\"),
+  );
+  return separatorIndex >= 0 ? normalizedPath.slice(separatorIndex + 1) : normalizedPath;
 }
 
 function workspaceRelativePath(path: string, workspaceRoot: string | undefined): string | null {

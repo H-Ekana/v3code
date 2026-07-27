@@ -12,10 +12,13 @@ import {
   ExternalLauncherBrowserSpawnError,
   ExternalLauncherCommandNotFoundError,
   ExternalLauncherEditorSpawnError,
+  ExternalLauncherRevealCommandNotFoundError,
+  ExternalLauncherRevealSpawnError,
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
   type EditorId,
   type LaunchEditorInput,
+  type RevealPathInput,
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -39,11 +42,13 @@ export {
   ExternalLauncherBrowserSpawnError,
   ExternalLauncherCommandNotFoundError,
   ExternalLauncherEditorSpawnError,
+  ExternalLauncherRevealCommandNotFoundError,
+  ExternalLauncherRevealSpawnError,
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
   isExternalLauncherError,
 } from "@t3tools/contracts";
-export type { LaunchEditorInput };
+export type { LaunchEditorInput, RevealPathInput };
 interface EditorLaunch {
   readonly editor: EditorId;
   readonly target: string;
@@ -55,6 +60,12 @@ interface ProcessLaunch {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly options: ChildProcess.CommandOptions;
+}
+
+export interface RevealLaunch {
+  readonly target: string;
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
 }
 
 interface TargetPathAndPosition {
@@ -232,6 +243,75 @@ function fileManagerCommandForPlatform(platform: NodeJS.Platform): string {
   }
 }
 
+function stripTargetPosition(target: string): string {
+  return Option.match(parseTargetPathAndPosition(target), {
+    onNone: () => target,
+    onSome: ({ path }) => path,
+  });
+}
+
+function absolutePathForPlatform(
+  target: string,
+  platform: NodeJS.Platform,
+  resolveAbsolutePath: (path: string) => string,
+): string {
+  if (platform === "win32") {
+    const windowsPath = target.replaceAll("/", "\\");
+    if (/^[A-Za-z]:\\/.test(windowsPath) || windowsPath.startsWith("\\\\")) {
+      return windowsPath;
+    }
+    return resolveAbsolutePath(windowsPath).replaceAll("/", "\\");
+  }
+
+  const posixPath = target.replaceAll("\\", "/");
+  if (posixPath.startsWith("/")) {
+    return posixPath;
+  }
+  return resolveAbsolutePath(posixPath).replaceAll("\\", "/");
+}
+
+function posixParentPath(target: string): string {
+  const pathWithoutTrailingSeparators = target.replace(/\/+$/, "");
+  const separatorIndex = pathWithoutTrailingSeparators.lastIndexOf("/");
+  if (separatorIndex <= 0) return "/";
+  return pathWithoutTrailingSeparators.slice(0, separatorIndex);
+}
+
+export function buildRevealLaunch(
+  target: string,
+  platform: NodeJS.Platform,
+  resolveAbsolutePath: (path: string) => string,
+): RevealLaunch {
+  const targetWithoutPosition = stripTargetPosition(target);
+  const absolutePath = absolutePathForPlatform(
+    targetWithoutPosition,
+    platform,
+    resolveAbsolutePath,
+  );
+  const command = fileManagerCommandForPlatform(platform);
+
+  switch (platform) {
+    case "win32":
+      return {
+        target: absolutePath,
+        command,
+        args: [`/select,${absolutePath}`],
+      };
+    case "darwin":
+      return {
+        target: absolutePath,
+        command,
+        args: ["-R", absolutePath],
+      };
+    default:
+      return {
+        target: absolutePath,
+        command,
+        args: [posixParentPath(absolutePath)],
+      };
+  }
+}
+
 function buildBrowserLaunch(
   target: string,
   platform: NodeJS.Platform,
@@ -313,6 +393,8 @@ export class ExternalLauncher extends Context.Service<
      * Launches the editor as a detached process so server startup is not blocked.
      */
     readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError>;
+    /** Reveal a path in the host file manager without changing editor preferences. */
+    readonly revealPath: (input: RevealPathInput) => Effect.Effect<void, ExternalLauncherError>;
   }
 >()("t3/process/externalLauncher") {}
 
@@ -430,6 +512,51 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
   );
 });
 
+const resolveRevealLaunch = Effect.fn("externalLauncher.resolveRevealLaunch")(function* (
+  input: RevealPathInput,
+): Effect.fn.Return<RevealLaunch, never, Path.Path> {
+  const platform = yield* HostProcessPlatform;
+  const path = yield* Path.Path;
+  const launch = buildRevealLaunch(input.path, platform, path.resolve);
+  yield* Effect.annotateCurrentSpan({
+    "externalLauncher.target": launch.target,
+    "externalLauncher.platform": platform,
+    "externalLauncher.command": launch.command,
+  });
+  return launch;
+});
+
+const launchRevealProcess = Effect.fn("externalLauncher.launchRevealProcess")(function* (
+  launch: RevealLaunch,
+): Effect.fn.Return<
+  void,
+  ExternalLauncherError,
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+> {
+  const env = yield* readCommandLookupEnv;
+  if (!(yield* isCommandAvailable(launch.command, { env }))) {
+    return yield* new ExternalLauncherRevealCommandNotFoundError({
+      command: launch.command,
+      target: launch.target,
+    });
+  }
+
+  yield* launchAndUnref(
+    {
+      command: launch.command,
+      args: launch.args,
+      options: DETACHED_IGNORE_STDIO_OPTIONS,
+    },
+    (cause) =>
+      new ExternalLauncherRevealSpawnError({
+        target: launch.target,
+        command: launch.command,
+        args: launch.args,
+        cause,
+      }),
+  );
+});
+
 export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -453,6 +580,14 @@ export const make = Effect.gen(function* () {
       provideCommandResolutionServices(
         Effect.flatMap(resolveEditorLaunch(input), (launch) =>
           launchEditorProcess(launch).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
+        ),
+      ),
+    revealPath: (input) =>
+      provideCommandResolutionServices(
+        Effect.flatMap(resolveRevealLaunch(input), (launch) =>
+          launchRevealProcess(launch).pipe(
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           ),
         ),

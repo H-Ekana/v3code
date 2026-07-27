@@ -13,10 +13,10 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as ExternalLauncher from "./externalLauncher.ts";
 
-function makeMockDetachedHandle(onUnref: () => void = () => undefined) {
+function makeMockDetachedHandle(onUnref: () => void = () => undefined, exitCode: number = 0) {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
-    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
     isRunning: Effect.succeed(true),
     kill: () => Effect.void,
     unref: Effect.sync(() => {
@@ -38,6 +38,7 @@ const testLayer = (input: {
   readonly resolveExecutable?: (command: string) => string | undefined;
   readonly onSpawn?: (command: ChildProcess.StandardCommand) => void;
   readonly onUnref?: () => void;
+  readonly exitCode?: number;
 }) => {
   const spawnerLayer = Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
@@ -48,7 +49,7 @@ const testLayer = (input: {
           throw new Error("Expected a standard command");
         }
         input.onSpawn?.(command);
-        return makeMockDetachedHandle(input.onUnref);
+        return makeMockDetachedHandle(input.onUnref, input.exitCode);
       }),
     ),
   );
@@ -63,6 +64,45 @@ const testLayer = (input: {
     ConfigProvider.layer(ConfigProvider.fromEnv({ env: input.env ?? {} })),
   );
 };
+
+it("builds the Windows explorer selection as one argv token and strips position", () => {
+  const launch = ExternalLauncher.buildRevealLaunch(
+    "C:/workspace with spaces/src/index.ts:12:3",
+    "win32",
+    () => {
+      throw new Error("absolute Windows paths should not be resolved");
+    },
+  );
+
+  assert.equal(launch.command, "explorer");
+  assert.deepEqual(launch.args, ["/select,C:\\workspace with spaces\\src\\index.ts"]);
+});
+
+it("builds the macOS Finder reveal command and strips position", () => {
+  const launch = ExternalLauncher.buildRevealLaunch(
+    "/workspace with spaces/src/index.ts:12:3",
+    "darwin",
+    () => {
+      throw new Error("absolute POSIX paths should not be resolved");
+    },
+  );
+
+  assert.equal(launch.command, "open");
+  assert.deepEqual(launch.args, ["-R", "/workspace with spaces/src/index.ts"]);
+});
+
+it("opens the containing directory on Linux and strips position", () => {
+  const launch = ExternalLauncher.buildRevealLaunch(
+    "/workspace with spaces/src/index.ts:12:3",
+    "linux",
+    () => {
+      throw new Error("absolute POSIX paths should not be resolved");
+    },
+  );
+
+  assert.equal(launch.command, "xdg-open");
+  assert.deepEqual(launch.args, ["/workspace with spaces/src"]);
+});
 
 it.effect("launches the default browser through the platform command", () => {
   let spawned: ChildProcess.StandardCommand | undefined;
@@ -152,6 +192,44 @@ it.effect("discovers editors through the service API", () =>
 
     assert.equal(editors.includes("vscode"), true);
     assert.equal(editors.includes("file-manager"), true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reveals with a detached process without observing explorer's exit code", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const binDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-file-manager-" });
+    yield* fileSystem.writeFileString(path.join(binDir, "explorer.CMD"), "@echo off\r\n");
+
+    let spawned: ChildProcess.StandardCommand | undefined;
+    let didUnref = false;
+    yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      yield* launcher.revealPath({
+        path: "C:/workspace with spaces/src/index.ts:12:3",
+      });
+    }).pipe(
+      Effect.provide(
+        testLayer({
+          platform: "win32",
+          env: { PATH: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+          exitCode: 1,
+          onSpawn: (command) => {
+            spawned = command;
+          },
+          onUnref: () => {
+            didUnref = true;
+          },
+        }),
+      ),
+    );
+
+    assert.ok(spawned);
+    assert.equal(spawned.command, "explorer");
+    assert.deepEqual(spawned.args, ["/select,C:\\workspace with spaces\\src\\index.ts"]);
+    assert.equal(spawned.options.detached, true);
+    assert.equal(didUnref, true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
