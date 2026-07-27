@@ -1,5 +1,75 @@
 # Known Issues
 
+# 🟣 NEWLY COMPLETED THREAD CAN LOSE ITS `DONE` BADGE AND UNSEEN-COMPLETION GLOW
+
+## **STATUS: CONFIRMED, NOT FIXED. Regression diagnosed on 2026-07-27.**
+
+A thread that has just finished working can fall directly into the ordinary muted/inactive row
+presentation. The row no longer says `Done`, does not show the themed completion check, and does not
+receive the violet/pink unseen-completion glow—even when the user has not reopened the completed
+thread to inspect its output.
+
+### Observed symptom
+
+- Let a background or current thread finish normally.
+- Do not click or reopen that thread after completion.
+- Its sidebar row becomes gray and visually indistinguishable from an older idle thread.
+- Only the provider glyph remains on the right; there is no explicit completion state.
+
+### Expected behavior
+
+A newly completed, unseen thread should retain the themed `Done` check and bounded completion glow
+until the user opens that thread. Opening it should acknowledge the completion and return the row to
+its quiet seen/idle presentation. The state must remain understandable from the check and `Done`
+label, not color alone.
+
+### Confirmed primary root cause
+
+The completed turn is persisted correctly, but the final ready-session event erases the thread
+shell's pointer to it:
+
+1. `thread.turn-diff-completed` writes the completed turn ID to
+   `projection_threads.latest_turn_id`.
+2. A later `thread.session-set` reports `status: "ready"` and `activeTurnId: null`.
+3. `apps/server/src/orchestration/Layers/ProjectionPipeline.ts` blindly replaces
+   `latest_turn_id` with that null active-turn value.
+4. `ProjectionSnapshotQuery` can then expose only `latestTurn: null` for the sidebar shell.
+5. `hasUnseenCompletion` returns false immediately when `latestTurn` is absent, so neither the
+   `Done` badge nor the completion glow can render.
+
+This is a projection/state-ordering regression, not missing CSS, and it affects background threads
+as well as the currently open thread.
+
+### Verified evidence
+
+In the actual reported thread, `065af0fb-1e86-44f5-a569-fd626f655df0` ("Spectacular send button
+animation polish"), turn `019fa3c0…` exists in `projection_turns` as completed at
+`2026-07-27T13:26:32.577Z` with a ready checkpoint. Event sequence `95170` sets the completed turn
+pointer; later sequence `95313` clears it through the ready `thread.session-set`.
+
+### Secondary client-side defects
+
+Two independent client behaviors would still weaken the treatment after the projection is fixed:
+
+- `ChatView.tsx` marks the open thread visited on every `serverThread.updatedAt`, including the
+  completion update. This passively acknowledges finished work without a thread click.
+- `resolveSidebarV2RowSurfaceClassName` intentionally gives the active-row surface precedence over
+  unread completion, so an active-and-unread row cannot receive the perimeter glow.
+
+### Repair and focused coverage
+
+- Preserve the existing completed-turn pointer when a non-running session reports
+  `activeTurnId: null`; a running non-null active turn should still replace it.
+- A visit baseline should advance on explicit route/thread engagement, not every passive server
+  update.
+- Combine active and unread-completion styling instead of suppressing the branded ring for the
+  active row.
+- Add a projection regression covering `running → turn-diff-completed → ready`, a client lifecycle
+  test proving completion remains unread until explicit activation, and a sidebar style test for
+  active plus unread completion.
+
+---
+
 # [FIXED] PARENT CODEX OUTPUT DISAPPEARS AFTER A SUB-AGENT INTERACTS WITH `/root`
 
 ## **STATUS: FIXED IN THE WORKTREE ON 2026-07-27. Requires an updated app build/restart.**
@@ -128,6 +198,110 @@ points at an already-settled turn. That turns a permanent wedge into a self-heal
 have fixed the June thread automatically instead of leaving it broken for five weeks.
 
 Full brief for an agent working outside the app: **`docs/project/stuck-thread-bug-handoff.md`**
+
+---
+
+# 🔴 **A COMPANION JOB THAT OUTLIVES A SERVER RESTART STRANDS ITS AGENT CARD FOREVER**
+
+## **STATUS: NOT FIXED. Repair script exists. Root cause is still live.**
+
+Observed 2026-07-27. A `codex:codex-rescue` card sat at `running` with a live-ticking timer for
+40+ minutes after its Codex job had already finished. Survived a UI reload, a hard reload, and a
+full app close/reopen.
+
+## Symptom
+
+An agent card renders `running` indefinitely. The elapsed timer keeps counting. The card's activity
+line is frozen at some earlier moment while the underlying job log kept advancing past it. Reloading
+and restarting the app do not clear it — they are the two things guaranteed _not_ to work.
+
+## Root cause
+
+The per-thread agent roster is carried **latest-wins in the payload of an `agent.snapshot` thread
+activity** (`packages/contracts/src/threadAgents.ts`). It is an ordinary persisted row, so the UI
+rebuilds from it on every reload and every cold start.
+
+Only a _newer_ snapshot carrying a terminal status (`completed | failed | stopped`, see
+`THREAD_AGENT_TERMINAL_STATUSES` at `packages/contracts/src/threadAgents.ts:41`) clears the card.
+The thing that emits that snapshot is the companion watcher fiber in
+`ClaudeAdapter.ts:2619` — and **nothing rehydrates it.** `startCompanionWatcher`
+(`ClaudeAdapter.ts:2636`) only runs when a launch line is observed live.
+
+So: server dies while a job is being watched → fiber dies with it → job finishes later with nothing
+alive to emit the terminal snapshot → the last non-terminal snapshot stays authoritative forever.
+
+`COMPANION_WATCH_LIMIT_MS` (2h, `ClaudeAdapter.ts:114`) is the only backstop, and it lives inside the
+very process that died.
+
+### Observed timeline
+
+| Time (local) | Event                                                               |
+| ------------ | ------------------------------------------------------------------- |
+| 18:25:32     | Last `agent.snapshot` written — agent still `running`, no `endedAt` |
+| 18:25:33     | App process restarts — **watcher fiber dies one second later**      |
+| 18:31:34     | Codex job `task-ms37sqhu-ffd21e` completes successfully             |
+| —            | No watcher alive. No terminal snapshot ever written.                |
+
+The timer ticks because the entry has `status: "running"`, no `endedAt`, and a `currentActivity`
+string; the client counts from `firstStartedAt` against the wall clock. Clearing `status` alone is
+not enough — `currentActivity` and `phaseTitle` must also be dropped or the running line persists.
+
+## Repair (data only — does NOT fix the bug)
+
+```bash
+# Close V3 Code first. --force writes against a live app at the risk of the
+# server re-emitting its in-memory roster over the correction.
+node scripts/fix-stuck-agent-cards.mjs                    # dry run
+node scripts/fix-stuck-agent-cards.mjs --apply            # backs up the DB, appends corrected snapshot
+node scripts/fix-stuck-agent-cards.mjs --stale-minutes 30 # default threshold is 15
+```
+
+Scans every thread's latest snapshot, settles only agents idle beyond the threshold, refuses to
+touch anything still plausibly live.
+
+### The repair alone is NOT enough — hydration is lazy
+
+Writing the corrected snapshot fixes the database but **does not change the UI**, and neither a
+renderer reload nor a full cold restart will pick it up. `ProviderRuntimeIngestion.ts:1658` only
+re-reads the roster when `eventTouchesAgents || activityPressure` — an agent-touching event, or
+`AGENT_SNAPSHOT_REFRESH_ACTIVITY_COUNT` (400) activities since the last snapshot. A freshly started
+server has not hydrated either, so it keeps serving its boot-time roster.
+
+**After running the repair, spawn any trivial subagent.** That is the cheapest trigger: the server
+hydrates from the corrected snapshot, emits a fresh one, and the card settles live over the
+WebSocket with no restart.
+
+This cost several wasted debugging cycles — the data was verifiably correct (right revision, decodes
+cleanly, wins the selection) while the UI stayed wrong, because nothing had asked the server to look
+at it. If the card still reads `running` after a repair, do not re-verify the data; trigger a
+hydration.
+
+## Where to fix
+
+| Area                         | Path                                                    |
+| ---------------------------- | ------------------------------------------------------- |
+| Watcher lifecycle            | `apps/server/src/provider/Layers/ClaudeAdapter.ts:2619` |
+| Watcher start (no rehydrate) | `apps/server/src/provider/Layers/ClaudeAdapter.ts:2636` |
+| Job record reader            | `apps/server/src/provider/codexCompanionJobs.ts:196`    |
+| Roster contract              | `packages/contracts/src/threadAgents.ts:41`             |
+
+**Strongly recommended:** a startup reconciliation that re-attaches watchers for jobs whose records
+are still non-terminal, and settles any roster entry whose job record is already terminal or whose
+process is gone. Same shape as the reconciliation recommended for the interrupted-turn wedge above —
+it turns a permanent stranding into a self-healing one.
+
+## Adjacent hazard — `cancel` can kill an unrelated process
+
+The same missing liveness check bites harder in the plugin's cancel path. The job record stores a
+`pid`; cancel issues `taskkill /PID <pid> /T /F` **without verifying the process is still the job it
+started**. After the job dies, the OS recycles the PID — in the observed case onto
+`scripts/v3-electron-dev.mjs`, the user's own Electron dev stack. `/T` kills the whole tree.
+
+It only failed to fire because Git Bash mangled `/PID` into `C:/Program Files/Git/PID` (MSYS path
+conversion). Run the same cancel from PowerShell and it would have taken down the dev stack.
+
+Lives in the plugin (`codex-companion.mjs`), not this repo, but any fix here should assume a stale
+`pid` is never safe to trust.
 
 ---
 
