@@ -106,7 +106,7 @@ The event log `orchestration_events` remains the source of truth and is untouche
   - `065af0fb-…` → `{"threadId":"019fa047-fe68-7583-bc11-a404224fe117"}`
 - Full Codex transcripts on disk: `~/.codex/sessions/2026/07/27/rollout-<ts>-<threadId>.jsonl`.
   Resumable with `codex resume <threadId>`.
-- ~8 hours of sub-agent file changes are already committed on branch `ui-overhaul-pink-purple`
+- ~8 hours of sub-agent file changes are already committed on `main`
   (commit `ecec7c900`, 102 files). Nothing is at risk.
 
 **UNVERIFIED:** whether posting a new message to a repaired thread reattaches to the Codex thread
