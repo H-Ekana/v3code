@@ -94,6 +94,7 @@ describe("ElectronWindow", () => {
         webPreferences: {
           preload: "/tmp/preload.js",
           partition: "persist:v3code-preview-test",
+          backgroundThrottling: null,
           sandbox: true,
           contextIsolation: true,
           nodeIntegration: false,
