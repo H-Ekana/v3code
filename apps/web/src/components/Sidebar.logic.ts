@@ -402,16 +402,33 @@ export function resolveSidebarV2RowSurfaceClassName(input: {
   shouldRecede: boolean;
 }): string {
   const baseClassName =
-    "group/v2-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none transition-[background-color,color,box-shadow,opacity] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70 motion-reduce:transition-none";
+    // `scale` is in the transition list for the drag lift: the <li> carries
+    // dnd-kit's untransitioned translate (so it tracks the pointer 1:1) while
+    // this surface eases its own scale/glow pop in and out. It must be `scale`
+    // and not `transform` — Tailwind v4's scale-* utilities compile to the
+    // standalone `scale:` property, so a `transform` entry never fires.
+    "group/v2-row relative w-full cursor-pointer overflow-hidden rounded-md text-left outline-none select-none transition-[background-color,color,box-shadow,opacity,scale] duration-200 ease-out focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70 motion-reduce:transition-none";
+
+  // While a card is in hand, every row the user is NOT holding recedes, so the
+  // lifted card stays unambiguous as rows slide around it. Declared on the
+  // surface rather than the <li>, which carries dnd-kit's inline transform
+  // transition and would override a transition set here.
+  //
+  // 70% and no lower: these rows are the drop targets, so they have to stay
+  // readable while you pick a slot. On the dark sidebar that still leaves
+  // title text around 8:1 against the background.
+  const dragRecedeClassName =
+    "[[data-sidebar-drag-active]_[data-thread-item]:not([data-dragging])_&]:opacity-70";
 
   return cn(
     baseClassName,
+    dragRecedeClassName,
     input.isActive
       ? "bg-sidebar-row-active text-sidebar-foreground"
       : input.isSelected
         ? "bg-sidebar-row-selected text-sidebar-foreground"
         : input.isUnread
-          ? "z-10 bg-[color-mix(in_srgb,var(--sidebar-row-active)_84%,var(--primary))] text-sidebar-foreground ring-1 ring-inset ring-astro-highlight/55 shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_42%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_12%,transparent)] hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))] hover:ring-astro-highlight/70"
+          ? "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover"
           : input.shouldRecede
             ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
             : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
@@ -494,6 +511,86 @@ export function sortThreadsForSidebarV2<
       parseTimestampMs(right.createdAt) - parseTimestampMs(left.createdAt) ||
       left.id.localeCompare(right.id),
   );
+}
+
+/**
+ * Overlays the user's hand-arranged order on top of the natural v2 order.
+ *
+ * Threads the user never dragged keep their natural NEIGHBOURS rather than
+ * being flushed to one end of the list (which is what a plain
+ * `orderItemsByPreferredIds` would do). Each unarranged thread is anchored
+ * behind the nearest arranged thread above it in the natural order, so a
+ * brand-new thread — natural position 0, nothing arranged above it — still
+ * lands on top even after everything below it has been hand-arranged.
+ */
+export function applyManualThreadOrder<TItem>(input: {
+  items: readonly TItem[];
+  manualOrder: readonly string[];
+  getKey: (item: TItem) => string;
+}): TItem[] {
+  const { getKey, items, manualOrder } = input;
+  if (manualOrder.length === 0 || items.length === 0) {
+    return [...items];
+  }
+  const rankByKey = new Map(manualOrder.map((key, index) => [key, index] as const));
+
+  // Anchor pass: walk the natural order, collecting arranged threads and
+  // hanging each unarranged thread off the last arranged one seen above it
+  // (anchor `null` means "above every arranged thread").
+  const arranged: { key: string; item: TItem }[] = [];
+  const followersByAnchor = new Map<string | null, TItem[]>();
+  let anchor: string | null = null;
+  for (const item of items) {
+    const key = getKey(item);
+    if (rankByKey.has(key)) {
+      arranged.push({ key, item });
+      anchor = key;
+      continue;
+    }
+    const followers = followersByAnchor.get(anchor);
+    if (followers) {
+      followers.push(item);
+    } else {
+      followersByAnchor.set(anchor, [item]);
+    }
+  }
+  if (arranged.length === 0) {
+    return [...items];
+  }
+
+  arranged.sort((left, right) => rankByKey.get(left.key)! - rankByKey.get(right.key)!);
+  const ordered: TItem[] = [...(followersByAnchor.get(null) ?? [])];
+  for (const entry of arranged) {
+    ordered.push(entry.item);
+    const followers = followersByAnchor.get(entry.key);
+    if (followers) {
+      ordered.push(...followers);
+    }
+  }
+  return ordered;
+}
+
+/**
+ * Moves one thread key to the slot currently held by another, returning the
+ * full next order. Both keys must already be in `orderedKeys` (the sidebar
+ * always hands in the rendered active order, so they are).
+ */
+export function moveThreadInManualOrder(
+  orderedKeys: readonly string[],
+  draggedKey: string,
+  targetKey: string,
+): string[] {
+  if (draggedKey === targetKey) {
+    return [...orderedKeys];
+  }
+  const fromIndex = orderedKeys.indexOf(draggedKey);
+  const toIndex = orderedKeys.indexOf(targetKey);
+  if (fromIndex < 0 || toIndex < 0) {
+    return [...orderedKeys];
+  }
+  const next = [...orderedKeys];
+  next.splice(toIndex, 0, next.splice(fromIndex, 1)[0]!);
+  return next;
 }
 
 type SettledTimestampInput = Pick<

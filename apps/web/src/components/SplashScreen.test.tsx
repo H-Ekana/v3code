@@ -45,6 +45,9 @@ describe("SplashScreen", () => {
     expect(starsSvg).toContain("#FF8FD2");
     expect(signalSvg).toContain("#8C63E8");
     expect(bootShellHtml).toContain("v3-splash-cloud-layer");
+    expect(bootShellHtml).toContain("left: -10%");
+    expect(bootShellHtml).toContain("width: 120%");
+    expect(bootShellHtml).toContain("max-width: none");
   });
 
   it("uses varied ambient motion with reduced-motion fallbacks", () => {

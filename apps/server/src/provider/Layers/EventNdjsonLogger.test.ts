@@ -9,7 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
 import * as Schema from "effect/Schema";
 
-import { makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { makeEventNdjsonLogger, writeEventLogBatch } from "./EventNdjsonLogger.ts";
 
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
@@ -33,6 +33,58 @@ function parseLogLine(line: string) {
 }
 
 describe("EventNdjsonLogger", () => {
+  it("writes a whole logger batch with one synchronous sink call", () => {
+    const chunks: Array<string | Buffer> = [];
+    writeEventLogBatch(
+      {
+        write: (chunk) => {
+          chunks.push(chunk);
+        },
+      },
+      ["first\n", "second\n", "third\n"],
+    );
+
+    assert.deepEqual(chunks, ["first\nsecond\nthird\n"]);
+  });
+
+  it("splits batches on byte boundaries and preserves record order", () => {
+    const chunks: Array<string | Buffer> = [];
+    const messages = ["aa", "bb", "ccc", "d"];
+
+    writeEventLogBatch(
+      {
+        write: (chunk) => {
+          chunks.push(chunk);
+        },
+      },
+      messages,
+      4,
+    );
+
+    assert.deepEqual(chunks, ["aabb", "cccd"]);
+    assert.equal(chunks.join(""), messages.join(""));
+  });
+
+  it("counts Unicode bytes without splitting a multi-byte character", () => {
+    const chunks: Array<string | Buffer> = [];
+
+    writeEventLogBatch(
+      {
+        write: (chunk) => {
+          chunks.push(chunk);
+        },
+      },
+      ["😀", "é", "x"],
+      5,
+    );
+
+    assert.deepEqual(chunks, ["😀", "éx"]);
+    assert.deepEqual(
+      chunks.map((chunk) => Buffer.byteLength(chunk)),
+      [4, 3],
+    );
+  });
+
   it.effect("logs bounded diagnostics when an event cannot be serialized", () => {
     const messages: Array<unknown> = [];
     const logCapture = Logger.make<unknown, void>(({ message }) => {

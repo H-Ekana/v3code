@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderInstanceId,
@@ -101,6 +102,9 @@ const ACTIVE_THREAD: OrchestrationThread = {
 
 type TestThreadInput = OrchestrationThreadStreamItem | Error;
 
+// Mirrors THREAD_STATE_PUBLISH_WINDOW in threads.ts.
+const PUBLISH_WINDOW = "16 millis";
+
 function testSession(
   client: WsRpcProtocolClient,
   options?: { readonly completionMarker?: boolean },
@@ -118,15 +122,62 @@ function testSession(
   };
 }
 
+// Streaming updates are published on a ~16ms coalescing window, so an awaited
+// state can be sitting in the coalescer with no runnable fiber left to release
+// it. Advance the virtual clock, but only once the observer queue has gone
+// genuinely idle, so tests that drive the retry backoff or the persistence
+// debounce keep their own explicit control of those timers.
 function awaitThreadState(
   observed: Queue.Queue<EnvironmentThreadState>,
   predicate: (state: EnvironmentThreadState) => boolean,
 ) {
-  return Queue.take(observed).pipe(
-    Effect.repeat({
-      until: predicate,
-    }),
-  );
+  return Effect.gen(function* () {
+    let idleRounds = 0;
+    for (let round = 0; round < 500; round += 1) {
+      const next = yield* Queue.poll(observed);
+      if (Option.isSome(next)) {
+        idleRounds = 0;
+        if (predicate(next.value)) {
+          return next.value;
+        }
+        continue;
+      }
+      for (let step = 0; step < 10; step += 1) {
+        yield* Effect.yieldNow;
+      }
+      idleRounds += 1;
+      if (idleRounds >= 2) {
+        idleRounds = 0;
+        yield* TestClock.adjust(PUBLISH_WINDOW);
+      }
+    }
+    return yield* Effect.die(new Error("awaitThreadState: no state matched the predicate"));
+  });
+}
+
+// Lets every runnable fiber drain without advancing the virtual clock, so the
+// coalescing window stays open across the whole burst.
+const settle = Effect.gen(function* () {
+  for (let step = 0; step < 100; step += 1) {
+    yield* Effect.yieldNow;
+  }
+});
+
+function collectPublished(observed: Queue.Queue<EnvironmentThreadState>) {
+  return Effect.gen(function* () {
+    const published: Array<EnvironmentThreadState> = [];
+    for (;;) {
+      const next = yield* Queue.poll(observed);
+      if (Option.isNone(next)) {
+        return published;
+      }
+      published.push(next.value);
+    }
+  });
+}
+
+function latestMessageText(state: EnvironmentThreadState): string | undefined {
+  return Option.getOrThrow(state.data).messages.at(-1)?.text;
 }
 
 const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (options?: {
@@ -292,11 +343,37 @@ const titleUpdated = (title: string, sequence = 2): OrchestrationThreadStreamIte
   },
 });
 
-const deleted = (): OrchestrationThreadStreamItem => ({
+const assistantDelta = (text: string, sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(`event-delta-${sequence}`),
+    sequence,
+    occurredAt: "2026-04-01T01:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    payload: {
+      threadId: THREAD_ID,
+      messageId: MessageId.make("message-assistant"),
+      role: "assistant",
+      text,
+      turnId: TurnId.make("turn-1"),
+      streaming: true,
+      createdAt: "2026-04-01T01:00:00.000Z",
+      updatedAt: "2026-04-01T01:00:00.000Z",
+    },
+  },
+});
+
+const deleted = (sequence = 3): OrchestrationThreadStreamItem => ({
   kind: "event",
   event: {
     eventId: EventId.make("event-deleted"),
-    sequence: 3,
+    sequence,
     occurredAt: "2026-04-01T02:00:00.000Z",
     commandId: null,
     causationEventId: null,
@@ -695,6 +772,194 @@ describe("EnvironmentThreads", () => {
         (value) => value.status === "live" && Option.isSome(value.data),
       );
       expect(Option.getOrThrow(live.data).title).toBe("Latest title");
+    }),
+  );
+
+  // Regression: `onExpectedFailure` writes the error out of band from the item
+  // stream. Any publication scheme must never let a preceding item land *after*
+  // the failure and silently clear it.
+  it.effect("keeps an out-of-band stream failure after the preceding snapshot applies", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* Queue.offer(harness.inputs, snapshot({ ...BASE_THREAD, title: "Snapshot title" }));
+      // Let the snapshot reach `applyItem` in its own chunk, but never advance
+      // the virtual clock: any publication window is still open when the
+      // out-of-band failure lands.
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      yield* Queue.offer(harness.inputs, new Error("stream failed"));
+
+      const failed = yield* awaitThreadState(harness.observed, (value) =>
+        Option.isSome(value.error),
+      );
+      expect(Option.getOrThrow(failed.data).title).toBe("Snapshot title");
+      expect(Option.getOrThrow(failed.error)).toBe("stream failed");
+
+      // Nothing published afterwards may resurrect a pre-failure value.
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      const latest = yield* Ref.get(harness.latest);
+      expect(Option.getOrThrow(latest.data).title).toBe("Snapshot title");
+      expect(Option.getOrThrow(latest.error)).toBe("stream failed");
+    }),
+  );
+
+  // The sharper form of the same regression: the failure is written while a
+  // coalesced delta is still waiting on the window. Closing the window must not
+  // clear the failure, and must not lose the delta either.
+  it.effect("keeps an out-of-band stream failure written over a pending delta", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+      yield* Queue.offer(harness.inputs, assistantDelta("Hello", CACHED_SNAPSHOT_SEQUENCE + 1));
+      yield* settle;
+      yield* collectPublished(harness.observed);
+      expect(latestMessageText(yield* Ref.get(harness.latest))).toBeUndefined();
+
+      yield* Queue.offer(harness.inputs, new Error("stream failed"));
+      const failed = yield* awaitThreadState(harness.observed, (value) =>
+        Option.isSome(value.error),
+      );
+      expect(Option.getOrThrow(failed.error)).toBe("stream failed");
+      expect(latestMessageText(failed)).toBe("Hello");
+
+      // Closing the window (repeatedly) must not undo the failure.
+      for (let round = 0; round < 3; round += 1) {
+        yield* TestClock.adjust(PUBLISH_WINDOW);
+        yield* settle;
+      }
+      const latest = yield* Ref.get(harness.latest);
+      expect(Option.getOrThrow(latest.error)).toBe("stream failed");
+      expect(latestMessageText(latest)).toBe("Hello");
+    }),
+  );
+
+  it.effect("publishes a burst of assistant deltas once, with the concatenated text", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+      yield* settle;
+      yield* collectPublished(harness.observed);
+
+      const deltas = ["Hel", "lo ", "wor", "ld"];
+      for (const [index, text] of deltas.entries()) {
+        yield* Queue.offer(
+          harness.inputs,
+          assistantDelta(text, CACHED_SNAPSHOT_SEQUENCE + 1 + index),
+        );
+      }
+      yield* settle;
+
+      // Every delta has been applied, but the window has not elapsed.
+      expect(yield* collectPublished(harness.observed)).toEqual([]);
+
+      yield* TestClock.adjust(PUBLISH_WINDOW);
+      yield* settle;
+
+      const published = yield* collectPublished(harness.observed);
+      expect(published).toHaveLength(1);
+      expect(latestMessageText(published[0]!)).toBe("Hello world");
+      expect(published[0]!.status).toBe("live");
+
+      // The window closing again must not republish the same version.
+      yield* TestClock.adjust(PUBLISH_WINDOW);
+      yield* settle;
+      expect(yield* collectPublished(harness.observed)).toEqual([]);
+    }),
+  );
+
+  it.effect("never resurrects a thread deleted mid-stream", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+      // A coalesced delta is still pending when the delete lands.
+      yield* Queue.offer(harness.inputs, assistantDelta("Hel", CACHED_SNAPSHOT_SEQUENCE + 1));
+      yield* settle;
+      yield* collectPublished(harness.observed);
+      yield* Queue.offer(harness.inputs, deleted(CACHED_SNAPSHOT_SEQUENCE + 2));
+
+      const state = yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "deleted",
+      );
+      expect(Option.isNone(state.data)).toBe(true);
+      expect(yield* Ref.get(harness.removedThreads)).toEqual([THREAD_ID]);
+
+      // Later items, and every later window boundary, leave the thread deleted.
+      yield* Queue.offer(harness.inputs, assistantDelta("lo", CACHED_SNAPSHOT_SEQUENCE + 3));
+      yield* settle;
+      yield* TestClock.adjust(PUBLISH_WINDOW);
+      yield* settle;
+      yield* TestClock.adjust(PUBLISH_WINDOW);
+      yield* settle;
+
+      for (const published of yield* collectPublished(harness.observed)) {
+        expect(published.status).toBe("deleted");
+        expect(Option.isNone(published.data)).toBe(true);
+      }
+      const latest = yield* Ref.get(harness.latest);
+      expect(latest.status).toBe("deleted");
+      expect(Option.isNone(latest.data)).toBe(true);
+    }),
+  );
+
+  it.effect("flushes pending deltas with the synchronized transition", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD, completionMarker: true });
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "synchronizing" && Option.isSome(value.data),
+      );
+      yield* settle;
+      yield* collectPublished(harness.observed);
+
+      yield* Queue.offer(harness.inputs, assistantDelta("Hello", CACHED_SNAPSHOT_SEQUENCE + 1));
+      yield* settle;
+      expect(yield* collectPublished(harness.observed)).toEqual([]);
+
+      yield* Queue.offer(harness.inputs, synchronized());
+      yield* settle;
+
+      const published = yield* collectPublished(harness.observed);
+      expect(published).toHaveLength(1);
+      expect(published[0]!.status).toBe("live");
+      expect(latestMessageText(published[0]!)).toBe("Hello");
+
+      yield* TestClock.adjust(PUBLISH_WINDOW);
+      yield* settle;
+      expect(yield* collectPublished(harness.observed)).toEqual([]);
+    }),
+  );
+
+  it.effect("persists the latest unpublished value on teardown", () =>
+    Effect.gen(function* () {
+      const savedThreads = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({ cached: BASE_THREAD });
+          yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+          yield* Queue.offer(
+            harness.inputs,
+            titleUpdated("Pending title", CACHED_SNAPSHOT_SEQUENCE + 1),
+          );
+          yield* settle;
+
+          // Applied but deliberately never published.
+          expect(Option.getOrThrow((yield* Ref.get(harness.latest)).data).title).toBe(
+            "Cached thread",
+          );
+          expect(yield* Ref.get(harness.savedThreads)).toEqual([]);
+          return harness.savedThreads;
+        }),
+      );
+
+      const saved = yield* Ref.get(savedThreads);
+      expect(saved.at(-1)?.thread.title).toBe("Pending title");
+      expect(saved.at(-1)?.snapshotSequence).toBe(CACHED_SNAPSHOT_SEQUENCE + 1);
     }),
   );
 });

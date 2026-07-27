@@ -229,6 +229,15 @@ interface ClaudeSessionContext {
    * agent — the SDK never states the linkage the other way round.
    */
   readonly agentIdByToolUseId: Map<string, string>;
+  /**
+   * `task_id` -> the description the agent was spawned with.
+   *
+   * Forwarded sub-agent narration has no description of its own, but
+   * `task.progress` requires one and the roster reducer derives the card's
+   * `name` from it. Replaying the spawn description keeps narration from
+   * renaming the card to whatever the sub-agent last said.
+   */
+  readonly agentDescriptionByTaskId: Map<string, string>;
   /** Detached Codex companion job watchers, keyed by companion job id. */
   readonly companionWatchers: Map<string, Fiber.Fiber<void, never>>;
   /**
@@ -1125,6 +1134,48 @@ function extractAssistantTextBlocks(message: SDKMessage): Array<string> {
       candidate.text.length > 0
     ) {
       fragments.push(candidate.text);
+    }
+  }
+
+  return fragments;
+}
+
+/**
+ * Narration a forwarded sub-agent message contributes to its agent card, in
+ * content order.
+ *
+ * Text and thinking blocks only: a sub-agent's `tool_use` blocks are already
+ * reported through `task_progress.last_tool_name`, so including them here would
+ * double up every tool call on the card.
+ */
+function extractSubagentNarration(message: SDKMessage): Array<string> {
+  if (message.type !== "assistant") {
+    return [];
+  }
+
+  const content = (message.message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  const fragments: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const candidate = block as { type?: unknown; text?: unknown; thinking?: unknown };
+    const raw =
+      candidate.type === "text"
+        ? candidate.text
+        : candidate.type === "thinking"
+          ? candidate.thinking
+          : undefined;
+    if (typeof raw !== "string") {
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (trimmed.length > 0) {
+      fragments.push(trimmed);
     }
   }
 
@@ -2860,6 +2911,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    // Forwarded sub-agent messages (`forwardSubagentText`) carry the Task call
+    // that spawned them. They belong on that agent's card, not in the parent
+    // transcript: folding them in pushes child text into the parent turn's
+    // items, backfills it onto the parent's assistant text blocks, and can mint
+    // a synthetic turn for work the user never prompted. Attribution needs the
+    // spawning Task call, so a message whose parent is unknown falls through to
+    // the legacy path rather than being dropped.
+    const parentToolUseId = message.parent_tool_use_id;
+    const subagentTaskId =
+      typeof parentToolUseId === "string" && parentToolUseId.length > 0
+        ? context.agentIdByToolUseId.get(parentToolUseId)
+        : undefined;
+    if (subagentTaskId !== undefined) {
+      const description = context.agentDescriptionByTaskId.get(subagentTaskId) ?? "Subagent";
+      for (const fragment of extractSubagentNarration(message)) {
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "task.progress",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          payload: {
+            taskId: RuntimeTaskId.make(subagentTaskId),
+            description,
+            summary: fragment,
+            // Cards only: without this every sub-agent sentence would also
+            // spray a row into the conversation timeline.
+            timelineBypass: true,
+          },
+        });
+      }
+      return;
+    }
+
     // Auto-start a synthetic turn for assistant messages that arrive without
     // an active turn (e.g., background agent/subagent responses between user prompts).
     if (!context.turnState) {
@@ -3081,6 +3167,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const prompt = readString(record.prompt);
         if (toolUseId) {
           context.agentIdByToolUseId.set(toolUseId, message.task_id);
+        }
+        if (message.description) {
+          context.agentDescriptionByTaskId.set(message.task_id, message.description);
         }
         yield* offerRuntimeEvent({
           ...base,
@@ -4227,6 +4316,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         claudeTasks,
         ...(input.cwd ? { cwd: input.cwd } : { cwd: undefined }),
         agentIdByToolUseId: new Map<string, string>(),
+        agentDescriptionByTaskId: new Map<string, string>(),
         companionWatchers: new Map<string, Fiber.Fiber<void, never>>(),
         companionJobsSeen: new Set<string>(),
         turnState: undefined,

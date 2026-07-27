@@ -47,6 +47,38 @@ describe("resolveMarkdownFileLinkTarget", () => {
     );
   });
 
+  it("keeps assistant-emitted relative hrefs actionable when cwd is unavailable", () => {
+    const href = "docs/project/some-plan.md";
+
+    expect(resolveMarkdownFileLinkTarget(href)).toBe(href);
+    expect(resolveMarkdownFileLinkMeta(href)).toMatchObject({
+      filePath: href,
+      targetPath: href,
+      displayPath: href,
+      workspaceRelativePath: null,
+      basename: "some-plan.md",
+    });
+  });
+
+  it.each([
+    "docs/project/UI polish plan.md",
+    "packages/@scope/component+theme.ts",
+    "docs/decisions/plan (final) [approved].md",
+    "docs/設計/概要.md",
+  ])("resolves relative paths containing broader path characters: %s", (href) => {
+    expect(resolveMarkdownFileLinkTarget(href, "/Users/julius/project")).toBe(
+      `/Users/julius/project/${href}`,
+    );
+  });
+
+  it("resolves trailing-slash directory hrefs", () => {
+    expect(resolveMarkdownFileLinkMeta("docs/project/", "/Users/julius/project")).toMatchObject({
+      targetPath: "/Users/julius/project/docs/project/",
+      basename: "project",
+      workspaceRelativePath: "docs/project/",
+    });
+  });
+
   it("does not treat filename line references as external schemes", () => {
     expect(resolveMarkdownFileLinkTarget("script.ts:10", "/Users/julius/project")).toBe(
       "/Users/julius/project/script.ts:10",
@@ -68,6 +100,13 @@ describe("resolveMarkdownFileLinkTarget", () => {
   it("ignores external urls", () => {
     expect(resolveMarkdownFileLinkTarget("https://example.com/docs")).toBeNull();
   });
+
+  it.each(["mailto:hello@example.com", "custom+scheme://example.com/a/b"])(
+    "does not treat external schemes as file paths: %s",
+    (href) => {
+      expect(resolveMarkdownFileLinkTarget(href, "/Users/julius/project")).toBeNull();
+    },
+  );
 
   it("does not double-decode file URLs", () => {
     expect(resolveMarkdownFileLinkTarget("file:///Users/julius/project/file%2520name.md")).toBe(

@@ -32,11 +32,15 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
-import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import {
+  ProjectionTurnRepository,
+  type ProjectionTurnRepositoryShape,
+} from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -170,30 +174,48 @@ export function foldTaskAgentEvent(
   const summary = "summary" in payload ? payload.summary : undefined;
   const nextUsage = "usage" in payload ? taskUsage(payload.usage) : undefined;
   const lastToolName = "lastToolName" in payload ? payload.lastToolName : undefined;
+  // A progress `description` is the agent's *current step* ("Reading
+  // ClaudeAdapter.ts", "Running Find companion log emitters"), not its identity.
+  // Claude sends no `summary` while running, so without this the feed falls all
+  // the way through to the tool name: one captured run carried 41 distinct
+  // descriptions against 3 distinct tool names, so the step text is the signal
+  // and the tool name is nearly constant. Deliberately not folded into `name` —
+  // see the naming comment below.
+  // A tick whose description just restates the card's title carries no step of
+  // its own (a usage-only heartbeat), so it must not append a row that reads
+  // back the agent's own name.
+  const stepDescription =
+    event.type === "task.progress" && description !== previous?.name ? description : undefined;
   const settledNow = status === "idle" || THREAD_AGENT_TERMINAL_STATUSES.has(status);
   // A settled agent's card shows its result/error, not a stale in-flight
   // activity line ("Reading files…" on a failed card).
-  const rawCurrentActivity = settledNow
+  const nextActivityLabel = summary ?? stepDescription ?? lastToolName;
+  const boundedActivityLabel =
+    nextActivityLabel === undefined ? undefined : boundAgentText(nextActivityLabel);
+  const currentActivity = settledNow
     ? undefined
-    : (summary ?? lastToolName ?? previous?.currentActivity);
-  const currentActivity =
-    rawCurrentActivity === undefined ? undefined : boundAgentText(rawCurrentActivity);
+    : (boundedActivityLabel ?? previous?.currentActivity);
+  // Append only when the *rendered* label changes. Comparing the bounded label
+  // matters because a description longer than the bound would otherwise differ
+  // from the stored (truncated) one on every event and append a duplicate row
+  // per tick. A tool switch under an unchanged step is not its own entry — the
+  // card renders `lastToolName` separately.
   const activityChanged =
-    (summary !== undefined && summary !== previous?.currentActivity) ||
-    (lastToolName !== undefined && lastToolName !== previous?.lastToolName);
+    boundedActivityLabel !== undefined && boundedActivityLabel !== previous?.currentActivity;
   const outcome = "outcome" in payload ? payload.outcome : undefined;
-  const recentActivity = activityChanged
-    ? [
-        ...(previous?.recentActivity ?? []),
-        {
-          at: event.createdAt,
-          // Bounded: Codex child item summaries can carry full command/item
-          // text, and each entry is duplicated into every roster snapshot.
-          summary: boundAgentText(summary ?? lastToolName ?? "Activity updated"),
-          ...(outcome ? { outcome } : {}),
-        },
-      ].slice(-THREAD_AGENT_RECENT_ACTIVITY_LIMIT)
-    : (previous?.recentActivity ?? []);
+  const recentActivity =
+    activityChanged && boundedActivityLabel !== undefined
+      ? [
+          ...(previous?.recentActivity ?? []),
+          {
+            at: event.createdAt,
+            // Bounded: Codex child item summaries can carry full command/item
+            // text, and each entry is duplicated into every roster snapshot.
+            summary: boundedActivityLabel,
+            ...(outcome ? { outcome } : {}),
+          },
+        ].slice(-THREAD_AGENT_RECENT_ACTIVITY_LIMIT)
+      : (previous?.recentActivity ?? []);
   const wasSettled =
     previous !== undefined &&
     (previous.status === "idle" || THREAD_AGENT_TERMINAL_STATUSES.has(previous.status));
@@ -220,7 +242,23 @@ export function foldTaskAgentEvent(
     provider: event.provider,
     ...(delegateProvider ? { delegateProvider } : {}),
     kind: eventKind !== "other" ? eventKind : (previous?.kind ?? eventKind),
-    name: payload.name ?? description ?? payload.workflowName ?? previous?.name ?? payload.taskId,
+    // The card's title is stable identity, so a name already established wins
+    // over a later event's description. Otherwise every progress step renamed
+    // the card ("Searching for \.name\)\.toBe|agentId ===" as a title), and a
+    // Codex companion card renamed itself to the job title mid-run. A late
+    // description still names an agent whose spawn event was never seen.
+    // The card's title is stable identity, so a name already established wins
+    // over a later event's description. Otherwise every progress step renamed
+    // the card ("Searching for \.name\)\.toBe|agentId ===" as a title), and a
+    // Codex companion card renamed itself to the job title mid-run. A late
+    // description still names an agent whose spawn event was never seen.
+    name:
+      payload.name ??
+      (event.type === "task.started" ? description : undefined) ??
+      previous?.name ??
+      description ??
+      payload.workflowName ??
+      payload.taskId,
     ...(agentType ? { agentType } : {}),
     ...((payload.model ?? previous?.model) ? { model: payload.model ?? previous?.model } : {}),
     status,
@@ -988,6 +1026,39 @@ export function runtimeEventToActivities(
   return [];
 }
 
+/** @internal Exported for focused regression coverage. */
+export function isUnprojectedContentDelta(event: ProviderRuntimeEvent): boolean {
+  return event.type === "content.delta" && event.payload.streamKind !== "assistant_text";
+}
+
+/** @internal Exported for focused regression coverage. */
+export function needsPendingTurnStartLookup(event: ProviderRuntimeEvent): boolean {
+  return (
+    event.type === "session.started" ||
+    event.type === "session.state.changed" ||
+    event.type === "thread.started" ||
+    event.type === "turn.started"
+  );
+}
+
+/** @internal Exported for focused regression coverage. */
+export function runtimeEventsForIngestion(
+  events: Stream.Stream<ProviderRuntimeEvent>,
+): Stream.Stream<ProviderRuntimeEvent> {
+  return events.pipe(Stream.filter((event) => !isUnprojectedContentDelta(event)));
+}
+
+/** @internal Exported for focused regression coverage. */
+export function getPendingTurnStartForEvent(
+  event: ProviderRuntimeEvent,
+  threadId: ThreadId,
+  getPendingTurnStartByThreadId: ProjectionTurnRepositoryShape["getPendingTurnStartByThreadId"],
+) {
+  return needsPendingTurnStartLookup(event)
+    ? getPendingTurnStartByThreadId({ threadId })
+    : Effect.succeed(Option.none());
+}
+
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -995,6 +1066,10 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const enableAssistantStreamingRef = yield* serverSettingsService.getSettings.pipe(
+    Effect.map((settings) => settings.enableAssistantStreaming),
+    Effect.flatMap(Ref.make),
+  );
   const agentsByThread = new Map<ThreadId, Map<string, ThreadAgentSnapshot>>();
   const hydratedAgentThreads = new Set<ThreadId>();
   // Threads whose latest roster failed to persist: the in-memory state is
@@ -1611,6 +1686,13 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      // Reasoning and tool-output deltas currently have no orchestration
+      // projection. The runtime subscription filters them before enqueueing;
+      // retain this guard as defensive depth for any future direct call path.
+      if (isUnprojectedContentDelta(event)) {
+        return;
+      }
+
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
@@ -1802,9 +1884,11 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
-      const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-        threadId: thread.id,
-      });
+      const pendingTurnStart = yield* getPendingTurnStartForEvent(
+        event,
+        thread.id,
+        projectionTurnRepository.getPendingTurnStartByThreadId,
+      );
       const hasPendingTurnStart =
         Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
 
@@ -1965,10 +2049,11 @@ const make = Effect.gen(function* () {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
 
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
+        const assistantDeliveryMode: AssistantDeliveryMode = (yield* Ref.get(
+          enableAssistantStreamingRef,
+        ))
+          ? "streaming"
+          : "buffered";
         if (assistantDeliveryMode === "buffered") {
           const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
           if (spillChunk.length > 0) {
@@ -2001,10 +2086,11 @@ const make = Effect.gen(function* () {
           : undefined;
       if (pauseForUserTurnId) {
         const detailedThread = yield* getLoadedThreadDetail();
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
+        const assistantDeliveryMode: AssistantDeliveryMode = (yield* Ref.get(
+          enableAssistantStreamingRef,
+        ))
+          ? "streaming"
+          : "buffered";
         const flushedMessageIds =
           assistantDeliveryMode === "buffered"
             ? yield* flushBufferedAssistantMessagesForTurn({
@@ -2327,8 +2413,13 @@ const make = Effect.gen(function* () {
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
       yield* Effect.forkScoped(
-        Stream.runForEach(providerService.streamEvents, (event) =>
-          worker.enqueue({ source: "runtime", event }),
+        Stream.runForEach(serverSettingsService.streamChanges, (settings) =>
+          Ref.set(enableAssistantStreamingRef, settings.enableAssistantStreaming),
+        ),
+      );
+      yield* Effect.forkScoped(
+        runtimeEventsForIngestion(providerService.streamEvents).pipe(
+          Stream.runForEach((event) => worker.enqueue({ source: "runtime", event })),
         ),
       );
       yield* Effect.forkScoped(

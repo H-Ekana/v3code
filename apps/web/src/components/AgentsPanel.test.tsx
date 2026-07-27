@@ -98,6 +98,60 @@ describe("AgentsPanel provider identity", () => {
 });
 
 describe("AgentsPanel sections", () => {
+  it("keeps completed sub-agents behind a collapsed Finished toggle", () => {
+    const markup = renderAgent(
+      agent({
+        agentId: "completed-agent",
+        provider: ProviderDriverKind.make("codex"),
+        name: "Completed agent",
+        status: "completed",
+      }),
+    );
+    const finishedToggle = markup.match(
+      /<button[^>]*aria-label="Finished sub-agents · 1"[^>]*>.*?<\/button>/,
+    )?.[0];
+
+    expect(finishedToggle).toBeDefined();
+    expect(finishedToggle).toContain('aria-expanded="false"');
+    expect(finishedToggle).toContain("Finished");
+    expect(finishedToggle).toContain("· 1");
+    expect(markup).not.toContain("Completed agent");
+  });
+
+  it("shows running sub-agents while completed siblings stay collapsed", () => {
+    const running = agent({
+      agentId: "running-agent",
+      provider: ProviderDriverKind.make("codex"),
+      name: "Running sibling",
+    });
+    const completed = agent({
+      agentId: "completed-agent",
+      provider: ProviderDriverKind.make("codex"),
+      name: "Completed sibling",
+      status: "completed",
+    });
+    const markup = renderToStaticMarkup(
+      <AgentsPanel agents={[completed, running]} mode="embedded" />,
+    );
+
+    expect(markup).toContain("Running sibling");
+    expect(markup).not.toContain("Completed sibling");
+    expect(markup).toContain('aria-label="Finished sub-agents · 1"');
+  });
+
+  it("omits the Finished toggle when no sub-agents are settled", () => {
+    const markup = renderAgent(
+      agent({
+        agentId: "running-agent",
+        provider: ProviderDriverKind.make("codex"),
+        name: "Running agent",
+      }),
+    );
+
+    expect(markup).toContain("Running agent");
+    expect(markup).not.toContain('aria-label="Finished sub-agents"');
+  });
+
   it("keeps background tasks collapsed and countable", () => {
     const markup = renderAgent(
       agent({

@@ -100,6 +100,8 @@ export interface AgentPanelRow {
 
 export interface AgentPanelState {
   readonly groups: ReadonlyArray<AgentPanelGroup>;
+  readonly activeSubagents: ReadonlyArray<AgentPanelRow>;
+  readonly settledSubagents: ReadonlyArray<AgentPanelRow>;
   readonly subagents: ReadonlyArray<AgentPanelRow>;
   readonly backgroundTasks: ReadonlyArray<ThreadAgentSnapshot>;
   readonly runningCount: number;
@@ -170,11 +172,11 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
     });
   }
 
-  const subagents = subagentSnapshots.map((agent) => ({
+  const attachedSubagents = subagentSnapshots.map((agent) => ({
     agent,
     shells: [] as ThreadAgentSnapshot[],
   }));
-  const subagentById = new Map(subagents.map((row) => [row.agent.agentId, row]));
+  const subagentById = new Map(attachedSubagents.map((row) => [row.agent.agentId, row]));
   const backgroundTasks: ThreadAgentSnapshot[] = [];
   for (const shell of shellCandidates) {
     const parent = shell.parentAgentId ? subagentById.get(shell.parentAgentId) : undefined;
@@ -184,6 +186,33 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
       backgroundTasks.push(shell);
     }
   }
+
+  // Keep working agents prominent while collecting finished work below them.
+  const decoratedSubagents = attachedSubagents.map((row, rosterIndex) => ({
+    row,
+    rosterIndex,
+  }));
+  const activeSubagents = decoratedSubagents
+    .filter(({ row }) => !isSettledAgentStatus(row.agent.status))
+    .map(({ row }) => row);
+  const settledSubagents = decoratedSubagents
+    .filter(({ row }) => isSettledAgentStatus(row.agent.status))
+    .map(({ row, rosterIndex }) => {
+      const finishedAt = Date.parse(row.agent.endedAt ?? row.agent.lastActivityAt);
+      return {
+        row,
+        rosterIndex,
+        finishedAt: Number.isNaN(finishedAt) ? Number.NEGATIVE_INFINITY : finishedAt,
+      };
+    })
+    .sort((left, right) => {
+      if (left.finishedAt !== right.finishedAt) {
+        return left.finishedAt < right.finishedAt ? 1 : -1;
+      }
+      return left.rosterIndex - right.rosterIndex;
+    })
+    .map(({ row }) => row);
+  const subagents = [...activeSubagents, ...settledSubagents];
 
   // Workflow container rows are grouping chrome, not workers: they are
   // excluded from worker counts, and a container's own usage only counts when
@@ -214,6 +243,8 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
 
   return {
     groups,
+    activeSubagents,
+    settledSubagents,
     subagents,
     backgroundTasks,
     runningCount,

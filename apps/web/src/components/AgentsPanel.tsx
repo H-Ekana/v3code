@@ -16,7 +16,8 @@ import { cn } from "~/lib/utils";
 import { Badge } from "./ui/badge";
 import { ScrollArea } from "./ui/scroll-area";
 import { formatDuration } from "../session-logic";
-import { parseTimestampDate } from "../timestampFormat";
+import { formatTimestamp, parseTimestampDate } from "../timestampFormat";
+import { useClientSettings } from "../hooks/useSettings";
 import { formatProviderDisplayName } from "../lib/contextWindow";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 
@@ -157,6 +158,7 @@ function AgentCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
+  const settings = useClientSettings();
   const settled = isTerminalAgentStatus(agent.status);
   // Settled cards lead with outcome (error first); live cards with activity.
   const activity =
@@ -280,7 +282,10 @@ function AgentCard({
           {visibleActivity.map((entry) => (
             <div key={`${entry.at}-${entry.summary}`} className="flex gap-2 text-[11px]">
               <span className="shrink-0 font-mono tabular-nums text-muted-foreground/60">
-                {entry.at.slice(11, 19)}
+                {/* Slicing the ISO string rendered UTC, so every row sat hours
+                    off the user's wall clock. Share the app-wide formatter so
+                    these read like every other timestamp in the UI. */}
+                {formatTimestamp(entry.at, settings.timestampFormat)}
               </span>
               <span
                 className={cn(
@@ -439,19 +444,62 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   );
 }
 
-function SubagentsSection({ rows }: { rows: ReadonlyArray<AgentPanelRow> }) {
-  if (rows.length === 0) {
+function SubagentsSection({
+  activeRows,
+  settledRows,
+  settledExpanded,
+  onSettledExpandedChange,
+}: {
+  activeRows: ReadonlyArray<AgentPanelRow>;
+  settledRows: ReadonlyArray<AgentPanelRow>;
+  settledExpanded: boolean;
+  onSettledExpandedChange: (expanded: boolean) => void;
+}) {
+  if (activeRows.length === 0 && settledRows.length === 0) {
     return null;
   }
 
   return (
     <section aria-label="Sub-agents">
       <SectionHeader>Sub-agents</SectionHeader>
-      <div className="space-y-1.5">
-        {rows.map((row) => (
-          <AgentCard key={row.agent.agentId} agent={row.agent} shells={row.shells} />
-        ))}
-      </div>
+      {activeRows.length > 0 ? (
+        <div className="space-y-1.5">
+          {activeRows.map((row) => (
+            <AgentCard key={row.agent.agentId} agent={row.agent} shells={row.shells} />
+          ))}
+        </div>
+      ) : null}
+      {settledRows.length > 0 ? (
+        <>
+          <button
+            type="button"
+            className={cn(
+              "group/finished flex w-full items-center gap-1.5 rounded-sm pr-1 pb-1 pl-2 text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase outline-hidden transition-colors duration-200 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none",
+              activeRows.length > 0 && "mt-1.5",
+            )}
+            aria-label={`Finished sub-agents · ${settledRows.length}`}
+            aria-expanded={settledExpanded}
+            onClick={() => onSettledExpandedChange(!settledExpanded)}
+          >
+            <ChevronRightIcon
+              className={cn(
+                "size-3 transition-[color,transform] duration-200 ease-out group-hover/finished:text-primary motion-reduce:transition-none",
+                settledExpanded && "rotate-90",
+              )}
+            />
+            <span>Finished</span>
+            <span className="font-medium tracking-normal">· {settledRows.length}</span>
+            <span className="h-px flex-1 bg-primary/15" />
+          </button>
+          {settledExpanded ? (
+            <div className="space-y-1.5">
+              {settledRows.map((row) => (
+                <AgentCard key={row.agent.agentId} agent={row.agent} shells={row.shells} />
+              ))}
+            </div>
+          ) : null}
+        </>
+      ) : null}
     </section>
   );
 }
@@ -500,6 +548,7 @@ function BackgroundTasksSection({
 
 const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: AgentsPanelProps) {
   const state = deriveAgentPanelState(agents);
+  const [finishedExpanded, setFinishedExpanded] = useState(false);
   const [backgroundExpanded, setBackgroundExpanded] = useState(false);
 
   if (agents.length === 0) {
@@ -528,7 +577,12 @@ const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: Ag
               onOpenScript={onOpenScript}
             />
           ))}
-          <SubagentsSection rows={state.subagents} />
+          <SubagentsSection
+            activeRows={state.activeSubagents}
+            settledRows={state.settledSubagents}
+            settledExpanded={finishedExpanded}
+            onSettledExpandedChange={setFinishedExpanded}
+          />
           <BackgroundTasksSection
             agents={state.backgroundTasks}
             expanded={backgroundExpanded}

@@ -5,8 +5,9 @@ import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 describe("revealInFileExplorerLabel", () => {
   it.each([
     ["MacIntel", "Reveal in Finder"],
+    ["darwin", "Reveal in Finder"],
     ["Win32", "Reveal in File Explorer"],
-    ["Linux x86_64", "Reveal in Files"],
+    ["Linux x86_64", "Show in File Manager"],
   ])("maps %s to %s", (platform, expected) => {
     expect(revealInFileExplorerLabel(platform)).toBe(expected);
   });

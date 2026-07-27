@@ -50,6 +50,11 @@ export const LaunchEditorInput = Schema.Struct({
 });
 export type LaunchEditorInput = typeof LaunchEditorInput.Type;
 
+export const RevealPathInput = Schema.Struct({
+  path: TrimmedNonEmptyString,
+});
+export type RevealPathInput = typeof RevealPathInput.Type;
+
 export class ExternalLauncherUnknownEditorError extends Schema.TaggedErrorClass<ExternalLauncherUnknownEditorError>()(
   "ExternalLauncherUnknownEditorError",
   {
@@ -115,12 +120,38 @@ export class ExternalLauncherEditorSpawnError extends Schema.TaggedErrorClass<Ex
   }
 }
 
+export class ExternalLauncherRevealCommandNotFoundError extends Schema.TaggedErrorClass<ExternalLauncherRevealCommandNotFoundError>()(
+  "ExternalLauncherRevealCommandNotFoundError",
+  {
+    command: Schema.String,
+    target: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `File manager command not found: ${this.command}`;
+  }
+}
+
+export class ExternalLauncherRevealSpawnError extends Schema.TaggedErrorClass<ExternalLauncherRevealSpawnError>()(
+  "ExternalLauncherRevealSpawnError",
+  {
+    ...ExternalLauncherSpawnFields,
+    target: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Failed to reveal '${this.target}' with '${[this.command, ...this.args].join(" ")}'`;
+  }
+}
+
 export const ExternalLauncherError = Schema.Union([
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
   ExternalLauncherCommandNotFoundError,
   ExternalLauncherBrowserSpawnError,
   ExternalLauncherEditorSpawnError,
+  ExternalLauncherRevealCommandNotFoundError,
+  ExternalLauncherRevealSpawnError,
 ]);
 export type ExternalLauncherError = typeof ExternalLauncherError.Type;
 

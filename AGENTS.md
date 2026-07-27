@@ -3,6 +3,34 @@
 Read `KNOWN-ISSUES.md` before debugging anything that looks like a hung thread, a stuck spinner, or
 an unresponsive stop button — that failure mode is already diagnosed and has a repair script.
 
+## Git Remotes — push and open PRs against the fork, never upstream
+
+This checkout has two remotes:
+
+| Remote     | Repository         | Use                                                                   |
+| ---------- | ------------------ | --------------------------------------------------------------------- |
+| `origin`   | `H-Ekana/v3code`   | **This is ours.** Push branches and open every PR here.               |
+| `upstream` | `pingdotgg/t3code` | Read-only. Fetch and merge from it. **Never push or open a PR here.** |
+
+**`gh` does not default to `origin`.** With an `upstream` remote present it resolves the repo to
+`pingdotgg/t3code`, so a bare `gh pr create` targets the upstream project — a public PR against
+someone else's repository containing our in-progress work. Always pass the repo explicitly:
+
+```sh
+gh pr create --repo H-Ekana/v3code --base main --head <branch> --title "..." --body-file -
+```
+
+The same applies to `gh pr list`, `gh pr view`, `gh pr checks`, and `gh api` — pass
+`--repo H-Ekana/v3code` (or `-R`) every time.
+
+Symptom that you got it wrong: `gh` fails with `No commits between main and <branch>` and
+`Head ref must be a branch`. That is not a problem with your branch — it means `gh` looked for your
+branch in `pingdotgg/t3code`, where it does not exist. Do not "fix" it by pushing the branch
+upstream. Re-run with `--repo H-Ekana/v3code`.
+
+Work on a branch off `main` and land it through a PR. Do not commit directly to `main`; CI on the PR
+is the first full verification, since local runs are deliberately limited to focused tests.
+
 ## Task Completion Requirements
 
 - When the user asks to bring in a fix that already exists upstream, prefer merging the upstream

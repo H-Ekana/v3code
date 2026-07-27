@@ -117,6 +117,13 @@ The lifecycle should use icons/text as well as color. Running may use a duty-cyc
 waiting remains amber; unseen completion gets one violet-to-pink arrival plus a check; seen
 completion is static; failure stays destructive.
 
+Retheme the remaining cyan/blue `Working` treatment in thread rows as part of this shared
+lifecycle. The spinner trace, `Working` label, elapsed time, and any active-row edge should use the
+established violet-to-pink status recipe rather than the generic info-blue tokens. Keep the label
+and animated ring so activity is never communicated by color alone, keep the effect contained to
+the active row, and provide a static violet indicator under reduced motion. Reserve blue for
+genuinely informational states elsewhere in the product.
+
 Likely consumers:
 
 - `apps/web/src/components/AgentsPanel.tsx`
@@ -204,7 +211,28 @@ Primary files:
 - `apps/web/src/components/chat/ComposerPendingApprovalPanel.tsx`
 - `apps/web/src/components/chat/ComposerPendingApprovalActions.tsx`
 
-#### 9. Composer-to-timeline handoff
+#### 9. Auto mode distinction
+
+Auto mode is a new, special capability and should be recognizable at a glance without making the
+entire runtime-mode control permanently loud:
+
+- when Auto is selected, give the sparkles glyph a crisp purple outline and a contained purple
+  afterglow no wider than roughly 6–8px;
+- keep the glow anchored to the star shapes rather than illuminating the full trigger;
+- use the same selected-state treatment in the compact composer control and Auto's picker row;
+- allow one quick violet-to-pink glint when the user switches into Auto, then leave the icon in a
+  quiet static illuminated state;
+- keep the visible `Auto` label and selection semantics so the mode is never communicated by color
+  alone;
+- under reduced motion, omit the entry glint while preserving the outlined, softly illuminated
+  stars.
+
+Primary files:
+
+- `apps/web/src/components/chat/ChatComposer.tsx`
+- `apps/web/src/components/chat/CompactComposerControlsMenu.tsx`
+
+#### 10. Composer-to-timeline handoff
 
 Complete the signature send sequence by animating only the newly created user turn:
 
@@ -216,7 +244,7 @@ Never animate initial history, restored scroll content, or virtualized remounts.
 
 Primary file: `apps/web/src/components/MessagesTimeline.tsx`
 
-#### 10. Thread-settlement celebration
+#### 11. Thread-settlement celebration
 
 Settling a thread represents the intentional completion of a substantial body of work and should
 earn a richer acknowledgment than an ordinary row action:
@@ -241,7 +269,7 @@ Primary files:
 
 ### Phase 3 — navigation and workspace continuity
 
-#### 11. Sidebar collapse, resize, and project switching
+#### 12. Sidebar collapse, resize, and project switching
 
 - Use a coherent 220ms collapse/expand transition.
 - Crossfade the open/closed trigger icon.
@@ -257,7 +285,7 @@ Primary files:
 - `apps/web/src/components/Sidebar.tsx`
 - `apps/web/src/components/SidebarV2.tsx`
 
-#### 12. Right panel and tabs
+#### 13. Right panel and tabs
 
 Make the right panel feel physically attached to the workspace:
 
@@ -276,7 +304,7 @@ Primary files:
 - `apps/web/src/components/preview/PreviewPanelShell.tsx`
 - `apps/web/src/components/chat/ChatHeader.tsx`
 
-#### 13. Command palette and settings navigation
+#### 14. Command palette and settings navigation
 
 Command palette:
 
@@ -299,7 +327,7 @@ Primary files:
 - `apps/web/src/components/settings/SettingsSidebarNav.tsx`
 - `apps/web/src/routes/settings.tsx`
 
-#### 14. Model picker
+#### 15. Model picker
 
 - Move the provider-rail marker with transform/FLIP rather than animating `top`.
 - Add a clear focus-visible state.
@@ -315,7 +343,7 @@ Primary files:
 
 ### Phase 4 — secondary workbench surfaces
 
-#### 15. Terminal drawer
+#### 16. Terminal drawer
 
 - Deliberate surface launch and exit rather than `hidden` hard-switching.
 - Thin primary illumination on the resize affordance during hover/drag.
@@ -323,7 +351,7 @@ Primary files:
 - Celebrate terminal session exit only, not ordinary command completion.
 - Refit xterm after the transition, not on every frame.
 
-#### 16. Files and diffs
+#### 17. Files and diffs
 
 - Preserve continuity between file tree and preview.
 - Crossfade loading, error, and content states.
@@ -339,7 +367,7 @@ Primary files:
 - `apps/web/src/components/DiffPanelShell.tsx`
 - `apps/web/src/components/chat/ChangedFilesTree.tsx`
 
-#### 17. Git, branch, environment, and publishing feedback
+#### 18. Git, branch, environment, and publishing feedback
 
 - Morph the invoked Git action into contained progress feedback.
 - Crossfade branch/environment labels after confirmed changes.
@@ -347,7 +375,7 @@ Primary files:
 - Reserve a bounded 400–440ms violet/pink halo for successful repository publishing.
 - Keep semantic success green and routine commit/pull/push operations quiet.
 
-#### 18. Toasts, banners, loading, and empty states
+#### 19. Toasts, banners, loading, and empty states
 
 - Shorten toast arrival from 500ms to approximately 220–240ms.
 - Give outcomes contained semantic accents without changing toast geometry.

@@ -35,3 +35,5 @@ node_modules/
 *.log
 .env*
 !.env.example
+# Local CLI state (gh device id, etc.) — machine-specific, never shared.
+.local/

@@ -101,6 +101,139 @@ describe("deriveAgentPanelState", () => {
     expect(state.backgroundTasks).toHaveLength(0);
   });
 
+  it("partitions active and settled sub-agent statuses", () => {
+    const statuses: ReadonlyArray<ThreadAgentSnapshot["status"]> = [
+      "running",
+      "completed",
+      "pending",
+      "failed",
+      "waiting",
+      "stopped",
+      "idle",
+    ];
+    const state = deriveAgentPanelState(
+      statuses.map(
+        (status): ThreadAgentSnapshot => ({
+          ...(base[0] as ThreadAgentSnapshot),
+          agentId: status,
+          status,
+        }),
+      ),
+    );
+
+    expect(state.activeSubagents.map((row) => row.agent.agentId)).toEqual([
+      "running",
+      "pending",
+      "waiting",
+    ]);
+    expect(state.settledSubagents.map((row) => row.agent.agentId)).toEqual([
+      "completed",
+      "failed",
+      "stopped",
+      "idle",
+    ]);
+  });
+
+  it("keeps the compatibility subagents list active-first", () => {
+    const completed: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "completed",
+    };
+    const running: ThreadAgentSnapshot = {
+      ...completed,
+      agentId: "running",
+      status: "running",
+    };
+    const failed: ThreadAgentSnapshot = {
+      ...completed,
+      agentId: "failed",
+      status: "failed",
+    };
+
+    const state = deriveAgentPanelState([completed, running, failed]);
+
+    expect(state.subagents.map((row) => row.agent.agentId)).toEqual([
+      "running",
+      "completed",
+      "failed",
+    ]);
+    expect(state.subagents).toEqual([...state.activeSubagents, ...state.settledSubagents]);
+  });
+
+  it("sorts settled sub-agents by newest finish time", () => {
+    const oldest: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "oldest",
+      endedAt: "2026-07-21T03:00:00.000Z",
+    };
+    const newest: ThreadAgentSnapshot = {
+      ...oldest,
+      agentId: "newest",
+      endedAt: "2026-07-21T05:00:00.000Z",
+    };
+    const middle: ThreadAgentSnapshot = {
+      ...oldest,
+      agentId: "middle",
+      endedAt: "2026-07-21T04:00:00.000Z",
+    };
+
+    const state = deriveAgentPanelState([oldest, newest, middle]);
+
+    expect(state.settledSubagents.map((row) => row.agent.agentId)).toEqual([
+      "newest",
+      "middle",
+      "oldest",
+    ]);
+  });
+
+  it("falls back to lastActivityAt and sinks unparseable finish times", () => {
+    // An idle Codex row can settle without ever writing endedAt, and a
+    // corrupted timestamp must not float to the top of the Finished group.
+    const { endedAt: _endedAt, ...withoutEndedAt } = base[0] as ThreadAgentSnapshot;
+    const fallback: ThreadAgentSnapshot = {
+      ...withoutEndedAt,
+      agentId: "fallback",
+      status: "idle",
+      lastActivityAt: "2026-07-21T06:00:00.000Z",
+    };
+    const ended: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "ended",
+      endedAt: "2026-07-21T05:00:00.000Z",
+    };
+    const unparseable: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "unparseable",
+      endedAt: "not-a-timestamp",
+    };
+
+    const state = deriveAgentPanelState([unparseable, ended, fallback]);
+
+    expect(state.settledSubagents.map((row) => row.agent.agentId)).toEqual([
+      "fallback",
+      "ended",
+      "unparseable",
+    ]);
+  });
+
+  it("breaks settled ties on roster order", () => {
+    const first: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "first",
+      endedAt: "2026-07-21T05:00:00.000Z",
+    };
+    const second: ThreadAgentSnapshot = { ...first, agentId: "second" };
+    const third: ThreadAgentSnapshot = { ...first, agentId: "third" };
+
+    const state = deriveAgentPanelState([first, second, third]);
+
+    expect(state.settledSubagents.map((row) => row.agent.agentId)).toEqual([
+      "first",
+      "second",
+      "third",
+    ]);
+  });
+
   it("nests a parented shell under its sub-agent row", () => {
     const subagent: ThreadAgentSnapshot = {
       ...(base[0] as ThreadAgentSnapshot),
@@ -119,6 +252,29 @@ describe("deriveAgentPanelState", () => {
     expect(state.subagents).toHaveLength(1);
     expect(state.subagents[0]?.agent.agentId).toBe("subagent-1");
     expect(state.subagents[0]?.shells.map((agent) => agent.agentId)).toEqual(["shell-1"]);
+    expect(state.backgroundTasks).toHaveLength(0);
+  });
+
+  it("keeps a parented shell on a settled sub-agent row", () => {
+    const subagent: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "settled-subagent",
+      status: "completed",
+    };
+    const shell: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "settled-shell",
+      kind: "shell",
+      parentAgentId: "settled-subagent",
+      status: "completed",
+    };
+
+    const state = deriveAgentPanelState([subagent, shell]);
+
+    expect(state.settledSubagents).toHaveLength(1);
+    expect(state.settledSubagents[0]?.shells.map((agent) => agent.agentId)).toEqual([
+      "settled-shell",
+    ]);
     expect(state.backgroundTasks).toHaveLength(0);
   });
 

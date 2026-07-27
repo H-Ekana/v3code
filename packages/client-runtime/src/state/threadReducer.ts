@@ -571,10 +571,17 @@ function rebindCheckpointAssistantMessage(
   checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
   turnId: TurnId,
   messageId: MessageId,
-): OrchestrationCheckpointSummary[] {
-  return Arr.map(checkpoints, (entry) =>
-    entry.turnId === turnId ? { ...entry, assistantMessageId: messageId } : entry,
-  );
+): ReadonlyArray<OrchestrationCheckpointSummary> {
+  let changed = false;
+  const next = Arr.map(checkpoints, (entry) => {
+    if (entry.turnId !== turnId || entry.assistantMessageId === messageId) return entry;
+    changed = true;
+    return { ...entry, assistantMessageId: messageId };
+  });
+  // Returning the original array when nothing changed keeps `thread.checkpoints`
+  // identity-stable across streaming deltas, which stops a cascade of downstream
+  // memo invalidations (turn diff summaries, revert counts, timeline rows).
+  return changed ? next : checkpoints;
 }
 
 function retainMessagesAfterRevert(

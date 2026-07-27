@@ -557,6 +557,15 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --animate-sidebar-working-text: sidebar-working-text 3.4s infinite;
   --animate-sidebar-completion-arrive: sidebar-completion-arrive 560ms cubic-bezier(0.16, 1, 0.3, 1)
     both;
+  /* A sidebar card held for rearranging. Elevation is a brand-violet ring and
+     glow rather than a black drop shadow — the same violet the row focus ring
+     and the Settle button use — with astro-highlight underneath at low
+     strength, matching the primary+highlight pairing of the composer launch
+     and draft-hero effects. */
+  --shadow-sidebar-card-lifted:
+    0 0 0 1px color-mix(in srgb, var(--primary) 90%, transparent),
+    0 0 12px color-mix(in srgb, var(--primary) 34%, transparent),
+    0 0 28px color-mix(in srgb, var(--astro-highlight) 20%, transparent);
   --font-sans:
     "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     sans-serif;
@@ -1266,6 +1275,12 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 :root {
   color-scheme: light;
   --radius: 0.625rem;
+  /* The app's pick-up curve (ease-out-expo), shared with the sidebar
+     completion arrival and the composer launch: fast off the mark, long
+     settle. Lives here rather than in @theme because `@theme inline` does not
+     emit the custom property, and `ease-(--ease-lift)` needs it at runtime to
+     override the row's default ease-out. */
+  --ease-lift: cubic-bezier(0.16, 1, 0.3, 1);
   --background: var(--color-zinc-25);
   --app-chrome-background: var(--background);
   --surface-raised: color-mix(in srgb, var(--card) 20%, transparent);

@@ -24,6 +24,9 @@ import { toSafeThreadAttachmentSegment } from "../../attachmentStore.ts";
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 10;
 const DEFAULT_BATCH_WINDOW_MS = 200;
+// Keep individual writes well below the rotation size so backups pack densely
+// and a flush never builds a file-sized JavaScript string.
+const EVENT_LOG_BATCH_MAX_BYTES = 1 * 1024 * 1024;
 const GLOBAL_THREAD_SEGMENT = "_global";
 const LOG_SCOPE = "provider-observability";
 const encodeUnknownJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
@@ -51,6 +54,33 @@ interface ThreadWriter {
 interface LoggerState {
   readonly threadWriters: Map<string, ThreadWriter>;
   readonly failedSegments: Set<string>;
+}
+
+/** @internal Exported for focused regression coverage. */
+export function writeEventLogBatch(
+  sink: Pick<RotatingFileSink, "write">,
+  messages: ReadonlyArray<string>,
+  maxBatchBytes = Number.POSITIVE_INFINITY,
+): void {
+  if (messages.length === 0) {
+    return;
+  }
+
+  let batch = "";
+  let batchBytes = 0;
+  for (const message of messages) {
+    const messageBytes = Buffer.byteLength(message);
+    if (batch.length > 0 && batchBytes + messageBytes > maxBatchBytes) {
+      sink.write(batch);
+      batch = "";
+      batchBytes = 0;
+    }
+    batch += message;
+    batchBytes += messageBytes;
+  }
+  if (batch.length > 0) {
+    sink.write(batch);
+  }
 }
 
 function logWarning(message: string, context: Record<string, unknown>): Effect.Effect<void> {
@@ -138,9 +168,7 @@ const makeThreadWriter = Effect.fn("makeThreadWriter")(function* (input: {
     flush: Effect.fn("makeThreadWriter.flush")(function* (messages) {
       const flushResult = yield* Effect.sync(() => {
         try {
-          for (const message of messages) {
-            sink.write(message);
-          }
+          writeEventLogBatch(sink, messages, Math.min(input.maxBytes, EVENT_LOG_BATCH_MAX_BYTES));
           return { ok: true as const };
         } catch (error) {
           return { ok: false as const, error };

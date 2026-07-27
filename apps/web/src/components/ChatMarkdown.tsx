@@ -22,6 +22,7 @@ import React, {
   Suspense,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
+  createContext,
   isValidElement,
   use,
   useCallback,
@@ -53,7 +54,7 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsi
 import { ScrollArea } from "./ui/scroll-area";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { useOpenInPreferredEditor } from "../editorPreferences";
+import { useOpenInPreferredEditor, useRevealPath } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
@@ -66,6 +67,11 @@ import {
 } from "../markdown-clipboard";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
 import {
+  planIncrementalMarkdownSplit,
+  type IncrementalMarkdownSplit,
+} from "../markdown-incremental";
+import {
+  type MarkdownFileLinkMeta,
   normalizeMarkdownLinkDestination,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
@@ -88,6 +94,7 @@ import {
   openUrlInPreview,
   BrowserPreviewUnavailableError,
 } from "../browser/openFileInPreview";
+import { revealInFileExplorerLabel } from "./preview/fileExplorerLabel";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -187,6 +194,81 @@ const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypeRaw,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+const EMPTY_AVAILABLE_EDITORS = [] as const;
+const EMPTY_FILE_LINK_META_BY_HREF: ReadonlyMap<string, MarkdownFileLinkMeta> = new Map();
+
+/**
+ * Which slice of the original message the surrounding `<ReactMarkdown>` was
+ * given. Streaming messages are rendered as several independently parsed
+ * chunks, so mdast offsets are chunk-relative; components that need an offset
+ * into the *message* resolve it against this scope.
+ */
+interface MarkdownSourceScope {
+  readonly source: string;
+  readonly offset: number;
+}
+
+const MarkdownSourceScopeContext = createContext<MarkdownSourceScope | null>(null);
+
+function taskListMarkerOffsetInScope(
+  scope: MarkdownSourceScope | null,
+  listItemStart: number | undefined,
+): number | undefined {
+  if (scope === null || typeof listItemStart !== "number") return undefined;
+  // The marker always sits on the list item's own first line, which is fully
+  // contained in the chunk, so resolving inside the chunk and shifting by the
+  // chunk offset is identical to resolving against the whole message.
+  const markerOffset = findTaskListMarkerOffset(scope.source, listItemStart);
+  return markerOffset === null ? undefined : markerOffset + scope.offset;
+}
+
+interface MarkdownSegmentProps {
+  readonly source: string;
+  readonly offset: number;
+  /**
+   * `mdast-util-to-hast` puts a "\n" text node *between* every pair of
+   * root-level blocks. Splitting the document drops the one that straddles the
+   * cut, so every chunk but the last re-emits it and the concatenated DOM stays
+   * node-for-node identical to a whole-document render.
+   */
+  readonly trailingSeparator: boolean;
+  readonly components: Components;
+  readonly remarkPlugins: NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
+  readonly rehypePlugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+  readonly urlTransform: NonNullable<ReactMarkdownOptions["urlTransform"]>;
+}
+
+/**
+ * One independently parsed chunk of a message. `react-markdown` has no internal
+ * memoization and builds a fresh unified processor on every render, so this
+ * `memo` boundary is the entire point of the incremental path: frozen chunks
+ * keep referentially stable props and are never re-parsed as the message grows.
+ */
+const MarkdownSegment = memo(function MarkdownSegment({
+  source,
+  offset,
+  trailingSeparator,
+  components,
+  remarkPlugins,
+  rehypePlugins,
+  urlTransform,
+}: MarkdownSegmentProps) {
+  const scope = useMemo<MarkdownSourceScope>(() => ({ source, offset }), [source, offset]);
+  return (
+    <MarkdownSourceScopeContext value={scope}>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
+        components={components}
+        urlTransform={urlTransform}
+      >
+        {source}
+      </ReactMarkdown>
+      {trailingSeparator ? "\n" : null}
+    </MarkdownSourceScopeContext>
+  );
+});
 
 function extractFenceLanguage(className: string | undefined): string {
   const match = className?.match(CODE_FENCE_LANGUAGE_REGEX);
@@ -668,8 +750,12 @@ function SuspenseShikiCodeBlock({
   isStreaming,
 }: SuspenseShikiCodeBlockProps) {
   const language = extractFenceLanguage(className);
+  if (isStreaming) {
+    return <PlainStreamingCodeBlock className={className} code={code} />;
+  }
+
   const cacheKey = createHighlightCacheKey(code, language, themeName);
-  const cachedHighlightedHtml = !isStreaming ? highlightedCodeCache.get(cacheKey) : null;
+  const cachedHighlightedHtml = highlightedCodeCache.get(cacheKey);
 
   if (cachedHighlightedHtml != null) {
     return (
@@ -686,8 +772,21 @@ function SuspenseShikiCodeBlock({
       language={language}
       themeName={themeName}
       cacheKey={cacheKey}
-      isStreaming={isStreaming}
     />
+  );
+}
+
+function PlainStreamingCodeBlock({
+  className,
+  code,
+}: {
+  className: string | undefined;
+  code: string;
+}) {
+  return (
+    <pre>
+      <code className={className}>{code}</code>
+    </pre>
   );
 }
 
@@ -696,7 +795,6 @@ interface UncachedShikiCodeBlockProps {
   language: string;
   themeName: DiffThemeName;
   cacheKey: string;
-  isStreaming: boolean;
 }
 
 function UncachedShikiCodeBlock({
@@ -704,7 +802,6 @@ function UncachedShikiCodeBlock({
   language,
   themeName,
   cacheKey,
-  isStreaming,
 }: UncachedShikiCodeBlockProps) {
   const highlighter = use(getHighlighterPromise(language));
   const highlightedHtml = useMemo(() => {
@@ -722,14 +819,12 @@ function UncachedShikiCodeBlock({
   }, [code, highlighter, language, themeName]);
 
   useEffect(() => {
-    if (!isStreaming) {
-      highlightedCodeCache.set(
-        cacheKey,
-        highlightedHtml,
-        estimateHighlightedSize(highlightedHtml, code),
-      );
-    }
-  }, [cacheKey, code, highlightedHtml, isStreaming]);
+    highlightedCodeCache.set(
+      cacheKey,
+      highlightedHtml,
+      estimateHighlightedSize(highlightedHtml, code),
+    );
+  }, [cacheKey, code, highlightedHtml]);
 
   return (
     <div className="chat-markdown-shiki" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
@@ -738,18 +833,29 @@ function UncachedShikiCodeBlock({
 
 interface MarkdownFileLinkProps {
   href: string;
-  targetPath: string;
+  meta: MarkdownFileLinkMeta;
   iconPath: string;
-  displayPath: string;
-  workspaceRelativePath: string | null;
-  line?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
   threadRef?: ScopedThreadRef | undefined;
   onOpen: (targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>;
   onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  onReveal?: ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  revealLabel?: string | undefined;
   className?: string | undefined;
+}
+
+interface MarkdownProseFileLinkProps {
+  meta: MarkdownFileLinkMeta;
+  children: ReactNode;
+  copyMarkdown: string;
+  threadRef?: ScopedThreadRef | undefined;
+  onOpen: (targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>;
+  onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  onReveal?: ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+  revealLabel?: string | undefined;
+  anchorProps: React.AnchorHTMLAttributes<HTMLAnchorElement>;
 }
 
 const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
@@ -831,6 +937,44 @@ function normalizeMarkdownLinkHrefKey(href: string): string {
   return rewriteMarkdownFileUriHref(normalizedHref) ?? normalizedHref;
 }
 
+function isLiveFileLinkCandidate(href: string): boolean {
+  return href.length > 0 && !href.startsWith("#") && !/^(?:https?:|mailto:)/i.test(href);
+}
+
+function comparableMarkdownPath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function isPathLikeMarkdownLinkLabel(
+  label: string | null,
+  normalizedHref: string,
+  meta: MarkdownFileLinkMeta,
+  cwd: string | undefined,
+): boolean {
+  const normalizedLabel = label?.trim();
+  if (!normalizedLabel) return false;
+
+  const labelHref = normalizeMarkdownLinkHrefKey(normalizedLabel);
+  const comparableLabel = comparableMarkdownPath(labelHref);
+  const candidates = [
+    normalizedHref,
+    meta.targetPath,
+    meta.filePath,
+    meta.displayPath,
+    meta.basename,
+  ].map(comparableMarkdownPath);
+  if (candidates.includes(comparableLabel)) return true;
+
+  const labelWithoutPosition = normalizedLabel.replace(/:\d+(?::\d+)?$/, "");
+  if (labelWithoutPosition === meta.basename) return true;
+
+  const labelMeta = resolveMarkdownFileLinkMeta(labelHref, cwd);
+  return (
+    labelMeta !== null &&
+    comparableMarkdownPath(labelMeta.filePath) === comparableMarkdownPath(meta.filePath)
+  );
+}
+
 const MARKDOWN_LINK_FAVICON_CLASS_NAME = "block size-full shrink-0 select-none";
 
 /** Hosts whose favicon request already failed this session — skip straight to the globe. */
@@ -891,6 +1035,16 @@ function plainHastText(node: unknown): string | null {
     }
     return null;
   });
+  return parts.every((part) => part !== null) ? parts.join("") : null;
+}
+
+function hastTextContent(node: unknown): string | null {
+  if (!node || typeof node !== "object" || !("type" in node)) return null;
+  if (node.type === "text" && "value" in node && typeof node.value === "string") {
+    return node.value;
+  }
+  if (!("children" in node) || !Array.isArray(node.children)) return null;
+  const parts = node.children.map(hastTextContent);
   return parts.every((part) => part !== null) ? parts.join("") : null;
 }
 
@@ -1004,21 +1158,18 @@ function MarkdownExternalLinkContent({
   );
 }
 
-const MarkdownFileLink = memo(function MarkdownFileLink({
-  href,
-  targetPath,
-  iconPath,
-  displayPath,
-  workspaceRelativePath,
-  line,
-  label,
-  copyMarkdown,
-  theme,
-  threadRef,
-  onOpen,
-  onOpenInBrowser,
-  className,
-}: MarkdownFileLinkProps) {
+function useMarkdownFileLinkActions(
+  meta: MarkdownFileLinkMeta,
+  options: {
+    threadRef?: ScopedThreadRef | undefined;
+    onOpen: (targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>;
+    onOpenInBrowser?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+    onReveal?: ((targetPath: string) => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
+    revealLabel?: string | undefined;
+  },
+) {
+  const { threadRef, onOpen, onOpenInBrowser, onReveal, revealLabel } = options;
+  const { targetPath, workspaceRelativePath, line, displayPath } = meta;
   const handleOpenInEditor = useCallback(() => {
     void (async () => {
       try {
@@ -1100,6 +1251,38 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     })();
   }, [onOpenInBrowser, targetPath]);
 
+  const handleReveal = useCallback(() => {
+    if (!onReveal) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await onReveal(targetPath);
+        if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+          return;
+        }
+        reportMarkdownActionFailure({ operation: "reveal-file", target: targetPath }, result.cause);
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Unable to reveal file",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      } catch (cause) {
+        reportMarkdownActionFailure({ operation: "reveal-file", target: targetPath }, cause);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Unable to reveal file",
+            description: cause instanceof Error ? cause.message : "An error occurred.",
+          }),
+        );
+      }
+    })();
+  }, [onReveal, targetPath]);
+
   const handleCopy = useCallback(
     (value: string, title: string) => {
       if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
@@ -1151,6 +1334,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         const clicked = await api.contextMenu.show(
           [
             { id: "open", label: "Open in editor" },
+            ...(onReveal
+              ? ([{ id: "reveal", label: revealLabel ?? "Show in File Manager" }] as const)
+              : []),
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
               : []),
@@ -1162,6 +1348,10 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
 
         if (clicked === "open") {
           handleOpenInEditor();
+          return;
+        }
+        if (clicked === "reveal") {
+          handleReveal();
           return;
         }
         if (clicked === "open-in-browser") {
@@ -1182,8 +1372,59 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         );
       }
     },
-    [displayPath, handleCopy, handleOpenInBrowser, handleOpenInEditor, onOpenInBrowser, targetPath],
+    [
+      displayPath,
+      handleCopy,
+      handleOpenInBrowser,
+      handleOpenInEditor,
+      handleReveal,
+      onOpenInBrowser,
+      onReveal,
+      revealLabel,
+      targetPath,
+    ],
   );
+
+  const handleClick = useCallback(
+    (event: ReactMouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (onOpenInBrowser) {
+        handleOpenInBrowser();
+        return;
+      }
+      handleOpenInFilePreview();
+    },
+    [handleOpenInBrowser, handleOpenInFilePreview, onOpenInBrowser],
+  );
+
+  return {
+    onClick: handleClick,
+    onContextMenu: handleContextMenu,
+  };
+}
+
+const MarkdownFileLink = memo(function MarkdownFileLink({
+  href,
+  meta,
+  iconPath,
+  label,
+  copyMarkdown,
+  theme,
+  threadRef,
+  onOpen,
+  onOpenInBrowser,
+  onReveal,
+  revealLabel,
+  className,
+}: MarkdownFileLinkProps) {
+  const actions = useMarkdownFileLinkActions(meta, {
+    threadRef,
+    onOpen,
+    onOpenInBrowser,
+    onReveal,
+    revealLabel,
+  });
 
   return (
     <Tooltip>
@@ -1193,16 +1434,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
             href={href}
             className={cn(CHAT_FILE_TAG_CHIP_CLASS_NAME, MARKDOWN_FILE_LINK_CLASS_NAME, className)}
             data-markdown-copy={copyMarkdown}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (onOpenInBrowser) {
-                handleOpenInBrowser();
-                return;
-              }
-              handleOpenInFilePreview();
-            }}
-            onContextMenu={handleContextMenu}
+            onClick={actions.onClick}
+            onContextMenu={actions.onContextMenu}
           >
             <FileTagChipContent path={iconPath} label={label} theme={theme} selectable />
           </a>
@@ -1213,12 +1446,60 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
       >
         <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
-          {displayPath}
+          {meta.displayPath}
         </div>
       </TooltipPopup>
     </Tooltip>
   );
 }, areMarkdownFileLinkPropsEqual);
+
+const MarkdownProseFileLink = memo(function MarkdownProseFileLink({
+  meta,
+  children,
+  copyMarkdown,
+  threadRef,
+  onOpen,
+  onOpenInBrowser,
+  onReveal,
+  revealLabel,
+  anchorProps,
+}: MarkdownProseFileLinkProps) {
+  const actions = useMarkdownFileLinkActions(meta, {
+    threadRef,
+    onOpen,
+    onOpenInBrowser,
+    onReveal,
+    revealLabel,
+  });
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <a
+            {...anchorProps}
+            href={meta.targetPath}
+            target={undefined}
+            rel={undefined}
+            data-markdown-copy={copyMarkdown}
+            onClick={actions.onClick}
+            onContextMenu={actions.onContextMenu}
+          >
+            {children}
+          </a>
+        }
+      />
+      <TooltipPopup
+        side="top"
+        className="max-w-[min(40rem,calc(100vw-2rem))] font-mono text-[11px] leading-tight"
+      >
+        <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
+          {meta.targetPath}
+        </div>
+      </TooltipPopup>
+    </Tooltip>
+  );
+});
 
 function areMarkdownFileLinkPropsEqual(
   previous: Readonly<MarkdownFileLinkProps>,
@@ -1226,17 +1507,20 @@ function areMarkdownFileLinkPropsEqual(
 ): boolean {
   return (
     previous.href === next.href &&
-    previous.targetPath === next.targetPath &&
+    previous.meta.targetPath === next.meta.targetPath &&
+    previous.meta.filePath === next.meta.filePath &&
+    previous.meta.displayPath === next.meta.displayPath &&
+    previous.meta.workspaceRelativePath === next.meta.workspaceRelativePath &&
+    previous.meta.line === next.meta.line &&
     previous.iconPath === next.iconPath &&
-    previous.displayPath === next.displayPath &&
-    previous.workspaceRelativePath === next.workspaceRelativePath &&
-    previous.line === next.line &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&
     previous.theme === next.theme &&
     previous.threadRef === next.threadRef &&
     previous.onOpen === next.onOpen &&
     previous.onOpenInBrowser === next.onOpenInBrowser &&
+    previous.onReveal === next.onReveal &&
+    previous.revealLabel === next.revealLabel &&
     previous.className === next.className
   );
 }
@@ -1263,10 +1547,25 @@ function ChatMarkdown({
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
     environmentId,
-    serverConfig?.availableEditors ?? [],
+    // A fresh `[]` literal here would re-create the callback on every render and
+    // defeat the memoized streaming segments below.
+    serverConfig?.availableEditors ?? EMPTY_AVAILABLE_EDITORS,
   );
+  const revealPath = useRevealPath(environmentId);
+  const canRevealPath = serverConfig?.availableEditors.includes("file-manager") ?? false;
+  const revealLabel = serverConfig
+    ? revealInFileExplorerLabel(serverConfig.environment.platform.os)
+    : "Show in File Manager";
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const markdownFileLinkMetaByHref = useMemo(() => {
+  // While the message is still streaming, re-parsing the whole accumulated text
+  // on every delta is quadratic. `planIncrementalMarkdownSplit` refuses unless
+  // it can prove a block boundary is safe, so `null` is the normal, correct
+  // outcome and simply means "render the whole string exactly as before".
+  const split = useMemo<IncrementalMarkdownSplit | null>(
+    () => (isStreaming ? planIncrementalMarkdownSplit(text) : null),
+    [isStreaming, text],
+  );
+  const resolvedFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
@@ -1281,10 +1580,31 @@ function ChatMarkdown({
     }
     return metaByHref;
   }, [cwd, text]);
-  const fileLinkParentSuffixByPath = useMemo(() => {
-    const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
-    return buildFileLinkParentSuffixByPath(filePaths);
-  }, [markdownFileLinkMetaByHref]);
+  // This map is only a lookup cache: `resolveMarkdownFileLinkMeta` is a pure
+  // function of (href, cwd), it returns null for every href the link renderer
+  // would not resolve live anyway, and the renderer already falls back to it on
+  // a miss. Handing the split path a stable empty map is therefore
+  // behaviour-preserving, and it keeps a map that grows with the message from
+  // invalidating every frozen segment each time a new link streams in.
+  const markdownFileLinkMetaByHref = split
+    ? EMPTY_FILE_LINK_META_BY_HREF
+    : resolvedFileLinkMetaByHref;
+  // Parent-suffix disambiguation genuinely depends on every link in the message,
+  // so it is recomputed on each delta. Routing it through a string signature
+  // keeps the map's identity stable while its *contents* are unchanged — which
+  // is nearly always, because a suffix only exists when two linked paths share
+  // a basename.
+  const fileLinkParentSuffixSignature = useMemo(() => {
+    const filePaths = [...resolvedFileLinkMetaByHref.values()].map((meta) => meta.filePath);
+    return JSON.stringify([...buildFileLinkParentSuffixByPath(filePaths)]);
+  }, [resolvedFileLinkMetaByHref]);
+  const fileLinkParentSuffixByPath = useMemo(
+    () =>
+      new Map<string, string>(
+        JSON.parse(fileLinkParentSuffixSignature) as ReadonlyArray<[string, string]>,
+      ),
+    [fileLinkParentSuffixSignature],
+  );
   const markdownUrlTransform = useCallback((href: string) => {
     return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
   }, []);
@@ -1345,11 +1665,15 @@ function ChatMarkdown({
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
       li({ node, children, ...props }) {
-        const listItemStart = node?.position?.start.offset;
-        const markerOffset =
-          typeof listItemStart === "number" ? findTaskListMarkerOffset(text, listItemStart) : null;
+        const scope = use(MarkdownSourceScopeContext);
         return (
-          <li {...props} data-task-marker-offset={markerOffset ?? undefined}>
+          <li
+            {...props}
+            data-task-marker-offset={taskListMarkerOffsetInScope(
+              scope,
+              node?.position?.start.offset,
+            )}
+          >
             {renderSkillInlineMarkdownChildren(children, skills)}
           </li>
         );
@@ -1385,30 +1709,65 @@ function ChatMarkdown({
       },
       a({ node, href, children, ...props }) {
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        const cachedFileLinkMeta = normalizedHref
+          ? markdownFileLinkMetaByHref.get(normalizedHref)
+          : undefined;
+        const fileLinkMeta =
+          cachedFileLinkMeta ??
+          (isLiveFileLinkCandidate(normalizedHref)
+            ? resolveMarkdownFileLinkMeta(normalizedHref, cwd)
+            : null);
         if (!fileLinkMeta) {
           const faviconHost = resolveExternalWebLinkHost(href);
           const isSameDocumentLink = href?.startsWith("#") ?? false;
+          const isHttpLink = /^https?:/i.test(href ?? "");
           const onClick = props.onClick;
           const canOpenInPreview = Boolean(threadRef) && isPreviewSupportedInRuntime();
           const link = (
             <a
               {...props}
               href={href}
-              target={isSameDocumentLink ? undefined : "_blank"}
-              rel={isSameDocumentLink ? undefined : "noopener noreferrer"}
+              target={isHttpLink ? "_blank" : undefined}
+              rel={isHttpLink ? "noopener noreferrer" : undefined}
               onClick={(event) => {
                 onClick?.(event);
                 if (isSameDocumentLink && href) {
                   handleMarkdownFragmentClick(event, href);
+                  return;
+                }
+                if (!isHttpLink) {
+                  event.preventDefault();
+                  event.stopPropagation();
                 }
               }}
               onContextMenu={(event) => {
-                if (!canOpenInPreview || !href || !faviconHost) return;
-                event.preventDefault();
-                event.stopPropagation();
+                if (!href) return;
                 const api = readLocalApi();
                 if (!api) return;
+                if (!faviconHost || !canOpenInPreview) {
+                  if (isHttpLink) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void api.contextMenu
+                    .show([{ id: "copy-link", label: "Copy Link" }] as const, {
+                      x: event.clientX,
+                      y: event.clientY,
+                    })
+                    .then((clicked) => {
+                      if (clicked === "copy-link") {
+                        return writeTextToClipboard(href, "link");
+                      }
+                    })
+                    .catch((cause) => {
+                      reportMarkdownActionFailure(
+                        { operation: "show-link-context-menu", target: href },
+                        cause,
+                      );
+                    });
+                  return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
                 void showExternalLinkContextMenu({
                   href,
                   position: { x: event.clientX, y: event.clientY },
@@ -1455,6 +1814,30 @@ function ChatMarkdown({
           );
         }
 
+        const plainLabel = hastTextContent(node);
+        const onOpenInBrowser =
+          threadRef && isPreviewSupportedInRuntime() && isBrowserPreviewFile(fileLinkMeta.filePath)
+            ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
+            : undefined;
+        const onReveal = canRevealPath ? revealPath : undefined;
+        const copyMarkdown = `[${plainLabel ?? fileLinkMeta.basename}](${normalizedHref})`;
+        if (!isPathLikeMarkdownLinkLabel(plainLabel, normalizedHref, fileLinkMeta, cwd)) {
+          return (
+            <MarkdownProseFileLink
+              meta={fileLinkMeta}
+              copyMarkdown={copyMarkdown}
+              threadRef={threadRef}
+              onOpen={openInPreferredEditor}
+              onOpenInBrowser={onOpenInBrowser}
+              onReveal={onReveal}
+              revealLabel={revealLabel}
+              anchorProps={props}
+            >
+              {children}
+            </MarkdownProseFileLink>
+          );
+        }
+
         const parentSuffix = fileLinkParentSuffixByPath.get(fileLinkMeta.filePath);
         const labelParts = [fileLinkMeta.basename];
         if (typeof parentSuffix === "string" && parentSuffix.length > 0) {
@@ -1469,23 +1852,16 @@ function ChatMarkdown({
         return (
           <MarkdownFileLink
             href={fileLinkMeta.targetPath}
-            targetPath={fileLinkMeta.targetPath}
+            meta={fileLinkMeta}
             iconPath={fileLinkMeta.filePath}
-            displayPath={fileLinkMeta.displayPath}
-            workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
-            line={fileLinkMeta.line}
             label={labelParts.join(" · ")}
-            copyMarkdown={`[${fileLinkMeta.basename}](${normalizedHref})`}
+            copyMarkdown={copyMarkdown}
             theme={resolvedTheme}
             threadRef={threadRef}
             onOpen={openInPreferredEditor}
-            onOpenInBrowser={
-              threadRef &&
-              isPreviewSupportedInRuntime() &&
-              isBrowserPreviewFile(fileLinkMeta.filePath)
-                ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
-                : undefined
-            }
+            onOpenInBrowser={onOpenInBrowser}
+            onReveal={onReveal}
+            revealLabel={revealLabel}
             className={props.className}
           />
         );
@@ -1526,6 +1902,8 @@ function ChatMarkdown({
       },
     }),
     [
+      canRevealPath,
+      cwd,
       diffThemeName,
       fileLinkParentSuffixByPath,
       isStreaming,
@@ -1534,12 +1912,17 @@ function ChatMarkdown({
       openInPreferredEditor,
       openExternalLinkInPreview,
       openMarkdownFileInPreview,
+      revealPath,
+      revealLabel,
       resolvedTheme,
       skills,
-      text,
       threadRef,
     ],
   );
+
+  const remarkPlugins = lineBreaks
+    ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS
+    : CHAT_MARKDOWN_REMARK_PLUGINS;
 
   return (
     <div
@@ -1549,16 +1932,27 @@ function ChatMarkdown({
       )}
       onCopy={handleCopy}
     >
-      <ReactMarkdown
-        remarkPlugins={
-          lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS
-        }
-        rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
+      {split?.segments.map((segment) => (
+        <MarkdownSegment
+          key={segment.offset}
+          source={segment.source}
+          offset={segment.offset}
+          trailingSeparator
+          components={markdownComponents}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
+          urlTransform={markdownUrlTransform}
+        />
+      ))}
+      <MarkdownSegment
+        source={split ? split.tail.source : text}
+        offset={split ? split.tail.offset : 0}
+        trailingSeparator={false}
         components={markdownComponents}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
         urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      />
     </div>
   );
 }
