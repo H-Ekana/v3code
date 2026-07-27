@@ -49,7 +49,7 @@ function PopoverPopup({
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}
-        className="z-[60] h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-transform duration-200 data-instant:transition-none motion-reduce:transition-none"
+        className="layer-dropdown h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-transform duration-200 data-instant:transition-none motion-reduce:transition-none"
         data-slot="popover-positioner"
         side={side}
         sideOffset={sideOffset}

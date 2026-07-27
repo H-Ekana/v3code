@@ -1,11 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
-import { SettingsIcon } from "lucide-react";
+import { SettingsIcon, SparklesIcon } from "lucide-react";
 import { memo, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 
 import { APP_STAGE_LABEL } from "../../branding";
 import { cn } from "../../lib/utils";
 import { primaryServerConfigAtom } from "../../state/server";
+import { replayStartupSplash } from "../../startupSplash";
 import { resolveSidebarStageBadgeLabel } from "../Sidebar.logic";
 import { SidebarStageBackdrop, resolveSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
 import {
@@ -44,9 +45,35 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         )}
       />
       <SidebarBrand onBackdrop={backdropVariant !== null} />
+      {import.meta.env.DEV ? (
+        <StartupSplashReplayButton onBackdrop={backdropVariant !== null} />
+      ) : null}
     </SidebarHeader>
   );
 });
+
+/**
+ * Dev-only affordance for iterating on the cold-start choreography. The splash is gated to
+ * once per tab session, so without this every tweak would need a full quit and relaunch.
+ */
+function StartupSplashReplayButton({ onBackdrop }: { onBackdrop: boolean }) {
+  return (
+    <button
+      aria-label="Replay startup splash"
+      className={cn(
+        "relative z-10 ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md outline-hidden ring-ring transition-colors focus-visible:ring-2 motion-reduce:transition-none",
+        onBackdrop
+          ? "text-white/50 hover:bg-white/15 hover:text-white"
+          : "text-muted-foreground/50 hover:bg-sidebar-accent hover:text-foreground",
+      )}
+      onClick={replayStartupSplash}
+      title="Replay startup splash (dev only)"
+      type="button"
+    >
+      <SparklesIcon className="size-3.5" />
+    </button>
+  );
+}
 
 function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
   return (

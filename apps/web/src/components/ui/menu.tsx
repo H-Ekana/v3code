@@ -49,7 +49,7 @@ function MenuPopup({
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}
-        className="z-[60]"
+        className="layer-dropdown"
         data-slot="menu-positioner"
         side={side}
         sideOffset={sideOffset}
