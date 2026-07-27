@@ -48,6 +48,20 @@ function shouldPersistThread(thread: OrchestrationThread): boolean {
   return status !== "starting" && status !== "running";
 }
 
+// Assistant deltas arrive many times per second. The reducer is cheap, so every
+// item is still applied immediately and in order to the authoritative value
+// below; only the *publication* of intermediate values to React is throttled to
+// roughly one animation frame.
+const THREAD_STATE_PUBLISH_WINDOW = "16 millis";
+
+interface PendingThreadState {
+  readonly value: EnvironmentThreadState;
+  // Monotonic write counter. Publication compares versions rather than values
+  // so a write that returns an identical object still publishes, preserving the
+  // SubscriptionRef semantics consumers see today.
+  readonly version: number;
+}
+
 export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make")(function* (
   threadId: ThreadIdType,
 ) {
@@ -69,11 +83,60 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     ),
   );
   const cachedThread = Option.map(cached, (snapshot) => snapshot.thread);
-  const state = yield* SubscriptionRef.make<EnvironmentThreadState>({
+  const initialState: EnvironmentThreadState = {
     data: cachedThread,
     status: statusWithoutLiveData(cachedThread),
     error: Option.none(),
-  });
+  };
+  const state = yield* SubscriptionRef.make<EnvironmentThreadState>(initialState);
+  // Authoritative thread state. Every writer mutates this synchronously, in
+  // call order, and every reader reads it, so the value sequence is identical
+  // to publishing straight to `state`. Only intermediate publications are
+  // skipped — a write can never be observed out of order, and an out-of-band
+  // failure (`onExpectedFailure`) can never be undone by a stale buffered item
+  // because by the time the failure is written every preceding item has already
+  // been applied here.
+  const pending = yield* Ref.make<PendingThreadState>({ value: initialState, version: 0 });
+  const publishedVersion = yield* Ref.make(0);
+  const publishWakeups = yield* Queue.sliding<void>(1);
+
+  const readState = Ref.get(pending).pipe(Effect.map((current) => current.value));
+
+  // The only writer of `state`. The read/decide/publish runs under the
+  // SubscriptionRef's own permit, so concurrent flushes can never publish two
+  // versions out of order.
+  const publishState = SubscriptionRef.updateSomeEffect(state, () =>
+    Effect.gen(function* () {
+      const current = yield* Ref.get(pending);
+      const lastPublished = yield* Ref.get(publishedVersion);
+      if (current.version === lastPublished) {
+        return Option.none<EnvironmentThreadState>();
+      }
+      yield* Ref.set(publishedVersion, current.version);
+      return Option.some(current.value);
+    }),
+  );
+  const requestPublish = Queue.offer(publishWakeups, undefined).pipe(Effect.asVoid);
+
+  const writeState = (update: (current: EnvironmentThreadState) => EnvironmentThreadState) =>
+    Ref.update(pending, (current) => ({
+      value: update(current.value),
+      version: current.version + 1,
+    }));
+  // Terminal and connection transitions publish immediately so failures and
+  // deletions are never delayed by the coalescing window.
+  const updateStateNow = (update: (current: EnvironmentThreadState) => EnvironmentThreadState) =>
+    writeState(update).pipe(Effect.andThen(publishState));
+
+  yield* Effect.forkScoped(
+    Effect.gen(function* () {
+      while (true) {
+        yield* Queue.take(publishWakeups);
+        yield* Effect.sleep(THREAD_STATE_PUBLISH_WINDOW);
+        yield* publishState;
+      }
+    }),
+  );
   // Seed the resume cursor from the cached snapshot so a warm cache can catch up
   // via `afterSequence` instead of re-downloading the full thread body.
   const lastSequence = yield* SubscriptionRef.make(
@@ -105,7 +168,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Effect.forkScoped,
   );
 
-  const setSynchronizing = SubscriptionRef.update(state, (current) =>
+  const setSynchronizing = updateStateNow((current) =>
     current.status === "deleted"
       ? current
       : {
@@ -114,7 +177,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           error: Option.none(),
         },
   );
-  const setReady = SubscriptionRef.update(state, (current) =>
+  const setReady = updateStateNow((current) =>
     current.status === "live" || current.status === "deleted"
       ? current
       : {
@@ -125,7 +188,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   );
   const setDisconnected = Effect.gen(function* () {
     yield* Ref.set(awaitingCompletion, false);
-    yield* SubscriptionRef.update(state, (current) => ({
+    yield* updateStateNow((current) => ({
       ...current,
       status: current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
     }));
@@ -133,7 +196,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const setStreamError = (cause: Cause.Cause<unknown>) =>
     Ref.set(awaitingCompletion, false).pipe(
       Effect.andThen(
-        SubscriptionRef.update(state, (current) => ({
+        // `subscribeDynamic` reports expected failures out of band from the item
+        // stream, so this must flush immediately: it is written after every
+        // preceding item has been applied, and nothing may publish over it.
+        updateStateNow((current) => ({
           ...current,
           status:
             current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
@@ -144,13 +210,15 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 
   const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
     thread: OrchestrationThread,
+    options: { readonly publish: "immediate" | "coalesced" },
   ) {
     const waiting = yield* Ref.get(awaitingCompletion);
-    yield* SubscriptionRef.set(state, {
+    yield* writeState(() => ({
       data: Option.some(thread),
       status: waiting ? "synchronizing" : "live",
       error: Option.none(),
-    });
+    }));
+    yield* options.publish === "immediate" ? publishState : requestPublish;
     // Active threads can update many times per second and retain large tool
     // payloads. The server remains the source of truth while a turn is active;
     // persist once it settles so cache encoding stays off the streaming path.
@@ -162,11 +230,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 
   const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* () {
     yield* Ref.set(awaitingCompletion, false);
-    yield* SubscriptionRef.set(state, {
+    yield* updateStateNow(() => ({
       data: Option.none(),
       status: "deleted",
       error: Option.none(),
-    });
+    }));
     yield* cache.removeThread(environmentId, threadId).pipe(
       Effect.catch((error) =>
         Effect.logWarning("Could not remove the cached thread.").pipe(
@@ -185,7 +253,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   ) {
     if (item.kind === "synchronized") {
       yield* Ref.set(awaitingCompletion, false);
-      yield* SubscriptionRef.update(state, (current) =>
+      yield* updateStateNow((current) =>
         Option.isSome(current.data) && current.status !== "deleted"
           ? { ...current, status: "live" as const, error: Option.none() }
           : current,
@@ -195,7 +263,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 
     if (item.kind === "snapshot") {
       yield* SubscriptionRef.set(lastSequence, item.snapshot.snapshotSequence);
-      yield* setThread(item.snapshot.thread);
+      yield* setThread(item.snapshot.thread, { publish: "immediate" });
       return;
     }
 
@@ -205,7 +273,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
     yield* SubscriptionRef.set(lastSequence, item.event.sequence);
 
-    const current = yield* SubscriptionRef.get(state);
+    const current = yield* readState;
     if (Option.isNone(current.data)) {
       if (item.event.type === "thread.deleted") {
         yield* setDeleted();
@@ -214,7 +282,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
     const result = applyThreadDetailEvent(current.data.value, item.event);
     if (result.kind === "updated") {
-      yield* setThread(result.thread);
+      // The high-frequency streaming path: applied now, published on the next
+      // window boundary.
+      yield* setThread(result.thread, { publish: "coalesced" });
     } else if (result.kind === "deleted") {
       yield* setDeleted();
     }
@@ -252,7 +322,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
         yield* setSynchronizing;
 
-        let current = yield* SubscriptionRef.get(state);
+        let current = yield* readState;
         if (Option.isNone(current.data) && current.status !== "deleted") {
           const alreadyAttempted = yield* Ref.getAndSet(httpSnapshotLoadAttempted, true);
           if (!alreadyAttempted) {
@@ -273,7 +343,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             const httpSnapshot = yield* snapshotLoader.load(prepared, threadId);
             if (Option.isSome(httpSnapshot)) {
               yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
-              current = yield* SubscriptionRef.get(state);
+              current = yield* readState;
             }
           }
         }
@@ -281,7 +351,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         const sequence = yield* SubscriptionRef.get(lastSequence);
         const canResume = Option.isSome(current.data);
         if (!supportsCompletionMarker && canResume) {
-          yield* SubscriptionRef.update(state, (value) => ({
+          yield* updateStateNow((value) => ({
             ...value,
             status: value.status === "deleted" ? value.status : ("live" as const),
             error: Option.none(),
@@ -303,7 +373,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   );
 
   yield* Effect.addFinalizer(() =>
-    Effect.all([SubscriptionRef.get(state), SubscriptionRef.get(lastSequence)]).pipe(
+    // Teardown must never persist a stale thread: flush whatever is still
+    // waiting on the coalescing window, then read the authoritative value
+    // rather than the last published one.
+    publishState.pipe(
+      Effect.andThen(Effect.all([readState, SubscriptionRef.get(lastSequence)])),
       Effect.flatMap(([current, snapshotSequence]) =>
         Option.match(current.data, {
           onNone: () => Effect.void,
