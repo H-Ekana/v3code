@@ -43,13 +43,13 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
 
   if (envLocked || onEnvironmentChange === undefined) {
     return (
-      <span className="inline-flex items-center gap-1 border border-transparent px-[calc(--spacing(3)-1px)] text-sm font-medium text-muted-foreground/80 sm:text-xs">
+      <span className="inline-flex min-w-0 max-w-full items-center gap-1 border border-transparent px-[calc(--spacing(3)-1px)] text-sm font-medium text-muted-foreground/80 sm:text-xs">
         {activeEnvironment?.isPrimary ? (
-          <MonitorIcon className="size-3" />
+          <MonitorIcon className="size-3 shrink-0" />
         ) : (
-          <CloudIcon className="size-3" />
+          <CloudIcon className="size-3 shrink-0" />
         )}
-        {activeEnvironment?.label ?? "Run on"}
+        <span className="truncate">{activeEnvironment?.label ?? "Run on"}</span>
       </span>
     );
   }
@@ -64,13 +64,13 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       <SelectTrigger
         variant="ghost"
         size="xs"
-        className="font-medium text-muted-foreground/80 hover:text-foreground/95"
+        className="min-w-0 max-w-full font-medium text-muted-foreground/80 hover:text-foreground/95"
         aria-label="Run on"
       >
         {activeEnvironment?.isPrimary ? (
-          <MonitorIcon className="size-3" />
+          <MonitorIcon className="size-3 shrink-0" />
         ) : (
-          <CloudIcon className="size-3" />
+          <CloudIcon className="size-3 shrink-0" />
         )}
         <SelectValue />
       </SelectTrigger>
