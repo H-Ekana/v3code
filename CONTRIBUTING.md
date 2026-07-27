@@ -1,6 +1,42 @@
 # Contributing
 
+> **V3 Code fork — this section is ours, everything below it is inherited from upstream.**
+>
+> This checkout is `H-Ekana/v3code`, a fork of `pingdotgg/t3code`. The guidance from
+> "Read This First" onward is upstream's text about contributing to **T3 Code**, and it does not
+> describe how we work here. Keep this block when merging upstream; take their edits for the rest.
+
+## Where Work Lands (fork-specific)
+
+| Remote     | Repository         | Use                                                                   |
+| ---------- | ------------------ | --------------------------------------------------------------------- |
+| `origin`   | `H-Ekana/v3code`   | **Ours.** Push branches and open every PR here.                       |
+| `upstream` | `pingdotgg/t3code` | Read-only. Fetch and merge from it. **Never push or open a PR here.** |
+
+Branch off `main`, land through a PR on `origin`, and let CI run — local verification is
+deliberately limited to focused tests, so the PR is the first full check. Do not commit to `main`
+directly.
+
+**`gh` does not default to `origin`.** With an `upstream` remote present it resolves the repo to
+`pingdotgg/t3code`, so a bare `gh pr create` opens a public pull request against the upstream
+project containing our in-progress work. Pass the repo explicitly on every `gh` call — `pr create`,
+`pr list`, `pr view`, `pr checks`, `api`:
+
+```sh
+gh pr create --repo H-Ekana/v3code --base main --head <branch> --title "..." --body-file -
+```
+
+If `gh` reports `No commits between main and <branch>` or `Head ref must be a branch`, nothing is
+wrong with your branch — `gh` looked for it in `pingdotgg/t3code`, where it does not exist. Re-run
+with `--repo H-Ekana/v3code`. Do **not** push the branch upstream to make the error go away.
+
+Agents: the same rules are in `AGENTS.md` under "Git Remotes".
+
+---
+
 ## Read This First
+
+_Everything from here down is upstream's guidance about contributing to T3 Code itself._
 
 We are not actively accepting contributions right now.
 
