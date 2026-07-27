@@ -433,6 +433,83 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("routes sub-agent narration onto its card instead of the parent transcript", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "investigate", attachments: [] });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: "sdk-session-narration",
+        uuid: "task-start-1",
+        task_id: "agent-explore-1",
+        description: "Trace agent card activity rows",
+        subagent_type: "Explore",
+        tool_use_id: "toolu-task-explore",
+      } as unknown as SDKMessage);
+
+      // What `forwardSubagentText` actually delivers: the child's own narration,
+      // tagged with the Task call that spawned it.
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-narration",
+        uuid: "subagent-assistant-1",
+        parent_tool_use_id: "toolu-task-explore",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "The reducer is the likely culprit." },
+            { type: "text", text: "I'll explore the repo structure first." },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      for (let tick = 0; tick < 20; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+      runtimeEventsFiber.interruptUnsafe();
+
+      const progress = runtimeEvents.filter((event) => event.type === "task.progress");
+      assert.deepEqual(
+        progress.map((event) => event.payload.summary),
+        ["The reducer is the likely culprit.", "I'll explore the repo structure first."],
+        "thinking and text both belong on the card, in content order",
+      );
+      assert.equal(String(progress[0]?.payload.taskId), "agent-explore-1");
+      // The spawn description, not the narration: the roster derives the card's
+      // name from it, so letting narration through would rename the card.
+      assert.equal(progress[0]?.payload.description, "Trace agent card activity rows");
+      // Cards only — narration must not also spray rows into the conversation.
+      assert.equal(progress[0]?.payload.timelineBypass, true);
+
+      // The parent transcript must not receive the child's text, which is what
+      // the assistant-text backfill would otherwise do with it.
+      const leakedText = runtimeEvents.some(
+        (event) =>
+          event.type === "content.delta" &&
+          event.payload.delta.includes("explore the repo structure"),
+      );
+      assert.equal(leakedText, false, "sub-agent text leaked into the parent transcript");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("ships harness instructions in the system prompt, not via project files", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
