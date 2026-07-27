@@ -137,6 +137,7 @@ export interface CodexSessionRuntimeShape {
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -159,6 +160,15 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
   | CodexSessionRuntimeThreadIdMissingError;
+
+export const requestCodexThreadCompaction = Effect.fn("requestCodexThreadCompaction")(function* (
+  client: CodexClient.CodexAppServerClient["Service"],
+  providerThreadId: string,
+) {
+  yield* client.request("thread/compact/start", {
+    threadId: providerThreadId,
+  });
+});
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -605,6 +615,15 @@ interface CollabChildAgent {
   readonly interrupted: boolean;
 }
 
+export function shouldRememberSubAgentActivity(input: {
+  readonly agentThreadId: string;
+  readonly agentPath: string;
+  readonly providerThreadId: string | undefined;
+}): boolean {
+  const agentPathSegments = input.agentPath.split("/").filter(Boolean);
+  return input.agentThreadId !== input.providerThreadId && agentPathSegments.length > 1;
+}
+
 /**
  * v2 collab children announce themselves only via `subAgentActivity` items on
  * the parent stream (the probe shows no child `thread/started`, and v2
@@ -616,12 +635,27 @@ interface CollabChildAgent {
 function rememberSubAgentActivity(
   childAgents: Map<string, CollabChildAgent>,
   notification: CodexServerNotification,
+  providerThreadId: string | undefined,
 ): { readonly agentThreadId: string; readonly agentPath: string } | undefined {
   if (notification.method !== "item/started" && notification.method !== "item/completed") {
     return undefined;
   }
   const item = notification.params.item;
   if (item.type !== "subAgentActivity") {
+    return undefined;
+  }
+  if (
+    !shouldRememberSubAgentActivity({
+      agentThreadId: item.agentThreadId,
+      agentPath: item.agentPath,
+      providerThreadId,
+    })
+  ) {
+    // A child reports an interaction with its parent as a subAgentActivity
+    // targeting the canonical thread at `/root`. That is parent telemetry, not
+    // a child registration. Remove any stale entry so a previously poisoned
+    // runtime can recover without diverting the parent conversation.
+    childAgents.delete(item.agentThreadId);
     return undefined;
   }
   const interrupted = item.kind === "interrupted";
@@ -634,6 +668,20 @@ function rememberSubAgentActivity(
 
 /** Synthetic method carrying an intercepted child-thread notification. */
 export const COLLAB_AGENT_ACTIVITY_METHOD = "collab/agentActivity";
+
+export function shouldDivertCollabNotification(input: {
+  readonly notificationThreadId: string | undefined;
+  readonly providerThreadId: string | undefined;
+  readonly isRegisteredReceiver: boolean;
+  readonly isRegisteredChild: boolean;
+}): boolean {
+  return (
+    input.notificationThreadId !== undefined &&
+    input.notificationThreadId !== input.providerThreadId &&
+    !input.isRegisteredReceiver &&
+    (input.isRegisteredChild || input.providerThreadId !== undefined)
+  );
+}
 
 function rememberCollabReceiverTurns(
   collabReceiverTurns: Map<string, TurnId>,
@@ -882,12 +930,17 @@ export const makeCodexSessionRuntime = (
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const collabChildAgents = yield* Ref.get(collabChildAgentsRef);
         const notificationThreadId = readNotificationThreadId(notification);
+        const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
         const childParentTurnId = notificationThreadId
           ? collabReceiverTurns.get(notificationThreadId)
           : undefined;
 
         rememberCollabReceiverTurns(collabReceiverTurns, notification, route.turnId);
-        const interruption = rememberSubAgentActivity(collabChildAgents, notification);
+        const interruption = rememberSubAgentActivity(
+          collabChildAgents,
+          notification,
+          providerThreadId,
+        );
         yield* Ref.set(collabChildAgentsRef, collabChildAgents);
         if (interruption) {
           // Surface the interruption as its own child event so the agent
@@ -913,21 +966,23 @@ export const makeCodexSessionRuntime = (
         // thread/status/changed lands first), so any thread that is neither
         // the session's own provider thread nor a v1 collab receiver is
         // treated as an unregistered child.
-        const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
         // Re-check v1 receiver registration on every notification: if a
         // thread was provisionally classified as a v2 child before the
         // parent's collabAgentToolCall arrived, hand it back to the v1
         // suppression path once the receiver registration lands.
+        const isRegisteredReceiver =
+          notificationThreadId !== undefined && collabReceiverTurns.has(notificationThreadId);
         const knownChild =
-          notificationThreadId && !collabReceiverTurns.has(notificationThreadId)
+          notificationThreadId && notificationThreadId !== providerThreadId && !isRegisteredReceiver
             ? collabChildAgents.get(notificationThreadId)
             : undefined;
-        const isForeignThread =
-          notificationThreadId !== undefined &&
-          providerThreadId !== undefined &&
-          notificationThreadId !== providerThreadId &&
-          !collabReceiverTurns.has(notificationThreadId);
-        if (notificationThreadId && (knownChild || isForeignThread)) {
+        const shouldDivert = shouldDivertCollabNotification({
+          notificationThreadId,
+          providerThreadId,
+          isRegisteredReceiver,
+          isRegisteredChild: knownChild !== undefined,
+        });
+        if (notificationThreadId && shouldDivert) {
           if (!knownChild) {
             yield* Ref.update(collabChildAgentsRef, (current) => {
               const next = new Map(current);
@@ -1438,6 +1493,10 @@ export const makeCodexSessionRuntime = (
             turnId: effectiveTurnId,
           });
         }),
+      compactThread: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        yield* requestCodexThreadCompaction(client, providerThreadId);
+      }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         const response = yield* client.request("thread/read", {

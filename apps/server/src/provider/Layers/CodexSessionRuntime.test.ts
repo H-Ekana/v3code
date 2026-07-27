@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -19,6 +20,9 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
+  requestCodexThreadCompaction,
+  shouldDivertCollabNotification,
+  shouldRememberSubAgentActivity,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -37,6 +41,30 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
       "Failed to generate Codex App Server identifier for provider-event.",
     );
   });
+});
+
+describe("requestCodexThreadCompaction", () => {
+  it.effect("uses the native thread compaction RPC", () =>
+    Effect.gen(function* () {
+      const requests: Array<{ method: string; params: unknown }> = [];
+      const client = {
+        request: (method: string, params: unknown) =>
+          Effect.sync(() => {
+            requests.push({ method, params });
+            return {};
+          }),
+      } as unknown as CodexClient.CodexAppServerClient["Service"];
+
+      yield* requestCodexThreadCompaction(client, "provider-thread-1");
+
+      NodeAssert.deepStrictEqual(requests, [
+        {
+          method: "thread/compact/start",
+          params: { threadId: "provider-thread-1" },
+        },
+      ]);
+    }),
+  );
 });
 
 function makeThreadOpenResponse(
@@ -313,6 +341,88 @@ describe("hasConfiguredMcpServer", () => {
     NodeAssert.equal(hasConfiguredMcpServer(["--model", "gpt-5.4"]), false);
     NodeAssert.equal(
       hasConfiguredMcpServer(["-c", 'mcp_servers.t3-code.url="http://127.0.0.1/mcp"']),
+      true,
+    );
+  });
+});
+
+describe("shouldDivertCollabNotification", () => {
+  it("never diverts the canonical provider thread even if its child registry entry is poisoned", () => {
+    NodeAssert.equal(
+      shouldDivertCollabNotification({
+        notificationThreadId: "parent-thread",
+        providerThreadId: "parent-thread",
+        isRegisteredReceiver: false,
+        isRegisteredChild: true,
+      }),
+      false,
+    );
+  });
+
+  it("still diverts registered and not-yet-registered child threads", () => {
+    NodeAssert.equal(
+      shouldDivertCollabNotification({
+        notificationThreadId: "registered-child",
+        providerThreadId: "parent-thread",
+        isRegisteredReceiver: false,
+        isRegisteredChild: true,
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      shouldDivertCollabNotification({
+        notificationThreadId: "early-child",
+        providerThreadId: "parent-thread",
+        isRegisteredReceiver: false,
+        isRegisteredChild: false,
+      }),
+      true,
+    );
+  });
+
+  it("leaves v1 collab receiver notifications on their existing route", () => {
+    NodeAssert.equal(
+      shouldDivertCollabNotification({
+        notificationThreadId: "receiver-thread",
+        providerThreadId: "parent-thread",
+        isRegisteredReceiver: true,
+        isRegisteredChild: true,
+      }),
+      false,
+    );
+  });
+});
+
+describe("shouldRememberSubAgentActivity", () => {
+  it("rejects child-to-parent activity targeting the canonical root thread", () => {
+    NodeAssert.equal(
+      shouldRememberSubAgentActivity({
+        agentThreadId: "parent-thread",
+        agentPath: "/root",
+        providerThreadId: "parent-thread",
+      }),
+      false,
+    );
+  });
+
+  it("rejects bare root activity before the provider thread id is known", () => {
+    NodeAssert.equal(
+      shouldRememberSubAgentActivity({
+        agentThreadId: "parent-thread",
+        agentPath: "/root",
+        providerThreadId: undefined,
+      }),
+      false,
+    );
+  });
+
+  it("retains nested child activity", () => {
+    NodeAssert.equal(
+      shouldRememberSubAgentActivity({
+        agentThreadId: "child-thread",
+        agentPath: "/root/composer_swoop",
+        providerThreadId: "parent-thread",
+      }),
       true,
     );
   });

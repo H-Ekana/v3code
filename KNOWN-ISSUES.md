@@ -1,5 +1,60 @@
 # Known Issues
 
+# [FIXED] PARENT CODEX OUTPUT DISAPPEARS AFTER A SUB-AGENT INTERACTS WITH `/root`
+
+## **STATUS: FIXED IN THE WORKTREE ON 2026-07-27. Requires an updated app build/restart.**
+
+A Codex parent could keep producing assistant messages, tool calls, file changes, and turn lifecycle
+events while V3 Code stopped adding them to the conversation. The chat showed an old acknowledgement
+and a permanent `Working for ...` spinner; later user messages received real backend replies that
+were invisible in the GUI.
+
+### Confirmed root cause
+
+When a child communicated with its parent, Codex emitted a `subAgentActivity` item targeting the
+canonical parent thread with `agentPath: "/root"`. `CodexSessionRuntime.rememberSubAgentActivity`
+blindly registered that target as a child. Every later parent notification was then diverted into a
+synthetic `collab/agentActivity` event and returned before normal conversation handling.
+
+The adapter's existing bare-`/root` guard hid the bogus root agent card, but it could not restore the
+already-diverted parent messages. The apparent steer/turn-id mismatch was a downstream symptom:
+parent `turn/completed` and the next `turn/started` were diverted along with the assistant output.
+
+### Verified evidence
+
+Thread `065af0fb-1e86-44f5-a569-fd626f655df0` ("Spectacular send button animation polish"),
+Codex session `019fa047-fe68-7583-bc11-a404224fe117`:
+
+- The last projected assistant message finalized at `07:20:32Z`.
+- At `07:21:19Z`, a child emitted `subAgentActivity` targeting the parent at `/root`.
+- From that point onward, the native provider log wrapped parent notifications as
+  `collab/agentActivity`; 840 wrapped parent assistant deltas never became canonical content events.
+- The original provider turn completed at `07:31:22Z`, and the user's follow-up started another turn
+  at `07:33:33Z`. V3 projected neither lifecycle event, so the GUI falsely appeared continuously
+  active.
+- The raw Codex session contains the missing replies and successful work through `07:43:03Z`.
+
+### Resolution
+
+`apps/server/src/provider/Layers/CodexSessionRuntime.ts` now:
+
+- refuses to register bare `/root` activity or the canonical provider thread as a child;
+- deletes a stale root entry when encountered so an already-poisoned runtime can self-heal; and
+- independently prevents the canonical provider thread from ever taking the child diversion path.
+
+Focused regression coverage in `CodexSessionRuntime.test.ts` verifies canonical-root rejection,
+poisoned-registry safety, real nested-child routing, and existing v1 receiver routing.
+
+### Recovery and diagnosis
+
+- This is distinct from the interrupted-turn wedge below. `scripts/fix-stuck-threads.mjs` does not
+  restore conversation events that were never projected.
+- Existing missing messages are still available in the matching
+  `~/.codex/sessions/.../rollout-...-<threadId>.jsonl`.
+- Affected running processes need an updated build/restart before the fix applies.
+
+---
+
 # 🔴 **INTERRUPTED TURNS WEDGE THE THREAD FOREVER**
 
 ## **STATUS: NOT FIXED. Repair script exists. Root cause is still live.**
