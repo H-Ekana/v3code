@@ -590,6 +590,58 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("ignores collab/agentActivity for the bare root path", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      // "/root" is the parent conversation, not a child. Mapping it put the main
+      // thread in the sub-agent roster and summed its whole-conversation tokens
+      // alongside the children it spawned.
+      yield* runtime.emit({
+        id: asEventId("evt-collab-root"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "root-thread",
+          agentPath: "/root",
+          method: "turn/started",
+          params: { threadId: "root-thread", turn: { id: "root-turn" } },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("evt-collab-child-after-root"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.500Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/marlow",
+          method: "turn/started",
+          params: { threadId: "child-thread-1", turn: { id: "child-turn-1" } },
+        },
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "task.started");
+      if (firstEvent.value.type !== "task.started") {
+        return;
+      }
+      // The root emission produced nothing, so the real child arrives first.
+      NodeAssert.equal(firstEvent.value.payload.taskId, "child-thread-1");
+      NodeAssert.equal(firstEvent.value.payload.name, "marlow");
+    }),
+  );
+
   it.effect("maps collab child turn/completed to an idle task.updated", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -525,8 +525,16 @@ function mapCollabAgentActivity(
   }
   const agentThreadId = wrapper.agentThreadId;
   const agentPath = typeof wrapper.agentPath === "string" ? wrapper.agentPath : undefined;
-  // "/root/marlow" → "marlow"
-  const nickname = agentPath?.split("/").filter(Boolean).at(-1);
+  // "/root/marlow" → "marlow". A bare "/root" is the parent conversation itself,
+  // not a child: taking the last segment unconditionally named it "root" and put
+  // the main thread in the sub-agent list, where its whole-conversation token
+  // total was also summed into the roster alongside the children it spawned.
+  // Depth >= 2 is a real sub-agent; "/root/root" still resolves correctly.
+  const agentPathSegments = agentPath?.split("/").filter(Boolean) ?? [];
+  if (agentPath !== undefined && agentPathSegments.length <= 1) {
+    return [];
+  }
+  const nickname = agentPathSegments.at(-1);
   const inner: ProviderEvent = {
     ...event,
     method: wrapper.method,

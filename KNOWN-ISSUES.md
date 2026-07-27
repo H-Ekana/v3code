@@ -76,6 +76,19 @@ Full brief for an agent working outside the app: **`docs/project/stuck-thread-bu
 
 ---
 
+# 🟢 FIXED — Codex root thread appeared as its own sub-agent
+
+`CodexAdapter` derived an agent nickname from the last segment of Codex's `agentPath`
+(`/root/marlow` → `marlow`). The parent conversation is a bare `/root`, so it became an agent
+literally named **`root`** in the SUB-AGENTS list — showing the main thread's own replies as
+"sub-agent activity", incrementing `run N` on every user turn, and summing its whole-conversation
+token total (22.9M in one observed case) into the roster alongside the children it spawned.
+
+Fixed by requiring path depth >= 2. `/root/root` still resolves correctly. Regression test asserts
+a bare `/root` emits nothing; verified to fail without the guard.
+
+---
+
 # 🟡 Agents panel is provider-blind for detached jobs
 
 A `codex:codex-rescue` sub-agent launches a **detached** Codex process and exits in ~30s, so its card
