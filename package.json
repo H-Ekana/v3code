@@ -11,6 +11,8 @@
     "dev:marketing": "vp run --filter @t3tools/marketing dev",
     "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
     "electron:dev": "node scripts/v3-electron-dev.mjs",
+    "electron:dev:real": "node scripts/v3-electron-dev.mjs --real-data",
+    "db:snapshot": "node scripts/snapshot-installed-db.mjs",
     "start": "vp run --filter t3 start",
     "start:desktop": "vp run --filter @t3tools/desktop start",
     "start:marketing": "vp run --filter @t3tools/marketing preview",

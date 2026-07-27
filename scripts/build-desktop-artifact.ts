@@ -1498,6 +1498,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
     }
     buildConfig.win = winConfig;
+    if (target === "nsis") {
+      buildConfig.nsis = {
+        createStartMenuShortcut: true,
+        include: "installer.nsh",
+      };
+    }
   }
 
   return buildConfig;
