@@ -42,6 +42,10 @@ export function resolveWebAssetBrandForChannel(channel: WebAssetChannel): WebAss
 }
 
 export function resolveWebAssetBrandForPackageVersion(version: string): WebAssetBrand {
+  if (/\.v3\.\d+\.\d+\.\d+$/.test(version)) {
+    return "production";
+  }
+
   return version.includes("-nightly.") ? "nightly" : "production";
 }
 

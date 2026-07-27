@@ -890,13 +890,13 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div className="group flex flex-col items-end gap-1">
-      <div className="relative max-w-[80%] rounded-2xl bg-accent p-3">
+      <div className="relative max-w-[80%] rounded-2xl bg-accent p-3 border border-primary/12">
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
               <div
                 key={image.id}
-                className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+                className="group/user-attachment overflow-hidden rounded-lg border border-border/80 bg-background/70"
               >
                 {image.previewUrl ? (
                   <button
@@ -912,7 +912,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                     <img
                       src={image.previewUrl}
                       alt={image.name}
-                      className="block h-auto max-h-[220px] w-full object-cover"
+                      className="block h-auto max-h-[220px] w-full object-cover transition-transform duration-200 ease-out group-hover/user-attachment:scale-[1.015] motion-reduce:transform-none motion-reduce:transition-none"
                     />
                   </button>
                 ) : (
@@ -1204,7 +1204,7 @@ function WorkGroupToggleTimelineRow({
   return (
     <button
       type="button"
-      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-[12px] leading-5 transition-colors duration-150 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+      className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-[12px] leading-5 transition-colors duration-200 hover:bg-primary/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 motion-reduce:transition-none"
       aria-expanded={row.expanded}
       onClick={(event) => {
         const anchorElement =
@@ -1349,7 +1349,7 @@ function UserMessagePreviewAnnotationCard(props: {
 }) {
   const ctx = use(TimelineRowCtx);
   return (
-    <div className="mb-2 flex max-w-full items-center overflow-hidden rounded-lg border border-border/70 bg-background/70">
+    <div className="group/user-preview mb-2 flex max-w-full items-center overflow-hidden rounded-lg border border-border/70 bg-background/70">
       {props.image?.previewUrl ? (
         <button
           type="button"
@@ -1364,7 +1364,7 @@ function UserMessagePreviewAnnotationCard(props: {
           <img
             src={props.image.previewUrl}
             alt="Annotated preview crop"
-            className="size-full object-cover"
+            className="size-full object-cover transition-transform duration-200 ease-out group-hover/user-preview:scale-[1.035] motion-reduce:transform-none motion-reduce:transition-none"
           />
         </button>
       ) : null}
@@ -1984,9 +1984,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   return (
     <div
       className={cn(
-        "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
+        "flex flex-col rounded-md px-0.5 py-0.5 transition-colors duration-200 motion-reduce:transition-none",
         canExpand &&
-          "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+          "cursor-pointer hover:bg-primary/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
       )}
       {...rowToggleProps}
     >
@@ -2067,7 +2067,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       </div>
       {expanded && canExpand && expandedBody ? (
         <div
-          className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
+          className="mt-1 ms-7 cursor-default rounded-md border border-primary/12 bg-primary/[0.02] px-3 py-1"
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >

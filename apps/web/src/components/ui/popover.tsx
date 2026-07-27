@@ -10,7 +10,14 @@ const Popover = PopoverPrimitive.Root;
 
 function PopoverTrigger({ className, children, ...props }: PopoverPrimitive.Trigger.Props) {
   return (
-    <PopoverPrimitive.Trigger className={className} data-slot="popover-trigger" {...props}>
+    <PopoverPrimitive.Trigger
+      className={cn(
+        "outline-none transition-[color,background-color,box-shadow] duration-150 focus-visible:ring-2 focus-visible:ring-ring/50 data-popup-open:text-primary motion-reduce:transition-none",
+        className,
+      )}
+      data-slot="popover-trigger"
+      {...props}
+    >
       {children}
     </PopoverPrimitive.Trigger>
   );
@@ -42,14 +49,14 @@ function PopoverPopup({
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}
-        className="z-[60] h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-transform data-instant:transition-none"
+        className="z-[60] h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-transform duration-200 data-instant:transition-none motion-reduce:transition-none"
         data-slot="popover-positioner"
         side={side}
         sideOffset={sideOffset}
       >
         <PopoverPrimitive.Popup
           className={cn(
-            "dropdown-glass relative flex h-(--popup-height,auto) w-(--popup-width,auto) origin-(--transform-origin) rounded-lg text-popover-foreground outline-none transition-[width,height,scale,opacity] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] has-data-[slot=calendar]:rounded-xl has-data-[slot=calendar]:before:rounded-[calc(var(--radius-xl)-1px)] data-starting-style:scale-98 data-starting-style:opacity-0 dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+            "dropdown-glass relative flex h-(--popup-height,auto) w-(--popup-width,auto) origin-(--transform-origin) rounded-lg text-popover-foreground outline-none ring-1 ring-primary/10 transition-[width,height,scale,opacity] duration-200 ease-out before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] has-data-[slot=calendar]:rounded-xl has-data-[slot=calendar]:before:rounded-[calc(var(--radius-xl)-1px)] data-ending-style:scale-98 data-starting-style:scale-98 data-ending-style:opacity-0 data-starting-style:opacity-0 motion-reduce:transition-none dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
             tooltipStyle &&
               "w-fit text-balance rounded-md text-xs shadow-md/5 before:rounded-[calc(var(--radius-md)-1px)]",
             className,

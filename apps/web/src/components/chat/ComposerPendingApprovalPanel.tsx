@@ -24,16 +24,18 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
         : "File change";
 
   return (
-    <div className="px-4 py-3.5 sm:px-5 sm:py-4">
+    <div className="bg-warning/[0.025] px-4 py-3.5 sm:px-5 sm:py-4">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="uppercase text-sm tracking-[0.2em]">PENDING APPROVAL</span>
+        <span className="uppercase text-sm tracking-[0.2em] text-warning-foreground">
+          PENDING APPROVAL
+        </span>
         <span className="text-sm font-medium">{approvalSummary}</span>
         {pendingCount > 1 ? (
           <span className="text-xs text-muted-foreground">1/{pendingCount}</span>
         ) : null}
       </div>
       {approval.detail ? (
-        <div className="mt-3 rounded-lg border border-border/65 bg-background/70 p-3">
+        <div className="mt-3 rounded-lg border border-warning/20 bg-background/70 p-3">
           <p className="text-xs font-medium text-muted-foreground">{detailLabel}</p>
           <pre
             aria-label={detailLabel}

@@ -1,6 +1,22 @@
-import { describe, expect, it } from "vite-plus/test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { formatPendingPrimaryActionLabel } from "./ComposerPrimaryActions";
+const sidebarStage = vi.hoisted(() => ({ variant: "nightly" as "nightly" | "dev" | null }));
+
+vi.mock("../SidebarStageBackdrop", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../SidebarStageBackdrop")>();
+  return {
+    ...actual,
+    useSidebarStageBackdropVariant: () => sidebarStage.variant,
+  };
+});
+
+import {
+  ComposerPrimaryActions,
+  formatPendingPrimaryActionLabel,
+  shouldShowComposerSendSpinner,
+} from "./ComposerPrimaryActions";
 
 describe("formatPendingPrimaryActionLabel", () => {
   it("returns 'Submitting...' while responding", () => {
@@ -89,5 +105,56 @@ describe("formatPendingPrimaryActionLabel", () => {
         questionIndex: 5,
       }),
     ).toBe("Submit answers");
+  });
+});
+
+describe("composer send button", () => {
+  it("uses the brighter layered nightly cloud-and-star artwork", () => {
+    sidebarStage.variant = "nightly";
+
+    const markup = renderToStaticMarkup(
+      createElement(ComposerPrimaryActions, {
+        compact: false,
+        pendingAction: null,
+        isRunning: false,
+        showPlanFollowUpPrompt: false,
+        promptHasText: true,
+        isSendBusy: false,
+        isConnecting: false,
+        isEnvironmentUnavailable: false,
+        isPreparingWorktree: false,
+        hasSendableContent: true,
+        onPreviousPendingQuestion: vi.fn(),
+        onInterrupt: vi.fn(),
+        onImplementPlanInNewThread: vi.fn(),
+      }),
+    );
+
+    expect(markup).toContain("composer-send-button--nightly");
+    expect(markup).toContain("bg-[#2a245d]");
+    expect(markup).toContain("data-nightly-send-art");
+    expect(markup).toContain('viewBox="0 0 32 32"');
+    expect(markup).toContain("nightly-send-clouds");
+    expect(markup).toContain("nightly-send-stars");
+    expect(markup).toContain("#F76DBB");
+    expect(markup).not.toContain("M0 32H32V0L0 32Z");
+    expect(markup).not.toContain("<image");
+  });
+
+  it("keeps the arrow visible while its send animation finishes", () => {
+    expect(
+      shouldShowComposerSendSpinner({
+        isConnecting: false,
+        isSendBusy: true,
+        isSendArrowAnimating: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowComposerSendSpinner({
+        isConnecting: false,
+        isSendBusy: true,
+        isSendArrowAnimating: false,
+      }),
+    ).toBe(true);
   });
 });

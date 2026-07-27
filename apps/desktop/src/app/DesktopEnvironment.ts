@@ -13,7 +13,7 @@ import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
-import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
+import { isNightlyDesktopVersion, isV3ForkDesktopVersion } from "../updates/updateChannels.ts";
 
 export interface MakeDesktopEnvironmentInput {
   readonly dirname: string;
@@ -81,7 +81,12 @@ const APP_BASE_NAME = "V3 Code";
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly stageLabelOverride: DesktopAppStageLabel | undefined;
 }): DesktopAppStageLabel {
+  if (input.stageLabelOverride !== undefined) {
+    return input.stageLabelOverride;
+  }
+
   if (input.isDevelopment) {
     return "Dev";
   }
@@ -92,12 +97,16 @@ function resolveDesktopAppStageLabel(input: {
 function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly stageLabelOverride: DesktopAppStageLabel | undefined;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
+  const isV3Fork = isV3ForkDesktopVersion(input.appVersion);
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName: isV3Fork
+      ? `${APP_BASE_NAME} (V3 ${stageLabel})`
+      : `${APP_BASE_NAME} (${stageLabel})`,
   };
 }
 
@@ -154,14 +163,24 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    stageLabelOverride: Option.getOrUndefined(config.appStageLabelOverride),
   });
   const displayName = branding.displayName;
+  const isV3Fork = !isDevelopment && isV3ForkDesktopVersion(input.appVersion);
   const stateDir = path.join(
     baseDir,
-    isDevelopment && Option.isNone(configuredBaseDir) ? "dev" : "userdata",
+    isDevelopment && Option.isNone(configuredBaseDir)
+      ? "dev"
+      : isV3Fork
+        ? "userdata-v3"
+        : "userdata",
   );
-  const userDataDirName = isDevelopment ? "v3code-dev" : "v3code";
-  const legacyUserDataDirName = isDevelopment ? "V3 Code (Dev)" : "V3 Code (Alpha)";
+  const userDataDirName = isDevelopment ? "v3code-dev" : isV3Fork ? "v3code-v3" : "v3code";
+  const legacyUserDataDirName = isDevelopment
+    ? "V3 Code (Dev)"
+    : isV3Fork
+      ? "V3 Code (V3 Nightly)"
+      : "V3 Code (Alpha)";
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -201,10 +220,18 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.v3code.desktop.dev" : "com.v3code.desktop",
+      isDevelopment
+        ? "com.v3code.desktop.dev"
+        : isV3Fork
+          ? "com.v3code.desktop.v3"
+          : "com.v3code.desktop",
     ),
-    linuxDesktopEntryName: isDevelopment ? "v3code-dev.desktop" : "v3code.desktop",
-    linuxWmClass: isDevelopment ? "v3code-dev" : "v3code",
+    linuxDesktopEntryName: isDevelopment
+      ? "v3code-dev.desktop"
+      : isV3Fork
+        ? "v3code-v3.desktop"
+        : "v3code.desktop",
+    linuxWmClass: isDevelopment ? "v3code-dev" : isV3Fork ? "v3code-v3" : "v3code",
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

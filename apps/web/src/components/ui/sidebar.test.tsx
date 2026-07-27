@@ -55,6 +55,20 @@ describe("sidebar interactive cursors", () => {
 
     expect(html).toContain('data-slot="sidebar-menu-button"');
     expect(html).toContain("cursor-pointer");
+    expect(html).toContain("hover:bg-sidebar-row-hover");
+    expect(html).not.toContain("hover:bg-primary/10");
+    expect(html).toContain("motion-reduce:transition-none");
+  });
+
+  it("gives the active navigation state a subtle primary-token accent", () => {
+    const html = renderToStaticMarkup(
+      <SidebarProvider>
+        <SidebarMenuButton isActive>Projects</SidebarMenuButton>
+      </SidebarProvider>,
+    );
+
+    expect(html).toContain("data-[active=true]:bg-primary/10");
+    expect(html).toContain("data-[active=true]:ring-primary/15");
   });
 
   it("lets project drag handles override the default pointer cursor", () => {

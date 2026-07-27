@@ -28,6 +28,7 @@ import {
   resolveFffNativeDependencies,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
+  resolveDesktopArtifactName,
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
@@ -81,12 +82,21 @@ function iconResizeSpawnerLayer(
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
+    assert.equal(resolveDesktopUpdateChannel("0.0.29-nightly.20260725.899.v3.0.0.1"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
     assert.equal(resolveDesktopProductName("0.0.17"), "V3 Code");
     assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "V3 Code (Preview)");
+    assert.equal(
+      resolveDesktopProductName("0.0.29-nightly.20260725.899.v3.0.0.1"),
+      "V3 Code (V3 Preview)",
+    );
+    assert.equal(
+      resolveDesktopArtifactName("0.0.29-nightly.20260725.899.v3.0.0.1"),
+      "V3-Code-V3-${version}-${arch}.${ext}",
+    );
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -101,11 +111,18 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
       windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     });
+
+    assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.29-nightly.20260725.899.v3.0.0.1"), {
+      macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
+      linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
+      windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+    });
   });
 
   it("switches the bundled splash and favicon branding for nightly versions", () => {
     assert.equal(resolveDesktopWebAssetBrand("0.0.17"), "production");
     assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
+    assert.equal(resolveDesktopWebAssetBrand("0.0.29-nightly.20260725.899.v3.0.0.1"), "production");
   });
 
   it.effect("resolves GitHub desktop publish config from Effect config", () =>
@@ -496,6 +513,31 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(win.signAndEditExecutable, true);
       assert.notProperty(win, "azureSignOptions");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("uses a separate Windows identity for V3 fork builds", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "0.0.29-nightly.20260725.899.v3.0.0.1",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.equal(config.appId, "com.v3code.desktop.v3");
+      assert.equal(config.productName, "V3 Code (V3 Preview)");
+      assert.equal(config.artifactName, "V3-Code-V3-${version}-${arch}.${ext}");
+      assert.notProperty(config, "publish");
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+        ),
+      ),
+    ),
   );
 
   it("promotes target fff binaries to direct staged dependencies", () => {

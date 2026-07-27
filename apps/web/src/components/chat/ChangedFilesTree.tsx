@@ -56,7 +56,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
 
   return (
     <div
-      className="mt-4 rounded-2xl border border-border/70 bg-secondary p-2 dark:border-transparent dark:bg-input/32"
+      className="mt-4 rounded-2xl border border-primary/12 bg-secondary p-2 dark:bg-input/32"
       data-changed-files-state={
         expanded ? "expanded" : compactPreviewVisible ? "preview" : "collapsed"
       }
@@ -72,7 +72,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
           type="button"
           aria-expanded={expanded}
           data-scroll-anchor-ignore
-          className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1 py-1.5 text-left transition-[background-color,color] duration-200 hover:bg-primary/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
           onClick={() => onExpandedChange(!expanded)}
         >
           <ChevronRightIcon
@@ -175,7 +175,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
                 key={file.path}
                 type="button"
                 title={file.path}
-                className="inline-flex max-w-48 items-center gap-1 rounded-md border border-border/70 bg-background/45 px-1.5 py-1 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex max-w-48 items-center gap-1 rounded-md border border-primary/12 bg-background/45 px-1.5 py-1 font-mono text-[10px] text-muted-foreground transition-colors duration-200 hover:border-primary/25 hover:bg-primary/[0.045] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
                 onClick={() => onOpenTurnDiff(turnId, file.path)}
               >
                 <PierreEntryIcon
@@ -253,7 +253,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
           <button
             type="button"
             data-scroll-anchor-ignore
-            className="group flex w-full items-center gap-1.5 rounded-xl py-1 pr-3 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+            className="group flex w-full items-center gap-1.5 rounded-xl py-1 pr-3 text-left transition-colors duration-200 hover:bg-primary/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
             style={{ paddingLeft: `${leftPadding}px` }}
             onClick={() => toggleDirectory(node.path)}
           >
@@ -291,7 +291,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
       <button
         key={`file:${node.path}`}
         type="button"
-        className="group flex w-full items-center gap-1.5 rounded-xl py-1 pr-3 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+        className="group flex w-full items-center gap-1.5 rounded-xl py-1 pr-3 text-left transition-colors duration-200 hover:bg-primary/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transition-none"
         style={{ paddingLeft: `${leftPadding}px` }}
         onClick={() => onOpenTurnDiff(turnId, node.path)}
       >

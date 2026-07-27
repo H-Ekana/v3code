@@ -22,6 +22,7 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  ProviderDriverKind,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
@@ -99,6 +100,23 @@ function taskKind(taskType: string | undefined, parentTaskId: string | undefined
   // unknown — a nested shell/monitor task keeps its explicit kind above.
   if (parentTaskId) return "workflow_agent" as const;
   return "other" as const;
+}
+
+const DELEGATE_PROVIDER_BY_AGENT_TYPE = new Map<string, ProviderDriverKind>([
+  ["codex:codex-rescue", ProviderDriverKind.make("codex")],
+]);
+
+const DELEGATE_PROVIDER_BY_PLUGIN_NAMESPACE = new Map<string, ProviderDriverKind>([
+  ["codex", ProviderDriverKind.make("codex")],
+]);
+
+export function resolveDelegateProvider(
+  agentType: string | undefined,
+): ProviderDriverKind | undefined {
+  if (!agentType) return undefined;
+  const exactMatch = DELEGATE_PROVIDER_BY_AGENT_TYPE.get(agentType);
+  if (exactMatch) return exactMatch;
+  return DELEGATE_PROVIDER_BY_PLUGIN_NAMESPACE.get(agentType.split(":")[0] ?? "");
 }
 
 function isTaskAgentEvent(
@@ -190,14 +208,18 @@ export function foldTaskAgentEvent(
     "taskType" in payload ? payload.taskType : undefined,
     payload.parentTaskId,
   );
+  const agentType = payload.agentType ?? previous?.agentType;
+  const delegateProvider =
+    resolveDelegateProvider(payload.agentType) ??
+    previous?.delegateProvider ??
+    resolveDelegateProvider(previous?.agentType);
   const next: ThreadAgentSnapshot = {
     agentId: payload.taskId,
     provider: event.provider,
+    ...(delegateProvider ? { delegateProvider } : {}),
     kind: eventKind !== "other" ? eventKind : (previous?.kind ?? eventKind),
     name: payload.name ?? description ?? payload.workflowName ?? previous?.name ?? payload.taskId,
-    ...((payload.agentType ?? previous?.agentType)
-      ? { agentType: payload.agentType ?? previous?.agentType }
-      : {}),
+    ...(agentType ? { agentType } : {}),
     ...((payload.model ?? previous?.model) ? { model: payload.model ?? previous?.model } : {}),
     status,
     ...(currentActivity ? { currentActivity } : {}),
@@ -268,8 +290,10 @@ export function foldTaskAgentEvent(
   return (
     previous.status !== next.status ||
     previous.kind !== next.kind ||
+    previous.delegateProvider !== next.delegateProvider ||
     previous.parentAgentId !== next.parentAgentId ||
     previous.name !== next.name ||
+    previous.agentType !== next.agentType ||
     previous.model !== next.model ||
     previous.phaseIndex !== next.phaseIndex ||
     previous.phaseTitle !== next.phaseTitle ||

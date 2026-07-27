@@ -153,7 +153,7 @@ export function SidebarUpdatePill() {
       )}
       {visible && (
         <div
-          className={`group/update relative flex h-7 w-full items-center rounded-lg bg-primary/15 text-xs font-medium text-primary ${
+          className={`group/update relative flex h-7 w-full items-center overflow-hidden rounded-lg border border-primary/15 bg-primary/10 text-xs font-medium text-primary transition-[background-color,border-color] duration-200 ease-out hover:border-primary/25 hover:bg-primary/15 motion-reduce:transition-none ${
             disabled ? " cursor-not-allowed opacity-60" : ""
           }`}
         >
@@ -166,7 +166,7 @@ export function SidebarUpdatePill() {
                   aria-label={tooltip}
                   aria-disabled={disabled || undefined}
                   disabled={disabled}
-                  className="update-main relative flex h-full flex-1 items-center gap-2 px-2 enabled:cursor-pointer"
+                  className="update-main relative flex h-full flex-1 items-center gap-2 rounded-l-lg px-2 outline-hidden enabled:cursor-pointer focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/70"
                   onClick={handleAction}
                 >
                   {action === "install" ? (
@@ -216,7 +216,7 @@ export function SidebarUpdatePill() {
                   <button
                     type="button"
                     aria-label="Dismiss update"
-                    className="mr-1 inline-flex size-5 items-center justify-center rounded-md text-primary/60 transition-colors hover:text-primary"
+                    className="mr-1 inline-flex size-5 items-center justify-center rounded-md text-primary/60 outline-hidden transition-[background-color,color] duration-200 hover:bg-primary/10 hover:text-primary focus-visible:ring-1 focus-visible:ring-primary/70 motion-reduce:transition-none"
                     onClick={() => setDismissed(true)}
                   >
                     <XIcon className="size-3.5" />

@@ -37,7 +37,9 @@ export function SettingsSection({
         </h2>
         <div className="flex min-h-7 min-w-7 items-center justify-end">{headerAction}</div>
       </div>
-      <div className="relative space-y-1 overflow-visible text-foreground">{children}</div>
+      <div className="relative space-y-1 overflow-visible rounded-2xl border border-primary/10 bg-card/20 text-foreground">
+        {children}
+      </div>
     </section>
   );
 }
@@ -62,7 +64,11 @@ export function SettingsRow({
   return (
     <div
       {...rowProps}
-      className={cn("rounded-xl px-3 sm:px-4", children ? "pt-3 pb-1" : "py-3", className)}
+      className={cn(
+        "rounded-xl border border-transparent px-3 transition-[background-color,border-color] duration-200 hover:border-primary/10 hover:bg-primary/[0.035] focus-within:border-ring/25 focus-within:bg-primary/[0.025] motion-reduce:transition-none sm:px-4",
+        children ? "pt-3 pb-1" : "py-3",
+        className,
+      )}
     >
       <div className="flex flex-col gap-3 sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] sm:items-center sm:gap-8">
         <div className="min-w-0 flex-1 space-y-1">
@@ -97,7 +103,7 @@ export function SettingResetButton({ label, onClick }: { label: string; onClick:
             size="icon-xs"
             variant="ghost"
             aria-label={`Reset ${label} to default`}
-            className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+            className="size-5 rounded-sm p-0 text-muted-foreground transition-colors duration-200 hover:text-primary motion-reduce:transition-none"
             onClick={(event) => {
               event.stopPropagation();
               onClick();

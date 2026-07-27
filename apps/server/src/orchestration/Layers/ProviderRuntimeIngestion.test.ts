@@ -50,6 +50,7 @@ import {
   foldTaskAgentEvent,
   ProviderRuntimeIngestionLive,
   pruneSettledAgents,
+  resolveDelegateProvider,
 } from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -384,6 +385,51 @@ describe("ProviderRuntimeIngestion", () => {
       Array.from(agents.values()).filter((agent) => agent.status === "completed"),
     ).toHaveLength(50);
     expect(agents.has("settled-0")).toBe(false);
+  });
+
+  it("resolves and preserves delegated providers on agent snapshots", () => {
+    expect(resolveDelegateProvider("codex:codex-rescue")).toBe("codex");
+    expect(resolveDelegateProvider("codex:future-agent")).toBe("codex");
+    expect(resolveDelegateProvider("other:agent")).toBeUndefined();
+
+    const agents = new Map<string, ThreadAgentSnapshot>();
+    const started: Extract<ProviderRuntimeEvent, { type: "task.started" }> = {
+      type: "task.started",
+      eventId: asEventId("delegated-agent-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("delegated-agent-1"),
+        description: "Codex rescue",
+        taskType: "local_agent",
+        agentType: "codex:codex-rescue",
+      },
+    };
+    expect(foldTaskAgentEvent(agents, started)).toBe(true);
+    expect(agents.get("delegated-agent-1")).toMatchObject({
+      provider: "claudeAgent",
+      delegateProvider: "codex",
+      agentType: "codex:codex-rescue",
+    });
+
+    const progress: Extract<ProviderRuntimeEvent, { type: "task.progress" }> = {
+      ...started,
+      type: "task.progress",
+      eventId: asEventId("delegated-agent-progress"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("delegated-agent-1"),
+        description: "Codex rescue",
+        summary: "Reviewing the implementation",
+      },
+    };
+    expect(foldTaskAgentEvent(agents, progress)).toBe(true);
+    expect(agents.get("delegated-agent-1")).toMatchObject({
+      provider: "claudeAgent",
+      delegateProvider: "codex",
+      agentType: "codex:codex-rescue",
+    });
   });
 
   it("appends latest-wins agent rosters only on material changes and sweeps orphans", async () => {

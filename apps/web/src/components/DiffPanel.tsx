@@ -532,7 +532,7 @@ export default function DiffPanel({
       <div className="flex min-w-0 flex-1 items-center gap-3 [-webkit-app-region:no-drag]">
         <DropdownMenu>
           <DropdownMenuTrigger
-            className="inline-flex h-6 max-w-full items-center gap-1 rounded-md bg-muted/70 px-2 text-xs font-medium text-foreground outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex h-6 max-w-full items-center gap-1 rounded-md bg-primary/8 px-2 text-xs font-medium text-foreground outline-none ring-1 ring-primary/10 transition-[background-color,color,box-shadow] duration-200 hover:bg-primary/12 focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
             aria-label={`Diff scope: ${selectedScopeLabel}`}
           >
             <span className="truncate">{selectedScopeLabel}</span>
@@ -542,7 +542,7 @@ export default function DiffPanel({
             <DropdownMenuItem
               className={
                 selectedTurnId === null && selectedGitScope === "unstaged"
-                  ? "bg-foreground/[0.08]"
+                  ? "bg-primary/10 text-primary"
                   : undefined
               }
               onClick={() => selectGitScope("unstaged")}
@@ -552,7 +552,7 @@ export default function DiffPanel({
             <DropdownMenuItem
               className={
                 selectedTurnId === null && selectedGitScope === "branch"
-                  ? "bg-foreground/[0.08]"
+                  ? "bg-primary/10 text-primary"
                   : undefined
               }
               onClick={() => selectGitScope("branch")}
@@ -562,7 +562,7 @@ export default function DiffPanel({
             <DropdownMenuItem
               className={
                 selectedTurnId !== null && selectedTurn?.turnId === latestTurn?.turnId
-                  ? "bg-foreground/[0.08]"
+                  ? "bg-primary/10 text-primary"
                   : undefined
               }
               onClick={() => {
@@ -583,7 +583,9 @@ export default function DiffPanel({
                     <DropdownMenuItem
                       key={summary.turnId}
                       className={
-                        summary.turnId === selectedTurn?.turnId ? "bg-foreground/[0.08]" : undefined
+                        summary.turnId === selectedTurn?.turnId
+                          ? "bg-primary/10 text-primary"
+                          : undefined
                       }
                       onClick={() => selectTurn(summary.turnId)}
                     >
@@ -619,7 +621,7 @@ export default function DiffPanel({
               }}
             >
               <ComboboxTrigger
-                className="inline-flex min-w-0 max-w-48 items-center gap-1 overflow-hidden rounded-md px-1.5 py-1 outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex min-w-0 max-w-48 items-center gap-1 overflow-hidden rounded-md px-1.5 py-1 outline-none transition-[background-color,color] duration-200 hover:bg-primary/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
                 aria-label={`Change comparison target. Currently ${selectedGitSource.baseRef}`}
               >
                 <span className="min-w-0 truncate">{selectedGitSource.baseRef}</span>
@@ -749,10 +751,18 @@ export default function DiffPanel({
             }
           }}
         >
-          <Toggle aria-label="Stacked diff view" value="stacked">
+          <Toggle
+            className="transition-[background-color,color] duration-200 data-pressed:bg-primary/12 data-pressed:text-primary motion-reduce:transition-none"
+            aria-label="Stacked diff view"
+            value="stacked"
+          >
             <Rows3Icon className="size-3" />
           </Toggle>
-          <Toggle aria-label="Split diff view" value="split">
+          <Toggle
+            className="transition-[background-color,color] duration-200 data-pressed:bg-primary/12 data-pressed:text-primary motion-reduce:transition-none"
+            aria-label="Split diff view"
+            value="split"
+          >
             <Columns2Icon className="size-3" />
           </Toggle>
         </ToggleGroup>
@@ -760,6 +770,7 @@ export default function DiffPanel({
           <TooltipTrigger
             render={
               <Toggle
+                className="transition-[background-color,color] duration-200 data-pressed:bg-primary/12 data-pressed:text-primary motion-reduce:transition-none"
                 aria-label={wordWrap ? "Disable diff line wrapping" : "Enable diff line wrapping"}
                 variant="outline"
                 size="xs"
@@ -780,6 +791,7 @@ export default function DiffPanel({
           <TooltipTrigger
             render={
               <Toggle
+                className="transition-[background-color,color] duration-200 data-pressed:bg-primary/12 data-pressed:text-primary motion-reduce:transition-none"
                 aria-label={
                   diffIgnoreWhitespace ? "Show whitespace changes" : "Hide whitespace changes"
                 }
@@ -880,7 +892,7 @@ export default function DiffPanel({
                             <button
                               type="button"
                               className={cn(
-                                "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
+                                "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-[background-color,color] duration-200 hover:bg-primary/10 hover:text-primary focus-visible:outline-hidden motion-reduce:transition-none",
                                 getDiffCollapseIconClassName(fileDiff),
                               )}
                               aria-label={collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`}
@@ -922,7 +934,7 @@ export default function DiffPanel({
                   <p className="text-[11px] text-muted-foreground/75">{renderablePatch.reason}</p>
                   <pre
                     className={cn(
-                      "max-h-[72vh] rounded-md border border-border/70 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90",
+                      "max-h-[72vh] rounded-md border border-primary/10 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90",
                       wordWrap
                         ? "overflow-auto whitespace-pre-wrap wrap-break-word"
                         : "overflow-auto",

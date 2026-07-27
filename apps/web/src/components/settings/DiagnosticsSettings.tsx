@@ -93,7 +93,7 @@ function StatBlock({
   tone?: "default" | "warning" | "danger";
 }) {
   return (
-    <div className="min-w-0 border-border/60 px-4 py-3 sm:px-5">
+    <div className="min-w-0 border-border/60 px-4 py-3 transition-colors duration-200 hover:bg-primary/[0.035] motion-reduce:transition-none sm:px-5">
       <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
         <span className="min-w-0 truncate">{label}</span>
         {tooltip ? (
@@ -224,7 +224,7 @@ function DiagnosticsTable({
             ))}
           </colgroup>
         ) : null}
-        <thead className="border-b border-border/60 text-[11px] uppercase tracking-[0.08em] text-muted-foreground/70">
+        <thead className="border-b border-primary/10 bg-primary/[0.035] text-[11px] uppercase tracking-[0.08em] text-muted-foreground/70">
           <tr>
             {headers.map((header, index) => (
               <th
@@ -239,7 +239,9 @@ function DiagnosticsTable({
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-border/60">{children}</tbody>
+        <tbody className="divide-y divide-border/60 [&>tr]:transition-colors [&>tr]:duration-150 [&>tr:hover]:bg-primary/[0.035] motion-reduce:[&>tr]:transition-none">
+          {children}
+        </tbody>
       </table>
     </ScrollArea>
   );

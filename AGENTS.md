@@ -10,11 +10,12 @@
   - Backend changes must include and run focused tests for the changed behavior.
   - Run targeted formatting, lint, and type checks for the affected scope when available.
 - Do not run repo-wide `vp check`, `vp run typecheck`, `vp run test`, or equivalent full-suite commands locally unless the user explicitly requests them. CI is responsible for the full verification suite.
-- After frontend feature development or any user-visible frontend behavior change, the primary agent must run one integrated verification pass for each affected client surface after integrating the work:
-  - Web: use the `test-t3-app` skill. Launch one isolated environment, authenticate through the printed pairing URL, and verify the affected flow in the controlled browser.
-  - Mobile: use the `test-t3-mobile` skill. Connect one representative iOS Simulator or Android Emulator available on the host to one isolated environment and verify the affected flow. On compatible macOS hosts, prefer iOS for cross-platform changes and stream it through serve-sim in the T3 Code in-app browser or another available agent browser; use Android when it is the affected or viable platform.
-  - Subagents must not independently launch dev servers or repeat integrated client verification unless their delegated task explicitly requires it.
-  - Stop dev servers, watchers, and other long-running verification processes when the focused verification is complete.
+- Do not start a development server or launch the web app, Electron app, installed desktop app, mobile
+  app, simulator, or emulator as part of implementation or verification. Do not use browser automation
+  to run the app. Building packages and installers is allowed, but do not launch them.
+- For user-visible changes, finish the relevant focused automated checks and then ask the user to verify
+  the result in the actual installed app. Describe the exact flow or surfaces the user should check.
+- If an app, dev server, watcher, simulator, or emulator is started accidentally, stop it immediately.
 
 ## Package Roles
 
@@ -23,6 +24,23 @@
 - `packages/contracts`: Shared effect/Schema schemas and TypeScript contracts for provider events, WebSocket protocol, and model/session types. Keep this package schema-only — no runtime logic.
 - `packages/shared`: Shared runtime utilities consumed by both server and client applications. Uses explicit subpath exports (e.g. `@t3tools/shared/git`) — no barrel index.
 - `packages/client-runtime`: Shared runtime package for sharing client code across web and mobile.
+
+## Codex Rescue Subagents
+
+- When invoking `/codex:rescue` or the `codex:codex-rescue` subagent, always pass
+  `--model gpt-5.6-sol --effort high`. This overrides the plugin skill's "leave model and effort
+  unset" default; the user has standing preference for GPT-5.6 Sol at high reasoning effort.
+- `~/.codex/config.toml` already sets `model = "gpt-5.6-sol"` and `model_reasoning_effort = "high"`
+  as the global Codex default, so the flags are belt-and-braces — pass them anyway so the choice
+  survives a config change and is visible in the transcript.
+- `--effort` accepts `none | minimal | low | medium | high | xhigh`.
+- A `codex:codex-rescue` subagent is a thin forwarder: it launches a detached background Codex job
+  and completes in ~30s, so it shows as finished in the Agents panel while the real job runs for
+  minutes. Never report a rescue subagent's completion as the work being done.
+- To check what a Codex job is actually doing, see the "Where to find out what agents are actually
+  doing" section of `docs/project/ideal-agents-sidebar.md` — job registry (`codex-companion.mjs
+status --json`), per-job progress log, and the full session JSONL transcript. Check these
+  proactively rather than waiting to be asked.
 
 ## Reference Repos
 

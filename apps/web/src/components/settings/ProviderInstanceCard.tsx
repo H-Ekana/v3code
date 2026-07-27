@@ -600,7 +600,12 @@ export function ProviderInstanceCard({
   ) : null;
 
   return (
-    <div className="rounded-xl transition-colors hover:bg-muted/20">
+    <div
+      className={cn(
+        "rounded-xl border border-transparent transition-[background-color,border-color] duration-200 hover:border-primary/15 hover:bg-primary/[0.035] motion-reduce:transition-none",
+        isExpanded && "border-astro-highlight/15 bg-astro-highlight/[0.025]",
+      )}
+    >
       <div className="px-3 py-3 sm:px-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1 space-y-1">
@@ -715,7 +720,10 @@ export function ProviderInstanceCard({
               aria-label={`Toggle ${displayName} details`}
             >
               <ChevronDownIcon
-                className={cn("size-3.5 transition-transform", isExpanded && "rotate-180")}
+                className={cn(
+                  "size-3.5 transition-[transform,color] duration-200 motion-reduce:transition-none",
+                  isExpanded && "rotate-180 text-astro-highlight",
+                )}
               />
             </Button>
             <Switch
@@ -729,7 +737,7 @@ export function ProviderInstanceCard({
 
       <Collapsible open={isExpanded} onOpenChange={onExpandedChange}>
         <CollapsibleContent>
-          <div className="space-y-5 px-3 pb-4 pt-2 sm:px-4">
+          <div className="space-y-5 border-t border-primary/10 px-3 pt-4 pb-4 sm:px-4">
             <div>
               <label htmlFor={`provider-instance-${instanceId}-display-name`} className="block">
                 <span className="text-xs font-medium text-foreground">Display name</span>

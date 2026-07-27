@@ -93,9 +93,17 @@ export interface AgentPanelPhase {
   readonly agents: ReadonlyArray<ThreadAgentSnapshot>;
 }
 
+export interface AgentPanelRow {
+  readonly agent: ThreadAgentSnapshot;
+  readonly shells: ReadonlyArray<ThreadAgentSnapshot>;
+}
+
 export interface AgentPanelState {
   readonly groups: ReadonlyArray<AgentPanelGroup>;
+  readonly subagents: ReadonlyArray<AgentPanelRow>;
+  readonly backgroundTasks: ReadonlyArray<ThreadAgentSnapshot>;
   readonly runningCount: number;
+  readonly backgroundRunningCount: number;
   readonly waitingCount: number;
   readonly settledCount: number;
   readonly totalTokens: number;
@@ -113,18 +121,28 @@ function phaseStatus(agents: ReadonlyArray<ThreadAgentSnapshot>): "pending" | "r
   return "running";
 }
 
+function isBackgroundTask(agent: ThreadAgentSnapshot): boolean {
+  return agent.kind === "shell" || agent.kind === "monitor";
+}
+
 export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>): AgentPanelState {
   const workflows = agents.filter((agent) => agent.kind === "workflow");
+  const workflowIds = new Set(workflows.map((workflow) => workflow.agentId));
   const byParent = new Map<string, ThreadAgentSnapshot[]>();
-  const direct: ThreadAgentSnapshot[] = [];
+  const subagentSnapshots: ThreadAgentSnapshot[] = [];
+  const shellCandidates: ThreadAgentSnapshot[] = [];
   for (const agent of agents) {
     if (agent.kind === "workflow") continue;
-    if (agent.parentAgentId) {
+    if (isBackgroundTask(agent)) {
+      shellCandidates.push(agent);
+    } else if (agent.parentAgentId && workflowIds.has(agent.parentAgentId)) {
       const list = byParent.get(agent.parentAgentId) ?? [];
       list.push(agent);
       byParent.set(agent.parentAgentId, list);
     } else {
-      direct.push(agent);
+      // Non-background rows whose parent never materialized remain visible as
+      // sub-agents; shells and monitors are handled separately below.
+      subagentSnapshots.push(agent);
     }
   }
 
@@ -151,12 +169,20 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
       rest: members.filter((agent) => !inDeclaredPhase.has(agent.agentId)),
     });
   }
-  // Orphaned parent groups (parent never materialized) fold into direct spawns.
-  for (const list of byParent.values()) {
-    direct.push(...list);
-  }
-  if (direct.length > 0) {
-    groups.push({ workflow: null, phases: [], rest: direct });
+
+  const subagents = subagentSnapshots.map((agent) => ({
+    agent,
+    shells: [] as ThreadAgentSnapshot[],
+  }));
+  const subagentById = new Map(subagents.map((row) => [row.agent.agentId, row]));
+  const backgroundTasks: ThreadAgentSnapshot[] = [];
+  for (const shell of shellCandidates) {
+    const parent = shell.parentAgentId ? subagentById.get(shell.parentAgentId) : undefined;
+    if (parent) {
+      parent.shells.push(shell);
+    } else {
+      backgroundTasks.push(shell);
+    }
   }
 
   // Workflow container rows are grouping chrome, not workers: they are
@@ -168,14 +194,17 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
     ),
   );
   let runningCount = 0;
+  let backgroundRunningCount = 0;
   let waitingCount = 0;
   let settledCount = 0;
   let totalTokens = 0;
   for (const agent of agents) {
     const isContainer = agent.kind === "workflow";
     if (!isContainer) {
-      if (agent.status === "running" || agent.status === "pending") runningCount += 1;
-      else if (agent.status === "waiting") waitingCount += 1;
+      if (agent.status === "running" || agent.status === "pending") {
+        if (isBackgroundTask(agent)) backgroundRunningCount += 1;
+        else runningCount += 1;
+      } else if (agent.status === "waiting") waitingCount += 1;
       else settledCount += 1; // idle + terminal
     }
     if (!isContainer || !workflowsWithMembers.has(agent.agentId)) {
@@ -183,7 +212,16 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
     }
   }
 
-  return { groups, runningCount, waitingCount, settledCount, totalTokens };
+  return {
+    groups,
+    subagents,
+    backgroundTasks,
+    runningCount,
+    backgroundRunningCount,
+    waitingCount,
+    settledCount,
+    totalTokens,
+  };
 }
 
 export function formatAgentTokenCount(totalTokens: number): string {

@@ -223,7 +223,7 @@ export default function FileBrowserPanel({
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-file-browser-panel={`${environmentId}:${cwd}`}
     >
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-primary/10 bg-background px-3">
         <div className="min-w-0 flex-1">
           <div className="truncate text-xs font-medium text-foreground">{projectName}</div>
           <div className="truncate text-[10px] leading-none text-muted-foreground">
@@ -235,7 +235,7 @@ export default function FileBrowserPanel({
         </div>
         <button
           type="button"
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="rounded-md p-1.5 text-muted-foreground transition-[background-color,color] duration-200 ease-out hover:bg-primary/10 hover:text-primary motion-reduce:transition-none"
           aria-label="Search workspace files"
           onClick={() => model.openSearch()}
         >
@@ -243,7 +243,7 @@ export default function FileBrowserPanel({
         </button>
         <button
           type="button"
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="rounded-md p-1.5 text-muted-foreground transition-[background-color,color] duration-200 ease-out hover:bg-primary/10 hover:text-primary motion-reduce:transition-none"
           aria-label="Refresh workspace files"
           onClick={entriesQuery.refresh}
         >

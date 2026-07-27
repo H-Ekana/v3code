@@ -12,7 +12,7 @@ import { cn } from "~/lib/utils";
 const Select = SelectPrimitive.Root;
 
 const selectTriggerVariants = cva(
-  "relative inline-flex cursor-pointer select-none items-center justify-between gap-2 border rounded-lg text-left text-base outline-none transition-[color,box-shadow,background-color] data-disabled:pointer-events-none data-disabled:opacity-64 sm:text-sm [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4.5 sm:[&_svg:not([class*='size-'])]:size-4",
+  "relative inline-flex cursor-pointer select-none items-center justify-between gap-2 rounded-lg border text-left text-base outline-none transition-[color,border-color,box-shadow,background-color] duration-200 data-disabled:pointer-events-none data-disabled:opacity-64 data-pressed:border-primary/30 data-pressed:bg-primary/10 data-pressed:ring-2 data-pressed:ring-primary/10 motion-reduce:transition-none sm:text-sm dark:data-pressed:bg-primary/15 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4.5 sm:[&_svg:not([class*='size-'])]:size-4",
   {
     defaultVariants: {
       size: "default",
@@ -185,7 +185,7 @@ function SelectItem({
   return (
     <SelectPrimitive.Item
       className={cn(
-        "flex min-h-8 in-data-[side=none]:min-w-[calc(var(--anchor-width)+1.25rem)] cursor-default items-center rounded-sm px-2 py-1 text-base outline-none data-selected:bg-foreground/[0.08] data-disabled:pointer-events-none data-highlighted:bg-accent data-highlighted:text-accent-foreground data-disabled:opacity-64 sm:min-h-7 sm:text-sm [&_svg:not([class*='size-'])]:size-4.5 sm:[&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+        "flex min-h-8 in-data-[side=none]:min-w-[calc(var(--anchor-width)+1.25rem)] cursor-default items-center rounded-sm px-2 py-1 text-base outline-none transition-colors duration-150 data-selected:bg-primary/10 data-disabled:pointer-events-none data-highlighted:bg-primary/10 data-highlighted:text-accent-foreground data-disabled:opacity-64 motion-reduce:transition-none sm:min-h-7 sm:text-sm dark:data-selected:bg-primary/15 dark:data-highlighted:bg-primary/15 [&_svg:not([class*='size-'])]:size-4.5 sm:[&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
         className,
       )}
       data-slot="select-item"

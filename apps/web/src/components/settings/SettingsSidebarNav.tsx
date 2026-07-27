@@ -84,16 +84,16 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     isActive={isActive}
                     className={
                       isActive
-                        ? "h-8 items-center gap-2 rounded-md bg-sidebar-row-active px-2 py-1.5 text-left text-sm font-medium text-sidebar-foreground"
-                        : "h-8 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                        ? "h-8 items-center gap-2 rounded-md border border-astro-highlight/20 bg-sidebar-row-active px-2 py-1.5 text-left text-sm font-medium text-sidebar-foreground transition-[background-color,border-color] duration-200 motion-reduce:transition-none"
+                        : "h-8 items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left text-sm font-medium text-sidebar-muted-foreground/80 transition-[background-color,color] duration-200 hover:bg-sidebar-row-hover hover:text-sidebar-foreground motion-reduce:transition-none"
                     }
                     onClick={() => handleSectionClick(item.to)}
                   >
                     <Icon
                       className={
                         isActive
-                          ? "size-4 shrink-0 text-sidebar-foreground"
-                          : "size-4 shrink-0 text-sidebar-muted-foreground/60"
+                          ? "size-4 shrink-0 text-astro-highlight"
+                          : "size-4 shrink-0 text-sidebar-muted-foreground/60 transition-colors duration-200 group-hover/menu-item:text-primary motion-reduce:transition-none"
                       }
                     />
                     <span className="truncate">{item.label}</span>
@@ -111,7 +111,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
             <SidebarMenuItem>
               <SidebarMenuButton
                 size="sm"
-                className="h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                className="h-8 items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground/80 transition-[background-color,color,border-color] duration-200 hover:border-primary/10 hover:bg-sidebar-row-hover hover:text-sidebar-foreground motion-reduce:transition-none"
                 onClick={handleBackClick}
               >
                 <ArrowLeftIcon className="size-4" />

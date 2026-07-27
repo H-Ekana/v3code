@@ -1,4 +1,4 @@
-import { memo, type PointerEventHandler } from "react";
+import { memo, useState, type PointerEventHandler } from "react";
 import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
@@ -49,6 +49,12 @@ export const formatPendingPrimaryActionLabel = (input: {
   return input.questionIndex > 0 ? "Submit answers" : "Submit answer";
 };
 
+export const shouldShowComposerSendSpinner = (input: {
+  isConnecting: boolean;
+  isSendBusy: boolean;
+  isSendArrowAnimating: boolean;
+}) => input.isConnecting || (input.isSendBusy && !input.isSendArrowAnimating);
+
 const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
   event.preventDefault();
 };
@@ -69,6 +75,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onInterrupt,
   onImplementPlanInNewThread,
 }: ComposerPrimaryActionsProps) {
+  const [isSendArrowAnimating, setIsSendArrowAnimating] = useState(false);
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
@@ -199,12 +206,16 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     <button
       type="submit"
       className={cn(
-        "relative isolate flex h-9 w-9 items-center justify-center overflow-hidden rounded-full text-primary-foreground shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-[0_1px_--theme(--color-white/16%)] hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none disabled:pointer-events-none disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8",
-        stageBackdropVariant
-          ? "bg-transparent enabled:shadow-black/24 enabled:hover:brightness-110"
-          : "bg-primary/90 enabled:shadow-primary/24 hover:bg-primary",
+        "relative isolate flex h-9 w-9 items-center justify-center overflow-visible rounded-full text-primary-foreground shadow-xs transition-all duration-200 enabled:cursor-pointer enabled:inset-shadow-[0_1px_--theme(--color-white/16%)] hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none disabled:pointer-events-none disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8",
+        isSendArrowAnimating && "composer-send-button--sending",
+        stageBackdropVariant === "nightly"
+          ? "composer-send-button--nightly bg-[#2a245d] text-white enabled:shadow-[0_3px_8px_rgba(93,58,151,0.3)]"
+          : stageBackdropVariant === "dev"
+            ? "bg-transparent enabled:shadow-black/24 enabled:hover:brightness-110"
+            : "bg-primary/90 enabled:shadow-primary/24 hover:bg-primary",
       )}
       {...pointerFocusProps}
+      onClick={() => setIsSendArrowAnimating(true)}
       disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
       aria-label={
         isEnvironmentUnavailable
@@ -219,23 +230,53 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       }
     >
       {stageBackdropVariant ? (
-        <span className="absolute inset-0 -z-10" aria-hidden="true">
+        <span
+          className={cn(
+            "absolute inset-0 -z-10 overflow-hidden rounded-[inherit]",
+            stageBackdropVariant === "nightly" && "opacity-100",
+          )}
+          aria-hidden="true"
+        >
           <StageBackdropButtonArt variant={stageBackdropVariant} />
         </span>
       ) : null}
-      {isConnecting || isSendBusy ? (
+      {shouldShowComposerSendSpinner({
+        isConnecting,
+        isSendBusy,
+        isSendArrowAnimating,
+      }) ? (
         <Spinner className="size-3.5" aria-hidden="true" />
       ) : (
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path
-            d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <span
+          className={cn(
+            "composer-send-arrow",
+            isSendArrowAnimating && "composer-send-arrow--sending",
+          )}
+          onAnimationEnd={(event) => {
+            if (event.animationName === "composer-send-arrow-launch") {
+              setIsSendArrowAnimating(false);
+            }
+          }}
+        >
+          <svg
+            className="composer-send-arrow__glyph"
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </span>
       )}
+      <span className="composer-send-launch-burst" aria-hidden="true" />
     </button>
   );
 });

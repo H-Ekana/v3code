@@ -292,7 +292,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
               className={cn(
                 "shrink-0 whitespace-nowrap px-2 sm:px-3",
                 props.interactionMode === "plan"
-                  ? "bg-blue-500/10 text-blue-400 hover:bg-blue-500/15 hover:text-blue-300"
+                  ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
                   : "text-muted-foreground/70 hover:text-foreground/80",
               )}
               size="sm"
@@ -376,7 +376,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                   className={cn(
                     "shrink-0 whitespace-nowrap px-2 sm:px-3",
                     props.planSidebarOpen
-                      ? "bg-blue-500/10 text-blue-400 hover:bg-blue-500/15 hover:text-blue-300"
+                      ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
                       : "text-muted-foreground/70 hover:text-foreground/80",
                   )}
                   size="sm"
@@ -2202,7 +2202,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     >
       <div
         className={cn(
-          "group rounded-[22px] p-px transition-colors duration-200",
+          "group rounded-[22px] bg-[linear-gradient(135deg,color-mix(in_srgb,var(--primary)_16%,var(--border)),var(--border)_52%,color-mix(in_srgb,var(--primary)_9%,var(--border)))] p-px shadow-[0_12px_40px_-32px_color-mix(in_srgb,var(--primary)_65%,transparent)] transition-[background-color,box-shadow] duration-200 ease-out focus-within:shadow-[0_18px_48px_-30px_color-mix(in_srgb,var(--primary)_78%,transparent)] motion-reduce:transition-none",
           composerProviderState.composerFrameClassName,
         )}
         onDragEnter={onComposerDragEnter}
@@ -2218,8 +2218,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
           className={cn(
-            "rounded-[20px] transition-[background-color] duration-200",
-            isDragOverComposer ? "bg-accent/45 ring-1 ring-primary/70" : null,
+            "rounded-[20px] transition-[background-color,box-shadow] duration-200 ease-out motion-reduce:transition-none",
+            isDragOverComposer
+              ? "bg-primary/[0.055] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--primary)_72%,transparent),inset_0_0_28px_color-mix(in_srgb,var(--primary)_7%,transparent)]"
+              : null,
             projectSelectionRequired ? "opacity-75" : null,
             composerProviderState.composerSurfaceClassName,
           )}
@@ -2483,7 +2485,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     .map((image) => (
                       <div
                         key={image.id}
-                        className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
+                        className="group/composer-attachment relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background transition-colors duration-200 hover:border-primary/30 motion-reduce:transition-none"
                       >
                         {image.previewUrl ? (
                           <button
@@ -2499,7 +2501,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             <img
                               src={image.previewUrl}
                               alt={image.name}
-                              className="h-full w-full object-cover"
+                              className="h-full w-full object-cover transition-transform duration-200 ease-out group-hover/composer-attachment:scale-[1.035] motion-reduce:transform-none motion-reduce:transition-none"
                             />
                           </button>
                         ) : (
@@ -2532,7 +2534,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         <Button
                           variant="ghost"
                           size="icon-xs"
-                          className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
+                          className="absolute right-1 top-1 bg-background/80 opacity-80 transition-[background-color,opacity] duration-200 hover:bg-background/95 hover:opacity-100 group-hover/composer-attachment:opacity-100 motion-reduce:transition-none"
                           onClick={() => removeComposerImage(image.id)}
                           aria-label={`Remove ${image.name}`}
                         >

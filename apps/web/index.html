@@ -62,25 +62,87 @@
         color: #f5f5f5;
       }
 
-      #boot-shell {
+      .v3-splash {
+        position: relative;
+        isolation: isolate;
         display: flex;
         min-height: 100%;
+        overflow: hidden;
         align-items: center;
         justify-content: center;
-        background: inherit;
+        background:
+          radial-gradient(circle at 50% 52%, rgb(117 67 165 / 5%), transparent 22rem), #ffffff;
       }
 
-      #boot-shell-card {
+      html.dark .v3-splash {
+        background:
+          radial-gradient(circle at 50% 52%, rgb(137 73 196 / 8%), transparent 23rem), #161616;
+      }
+
+      .v3-splash-art {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        user-select: none;
+        object-fit: cover;
+      }
+
+      .v3-splash-stars {
+        opacity: 0.2;
+        mix-blend-mode: multiply;
+      }
+
+      .v3-splash-clouds {
+        opacity: 0.21;
+        filter: saturate(0.86) brightness(0.94);
+      }
+
+      .v3-splash-signal {
+        opacity: 0.34;
+        mix-blend-mode: multiply;
+      }
+
+      html.dark .v3-splash-stars {
+        opacity: 0.52;
+        mix-blend-mode: screen;
+      }
+
+      html.dark .v3-splash-signal {
+        opacity: 0.78;
+        mix-blend-mode: screen;
+      }
+
+      html.dark .v3-splash-clouds {
+        opacity: 0.5;
+        filter: saturate(0.82) brightness(0.9);
+      }
+
+      .v3-splash-card {
+        position: relative;
+        z-index: 1;
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 96px;
-        height: 96px;
+        width: 120px;
+        height: 120px;
       }
 
-      #boot-shell-logo {
+      .v3-splash-card::before {
+        position: absolute;
+        z-index: -1;
+        width: 240px;
+        height: 240px;
+        border-radius: 999px;
+        background: radial-gradient(circle, rgb(158 81 205 / 8%), transparent 66%);
+        content: "";
+      }
+
+      .v3-splash-logo {
         width: 64px;
         height: 64px;
+        filter: drop-shadow(0 9px 22px rgb(65 32 92 / 24%));
         object-fit: contain;
       }
     </style>
@@ -88,9 +150,27 @@
   </head>
   <body>
     <div id="root">
-      <div id="boot-shell">
-        <div id="boot-shell-card" aria-label="V3 Code splash screen">
-          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="V3 Code" />
+      <div id="boot-shell" class="v3-splash">
+        <img
+          class="v3-splash-art v3-splash-stars"
+          src="/v3-splash-stars.svg"
+          alt=""
+          aria-hidden="true"
+        />
+        <img
+          class="v3-splash-art v3-splash-signal"
+          src="/v3-splash-signal.svg"
+          alt=""
+          aria-hidden="true"
+        />
+        <img
+          class="v3-splash-art v3-splash-clouds"
+          src="/v3-splash-clouds.svg"
+          alt=""
+          aria-hidden="true"
+        />
+        <div class="v3-splash-card" aria-label="V3 Code splash screen">
+          <img class="v3-splash-logo" src="/apple-touch-icon.png" alt="V3 Code" />
         </div>
       </div>
     </div>

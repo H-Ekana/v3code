@@ -70,20 +70,33 @@ const resolveIconPath = Effect.fn("desktop.assets.resolveIconPath")(function* (
 > {
   const fileSystem = yield* FileSystem.FileSystem;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  if (environment.isDevelopment && environment.platform === "darwin" && ext === "png") {
-    const developmentDockIconPath = environment.developmentDockIconPath;
-    const developmentDockIconExists = yield* fileSystem.exists(developmentDockIconPath).pipe(
+  const developmentIconPath =
+    environment.isDevelopment && environment.platform === "win32" && ext === "ico"
+      ? Option.some(
+          environment.path.join(
+            environment.rootDir,
+            "assets",
+            "v3",
+            "v3-code-nightly-v2-windows.ico",
+          ),
+        )
+      : environment.isDevelopment && environment.platform === "darwin" && ext === "png"
+        ? Option.some(environment.developmentDockIconPath)
+        : Option.none<string>();
+
+  if (Option.isSome(developmentIconPath)) {
+    const developmentIconExists = yield* fileSystem.exists(developmentIconPath.value).pipe(
       Effect.mapError(
         (cause) =>
           new DesktopAssetProbeError({
-            fileName: "icon.png",
-            candidatePath: developmentDockIconPath,
+            fileName: `icon.${ext}`,
+            candidatePath: developmentIconPath.value,
             cause,
           }),
       ),
     );
-    if (developmentDockIconExists) {
-      return Option.some(developmentDockIconPath);
+    if (developmentIconExists) {
+      return developmentIconPath;
     }
   }
 

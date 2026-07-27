@@ -10,6 +10,10 @@ export type SidebarStageBackdropVariant = "nightly" | "dev";
 // A wide viewBox keeps the 96-unit art height at a fixed scale while sidebar resizing reveals
 // more horizontal canvas instead of zooming the scene.
 const STAGE_BACKDROP_VIEW_BOX = "0 0 8192 96";
+const V3_NIGHTLY_BANNER_URL = new URL(
+  "../../../../assets/v3/v3-code-nightly-sidebar-banner-v2.png",
+  import.meta.url,
+).href;
 
 export function resolveSidebarStageBackdropVariant(
   stageLabel: string,
@@ -37,7 +41,7 @@ export function SidebarStageBackdrop({ variant }: { variant: SidebarStageBackdro
   return (
     <div
       aria-hidden
-      className="sidebar-stage-backdrop pointer-events-none absolute inset-x-0 top-0 z-0 h-20 select-none overflow-hidden"
+      className="sidebar-stage-backdrop pointer-events-none absolute inset-x-0 top-0 z-0 h-28 select-none overflow-hidden"
     >
       <StageBackdropArt variant={variant} />
     </div>
@@ -49,7 +53,7 @@ export function StageBackdropArt({ variant }: { variant: SidebarStageBackdropVar
 }
 
 export function StageBackdropButtonArt({ variant }: { variant: SidebarStageBackdropVariant }) {
-  return variant === "nightly" ? <NightlySkyArt compact /> : <DevBlueprintArt compact />;
+  return variant === "nightly" ? <NightlySendButtonArt /> : <DevBlueprintArt compact />;
 }
 
 const NIGHTLY_STARS: ReadonlyArray<{
@@ -83,7 +87,7 @@ const NIGHTLY_SPARKLES: ReadonlyArray<{ x: number; y: number }> = [
   { x: 246, y: 26 },
 ];
 
-function NightlySkyArt({ compact = false }: { compact?: boolean }) {
+function NightlySkyArt() {
   const idPrefix = useId().replaceAll(":", "");
   const skyId = `${idPrefix}-stage-night-sky`;
   const glowId = `${idPrefix}-stage-night-glow`;
@@ -96,8 +100,8 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
     <svg
       className="h-full w-full"
       fill="none"
-      preserveAspectRatio="xMinYMin slice"
-      viewBox={compact ? "96 0 8192 96" : STAGE_BACKDROP_VIEW_BOX}
+      preserveAspectRatio="xMidYMid slice"
+      viewBox="0 0 1995 788"
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
@@ -177,6 +181,113 @@ function NightlySkyArt({ compact = false }: { compact?: boolean }) {
           fillOpacity="0.8"
         />
       </g>
+      <image
+        width="1995"
+        height="788"
+        href={V3_NIGHTLY_BANNER_URL}
+        preserveAspectRatio="xMidYMid slice"
+      />
+    </svg>
+  );
+}
+
+function NightlySendButtonArt() {
+  const idPrefix = useId().replaceAll(":", "");
+  const skyId = `${idPrefix}-send-night-sky`;
+  const cloudFieldId = `${idPrefix}-send-cloud-field`;
+  const cloudId = `${idPrefix}-send-cloud`;
+  const cloudGlowId = `${idPrefix}-send-cloud-glow`;
+
+  return (
+    <svg
+      className="h-full w-full"
+      data-nightly-send-art=""
+      fill="none"
+      viewBox="0 0 32 32"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <linearGradient id={skyId} x1="3" y1="2" x2="29" y2="31" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#29316F" />
+          <stop offset="0.5" stopColor="#583A88" />
+          <stop offset="1" stopColor="#9B469B" />
+        </linearGradient>
+        <linearGradient
+          id={cloudFieldId}
+          x1="10"
+          y1="31"
+          x2="30"
+          y2="8"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop stopColor="#513083" />
+          <stop offset="0.52" stopColor="#9A42A0" />
+          <stop offset="1" stopColor="#E85DAE" />
+        </linearGradient>
+        <linearGradient id={cloudId} x1="10" y1="31" x2="30" y2="17" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#7546B4" />
+          <stop offset="0.55" stopColor="#C755B0" />
+          <stop offset="1" stopColor="#F76DBB" />
+        </linearGradient>
+        <radialGradient
+          id={cloudGlowId}
+          cx="0"
+          cy="0"
+          r="1"
+          gradientTransform="translate(26 24) rotate(135) scale(17)"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop stopColor="#FFB4E2" stopOpacity="0.48" />
+          <stop offset="1" stopColor="#B849AD" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+
+      <rect className="nightly-send-sky" width="32" height="32" rx="16" fill={`url(#${skyId})`} />
+
+      <g className="nightly-send-stars" fill="#F7F2FF">
+        <circle cx="6" cy="6.5" r="0.75" />
+        <circle cx="13.5" cy="4.5" r="0.45" fillOpacity="0.82" />
+        <circle cx="5" cy="15" r="0.4" fillOpacity="0.72" />
+        <path d="M11 8.5C11.25 10 12 10.75 13.5 11C12 11.25 11.25 12 11 13.5C10.75 12 10 11.25 8.5 11C10 10.75 10.75 10 11 8.5Z" />
+        <path
+          d="M20 3.5C20.2 4.7 20.8 5.3 22 5.5C20.8 5.7 20.2 6.3 20 7.5C19.8 6.3 19.2 5.7 18 5.5C19.2 5.3 19.8 4.7 20 3.5Z"
+          fill="#F5A4D8"
+        />
+      </g>
+
+      <g className="nightly-send-clouds">
+        <path
+          d="M-2 33V25.8C0.3 22.4 3.9 21.5 7 23.1C8.5 18.2 12.3 15.6 16.9 16C21.2 16.3 23.8 18.7 24.8 22C27.3 19.9 31 20.2 34 23V33H-2Z"
+          fill={`url(#${cloudFieldId})`}
+          fillOpacity="0.82"
+        />
+        <circle cx="20" cy="25" r="15" fill={`url(#${cloudGlowId})`} />
+        <path
+          d="M-1 33V29.8C-1 27.1 1.2 24.9 3.9 24.9C4.8 21.7 7.6 19.5 10.9 19.5C14.2 19.5 17 21.7 17.8 24.7C19 23.6 20.7 22.9 22.5 22.9C25.9 22.9 28.7 25.3 29.3 28.5C31.3 28.4 33 29.2 34 30.8V33H-1Z"
+          fill={`url(#${cloudId})`}
+        />
+        <path
+          d="M9 33C9.4 29.9 11.9 27.5 15.1 27.5C16.1 24.5 18.9 22.4 22.2 22.4C26 22.4 29.1 25.1 29.7 28.7C31.7 29.1 33.2 30.7 33.5 33H9Z"
+          fill="#EA62B7"
+          fillOpacity="0.68"
+        />
+        <path
+          d="M4.1 25.2C5.8 22.3 8.2 21 10.9 21C13.7 21 16 22.6 17 25.1"
+          stroke="#FFE3F4"
+          strokeLinecap="round"
+          strokeOpacity="0.42"
+          strokeWidth="0.7"
+        />
+        <path
+          d="M18.8 24.9C20 23.9 21.2 23.5 22.5 23.5C25.4 23.5 27.8 25.5 28.6 28.1"
+          stroke="#FFD8F0"
+          strokeLinecap="round"
+          strokeOpacity="0.25"
+          strokeWidth="0.6"
+        />
+      </g>
+
+      <circle cx="16" cy="16" r="15.4" stroke="#FFFFFF" strokeOpacity="0.16" strokeWidth="0.6" />
     </svg>
   );
 }

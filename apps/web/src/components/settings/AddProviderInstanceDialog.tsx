@@ -222,7 +222,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="max-w-xl overflow-hidden">
+      <DialogPopup className="max-w-xl overflow-hidden border-primary/15">
         <div className="flex min-h-0 flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>Add provider instance</DialogTitle>
@@ -240,7 +240,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
 
           <div
             data-slot="dialog-panel"
-            className="space-y-4 bg-zinc-25/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5"
+            className="space-y-4 bg-muted/20 px-6 py-5 ring-1 ring-primary/10"
           >
             <AnimatedHeight>
               <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
@@ -259,7 +259,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                       <RadioPrimitive.Root
                         key={option.value}
                         value={option.value}
-                        className="relative flex cursor-pointer items-center gap-3 rounded-lg bg-card px-3 py-3 text-left text-muted-foreground outline-none ring-1 ring-black/5 hover:bg-zinc-50 focus-visible:ring-2 focus-visible:ring-ring data-checked:bg-primary/8 data-checked:text-foreground data-checked:ring-2 data-checked:ring-primary data-checked:hover:bg-primary/8 dark:bg-white/3 dark:ring-white/5 dark:hover:bg-white/5 dark:data-checked:bg-primary/15 dark:data-checked:ring-primary dark:data-checked:hover:bg-primary/15"
+                        className="relative flex cursor-pointer items-center gap-3 rounded-lg bg-card px-3 py-3 text-left text-muted-foreground outline-none ring-1 ring-black/5 transition-[background-color,color,border-color] duration-200 hover:bg-primary/[0.045] focus-visible:ring-2 focus-visible:ring-ring data-checked:bg-astro-highlight/[0.055] data-checked:text-foreground data-checked:ring-2 data-checked:ring-astro-highlight/30 motion-reduce:transition-none dark:bg-white/3 dark:ring-white/5 dark:hover:bg-primary/[0.08] dark:data-checked:bg-astro-highlight/[0.08]"
                       >
                         <IconComponent className="size-4 shrink-0" aria-hidden />
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
@@ -357,7 +357,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                           key={swatch}
                           type="button"
                           className={cn(
-                            "size-6 cursor-pointer rounded-full border transition",
+                            "size-6 cursor-pointer rounded-full border transition-[transform,box-shadow,border-color] duration-200 motion-reduce:transition-none",
                             selected
                               ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
                               : "border-black/10 hover:scale-105 dark:border-white/20",

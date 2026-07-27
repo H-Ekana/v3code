@@ -523,7 +523,7 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect("recovers from a transient domain failure without replacing the session", () =>
+  it.effect("recovers from a transient domain failure without repeating the HTTP preload", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness();
       yield* Queue.offer(harness.inputs, new Error("thread not found yet"));
@@ -559,6 +559,7 @@ describe("EnvironmentThreads", () => {
 
       expect(Option.isNone(recovered.error)).toBe(true);
       expect(yield* Ref.get(harness.subscriptionCount)).toBe(2);
+      expect(yield* Ref.get(harness.loaderCalls)).toBe(1);
       expect(yield* Ref.get(harness.retryCount)).toBe(0);
     }),
   );

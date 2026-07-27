@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
+import { prepareV3SidebarDemo } from "./v3-sidebar-demo.mjs";
+
 function isV3Workspace(directory) {
   const desktopPackagePath = join(directory, "apps", "desktop", "package.json");
   if (!existsSync(desktopPackagePath)) return false;
@@ -27,9 +29,7 @@ export function resolveV3WorkspaceRoot(invocationRoot) {
 
 export function createV3ElectronDevLaunch(invocationRoot, baseEnvironment = process.env) {
   const workspaceRoot = resolveV3WorkspaceRoot(invocationRoot);
-  const seededHome = join(workspaceRoot, ".t3", "sidebar-preview");
-  const fallbackHome = join(workspaceRoot, ".t3", "v3-electron-dev");
-  const dataHome = existsSync(seededHome) ? seededHome : fallbackHome;
+  const dataHome = join(workspaceRoot, ".t3", "sidebar-preview");
   const appData = join(workspaceRoot, ".t3", "v3-electron-dev-appdata");
   const vpExecutable = join(
     workspaceRoot,
@@ -50,8 +50,11 @@ export function createV3ElectronDevLaunch(invocationRoot, baseEnvironment = proc
   const environment = {
     ...baseEnvironment,
     APPDATA: appData,
+    T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "1",
     T3CODE_DEV_INSTANCE: "v3-subagent-sidebar",
     T3CODE_DISABLE_AUTO_UPDATE: "1",
+    T3CODE_DESKTOP_APP_STAGE_LABEL: "Nightly",
+    VITE_V3_DEMO_AGENT_SIDEBAR: "1",
   };
 
   for (const name of [
@@ -90,6 +93,11 @@ async function main() {
   printLaunchSummary(launch);
 
   if (process.argv.includes("--dry-run")) return;
+
+  const demo = await prepareV3SidebarDemo(launch.workspaceRoot, launch.dataHome);
+  console.log(
+    `[v3-electron-dev] demo:      ${demo.projectId} / ${demo.threadId} (reset for this launch)`,
+  );
 
   const child = spawn(launch.command, launch.args, {
     cwd: launch.workspaceRoot,

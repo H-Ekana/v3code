@@ -921,22 +921,34 @@ describe("resolveThreadStatusPill", () => {
 describe("resolveThreadRowClassName", () => {
   it("uses the active sidebar surface when a thread is both selected and active", () => {
     const className = resolveThreadRowClassName({ isActive: true, isSelected: true });
-    expect(className).toContain("bg-sidebar-row-active");
+    expect(className).toContain("var(--sidebar-row-active)_94%");
     expect(className).toContain("text-sidebar-foreground");
+    expect(className).toContain("ring-primary/25");
+    expect(className).not.toContain("inset_2px");
     expect(className).not.toContain("bg-primary");
   });
 
   it("uses selected hover colors for selected threads", () => {
     const className = resolveThreadRowClassName({ isActive: false, isSelected: true });
-    expect(className).toContain("bg-sidebar-row-selected");
-    expect(className).toContain("hover:bg-sidebar-row-active");
+    expect(className).toContain("var(--sidebar-row-selected)_95%");
+    expect(className).toContain("var(--sidebar-row-active)_94%");
+    expect(className).toContain("ring-primary/20");
     expect(className).not.toContain("bg-primary");
   });
 
   it("uses the active sidebar surface for active-only threads", () => {
     const className = resolveThreadRowClassName({ isActive: true, isSelected: false });
-    expect(className).toContain("bg-sidebar-row-active");
-    expect(className).toContain("hover:bg-sidebar-row-active");
+    expect(className).toContain("var(--sidebar-row-active)_94%");
+    expect(className).toContain("ring-primary/25");
+  });
+
+  it("keeps hover feedback quiet and disables transitions for reduced-motion users", () => {
+    const className = resolveThreadRowClassName({ isActive: false, isSelected: false });
+    expect(className).toContain("hover:bg-sidebar-row-hover");
+    expect(className).toContain("duration-200");
+    expect(className).not.toContain("hover:translate");
+    expect(className).not.toContain("inset_2px");
+    expect(className).toContain("motion-reduce:transition-none");
   });
 });
 

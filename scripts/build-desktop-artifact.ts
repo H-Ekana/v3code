@@ -36,6 +36,9 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.v3code.desktop";
+const V3_DESKTOP_APP_ID = "com.v3code.desktop.v3";
+const V3_FORK_VERSION_PATTERN = /\.v3\.\d+\.\d+\.\d+$/;
+const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+(?:\.v3\.\d+\.\d+\.\d+)?$/;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -1326,14 +1329,30 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
 });
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
-  return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
+  return NIGHTLY_VERSION_PATTERN.test(version) ? "nightly" : "latest";
+}
+
+export function isV3ForkDesktopVersion(version: string): boolean {
+  return V3_FORK_VERSION_PATTERN.test(version);
 }
 
 export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
+  if (isV3ForkDesktopVersion(version)) {
+    return "production";
+  }
+
   return resolveWebAssetBrandForChannel(resolveDesktopUpdateChannel(version));
 }
 
 export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
+  if (isV3ForkDesktopVersion(version)) {
+    return {
+      macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
+      linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
+      windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+    };
+  }
+
   if (resolveDesktopUpdateChannel(version) === "nightly") {
     return {
       macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
@@ -1367,9 +1386,18 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 }
 
 export function resolveDesktopProductName(version: string): string {
+  if (isV3ForkDesktopVersion(version)) {
+    return "V3 Code (V3 Preview)";
+  }
   return resolveDesktopUpdateChannel(version) === "nightly"
     ? "V3 Code (Preview)"
     : (desktopPackageJson.productName ?? "V3 Code");
+}
+
+export function resolveDesktopArtifactName(version: string): string {
+  return isV3ForkDesktopVersion(version)
+    ? "V3-Code-V3-${version}-${arch}.${ext}"
+    : "V3-Code-${version}-${arch}.${ext}";
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1386,10 +1414,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       }
     | undefined,
 ) {
+  const isV3Fork = isV3ForkDesktopVersion(version);
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
+    appId: isV3Fork ? V3_DESKTOP_APP_ID : DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "V3-Code-${version}-${arch}.${ext}",
+    artifactName: resolveDesktopArtifactName(version),
     directories: {
       buildResources: "apps/desktop/resources",
     },
@@ -1409,7 +1438,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     asarUnpack: [...DESKTOP_ASAR_UNPACK, "apps/server/dist/**", "**/node_modules/**"],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
+  const publishConfig = isV3Fork ? undefined : yield* resolveGitHubPublishConfig(updateChannel);
   if (publishConfig) {
     buildConfig.publish = [publishConfig];
   } else if (mockUpdates) {

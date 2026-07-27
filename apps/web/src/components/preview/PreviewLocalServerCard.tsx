@@ -12,7 +12,7 @@ export function PreviewLocalServerCard({ server, onOpen }: Props) {
     <button
       type="button"
       onClick={onOpen}
-      className="group flex w-full items-center gap-3 px-3 py-3 text-left hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      className="flex w-full items-center gap-3 px-3 py-3 text-left transition-[background-color,color] duration-200 ease-out hover:bg-primary/6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none"
     >
       <BrowserMockup className="size-7 shrink-0" />
       <div className="flex min-w-0 flex-1 flex-col">

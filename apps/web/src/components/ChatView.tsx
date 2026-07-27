@@ -3028,6 +3028,19 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
   }, [activeThreadRef]);
+  const autoOpenedV3DemoAgentsRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      import.meta.env.VITE_V3_DEMO_AGENT_SIDEBAR !== "1" ||
+      activeThreadRef?.threadId !== "v3-agent-sidebar-demo" ||
+      threadAgents.length === 0 ||
+      autoOpenedV3DemoAgentsRef.current === activeThreadKey
+    ) {
+      return;
+    }
+    useRightPanelStore.getState().open(activeThreadRef, "agents");
+    autoOpenedV3DemoAgentsRef.current = activeThreadKey;
+  }, [activeThreadKey, activeThreadRef, threadAgents.length]);
   const openFileSurface = useCallback(
     (relativePath: string) => {
       if (!activeThreadRef || !activeProject) return;

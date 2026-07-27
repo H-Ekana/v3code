@@ -124,7 +124,7 @@ export function SidebarProviderUpdatePill() {
 
   return (
     <div
-      className={`group/provider-update relative flex h-7 w-full items-center overflow-hidden rounded-lg text-xs font-medium transform-gpu transition-all duration-180 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform ${
+      className={`group/provider-update relative flex h-7 w-full items-center overflow-hidden rounded-lg border border-current/10 text-xs font-medium transform-gpu transition-[background-color,border-color,opacity,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-current/20 motion-reduce:transform-none motion-reduce:transition-none ${
         PROVIDER_UPDATE_PILL_STYLES[displayedView.tone]
       } ${
         exitingKey === displayedView.key
@@ -168,7 +168,7 @@ export function SidebarProviderUpdatePill() {
             <button
               type="button"
               aria-label={displayedView.description}
-              className="provider-update-main relative z-[1] flex h-full flex-1 items-center gap-2 px-2 text-left"
+              className="provider-update-main relative z-[1] flex h-full flex-1 items-center gap-2 rounded-l-lg px-2 text-left outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-current"
               onClick={openProviderSettings}
             >
               {displayedView.tone === "loading" ? (
@@ -193,7 +193,7 @@ export function SidebarProviderUpdatePill() {
               <button
                 type="button"
                 aria-label="Dismiss provider update notice"
-                className="relative z-[1] mr-1 inline-flex size-5 items-center justify-center rounded-md opacity-70 transition-opacity hover:opacity-100"
+                className="relative z-[1] mr-1 inline-flex size-5 items-center justify-center rounded-md opacity-70 outline-hidden transition-[background-color,opacity] duration-200 hover:bg-current/10 hover:opacity-100 focus-visible:ring-1 focus-visible:ring-current motion-reduce:transition-none"
                 onClick={() => startExit(displayedView.key, null, displayedView.key)}
               >
                 <XIcon className="size-3.5" />

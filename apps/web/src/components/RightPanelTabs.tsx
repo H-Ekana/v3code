@@ -154,7 +154,9 @@ function RightPanelEmptyState(props: {
             const Icon = action.icon;
             const content = (
               <>
-                <Icon className="mb-3 size-5" />
+                <span className="mb-3 flex size-8 items-center justify-center rounded-lg border border-primary/15 bg-primary/8 text-primary transition-[background-color,border-color] duration-200 ease-out group-hover/surface:border-primary/25 group-hover/surface:bg-primary/10 motion-reduce:transition-none">
+                  <Icon className="size-4.5" />
+                </span>
                 <span className="text-sm font-medium">{action.label}</span>
                 <span className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {action.description}
@@ -167,7 +169,7 @@ function RightPanelEmptyState(props: {
                   key={action.label}
                   type="button"
                   onClick={action.onClick}
-                  className="flex min-h-28 w-full flex-col items-start rounded-lg border border-border/80 bg-card p-4 text-left transition hover:border-border hover:bg-accent/60 dark:border-transparent dark:shadow-none dark:inset-ring-1 dark:inset-ring-white/5"
+                  className="group/surface flex min-h-28 w-full flex-col items-start rounded-lg border border-border/80 bg-card p-4 text-left transition-[background-color,border-color] duration-200 ease-out hover:border-primary/20 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none dark:border-transparent dark:inset-ring-1 dark:inset-ring-white/5"
                 >
                   {content}
                 </button>
@@ -371,7 +373,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
     >
       <div
         className={cn(
-          "workspace-topbar gap-1 pl-2",
+          "workspace-topbar gap-1 border-b border-primary/10 bg-background pl-2",
           props.mode === "inline" ? "pr-28" : "pr-3",
           ownsDesktopTitleBar && "wco:pr-[calc(var(--workspace-native-controls-inset)+6rem)]",
           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
@@ -398,10 +400,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                   onAuxClick={(event) => handleTabAuxClick(event, surface)}
                   onContextMenu={(event) => void handleTabContextMenu(event, surface)}
                   className={cn(
-                    "group flex h-7 min-w-25 max-w-44 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm",
+                    "group relative flex h-7 min-w-25 max-w-44 shrink-0 items-center gap-1.5 overflow-hidden rounded-md px-2 text-sm transition-[background-color,color,box-shadow] duration-200 ease-out motion-reduce:transition-none",
                     active
-                      ? "bg-accent text-foreground"
-                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                      ? "bg-primary/10 text-foreground inset-ring-1 inset-ring-primary/15"
+                      : "text-muted-foreground hover:bg-primary/8 hover:text-foreground",
                   )}
                 >
                   <Tooltip>
@@ -435,7 +437,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     {pending ? (
                       <>
                         <span
-                          className="size-2 rounded-full bg-current group-hover:hidden"
+                          className="size-2 animate-status-pulse rounded-full bg-primary group-hover:hidden motion-reduce:animate-none"
                           aria-hidden
                         />
                         <X className="hidden size-3 group-hover:block" />
@@ -450,7 +452,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             {props.surfaces.length > 0 ? (
               <Menu>
                 <MenuTrigger
-                  className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                  className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-[background-color,color] duration-200 ease-out hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
                   aria-label="Add panel surface"
                 >
                   <Plus className="size-4" />

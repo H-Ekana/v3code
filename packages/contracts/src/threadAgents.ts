@@ -68,6 +68,9 @@ export type ThreadAgentUsage = typeof ThreadAgentUsage.Type;
 export const ThreadAgentActivityEntry = Schema.Struct({
   at: IsoDateTime,
   summary: TrimmedNonEmptyString,
+  // Health signal for this entry: a failed command/tool inside an otherwise
+  // running agent. Absent means unknown, not success.
+  outcome: Schema.optional(Schema.Literals(["ok", "error"])),
 });
 export type ThreadAgentActivityEntry = typeof ThreadAgentActivityEntry.Type;
 
@@ -84,7 +87,10 @@ export const ThreadAgentSnapshot = Schema.Struct({
   // Stable identity: Claude task_id, Codex child thread id. Provider
   // discriminates the id space so cross-provider collisions are impossible.
   agentId: TrimmedNonEmptyString,
+  // `provider` is the adapter that emitted the event; `delegateProvider` is
+  // the provider actually doing the work when that adapter is only the host.
   provider: ProviderDriverKind,
+  delegateProvider: Schema.optional(ProviderDriverKind),
   kind: ThreadAgentKind,
   name: TrimmedNonEmptyString,
   // Provider agent type: Claude subagent_type ("Explore"), Codex agent_role

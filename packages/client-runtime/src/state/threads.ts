@@ -80,6 +80,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Option.match(cached, { onNone: () => 0, onSome: (snapshot) => snapshot.snapshotSequence }),
   );
   const awaitingCompletion = yield* Ref.make(false);
+  const httpSnapshotLoadAttempted = yield* Ref.make(false);
   const persistence = yield* Queue.sliding<OrchestrationThreadDetailSnapshot>(1);
 
   const persist = Effect.fn("EnvironmentThreadState.persist")(function* (
@@ -253,24 +254,27 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 
         let current = yield* SubscriptionRef.get(state);
         if (Option.isNone(current.data) && current.status !== "deleted") {
-          const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
-            Effect.flatMap(
-              Option.match({
-                onSome: Effect.succeed,
-                onNone: () =>
-                  SubscriptionRef.changes(supervisor.prepared).pipe(
-                    Stream.filter(Option.isSome),
-                    Stream.map((value) => value.value),
-                    Stream.runHead,
-                    Effect.map(Option.getOrThrow),
-                  ),
-              }),
-            ),
-          );
-          const httpSnapshot = yield* snapshotLoader.load(prepared, threadId);
-          if (Option.isSome(httpSnapshot)) {
-            yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
-            current = yield* SubscriptionRef.get(state);
+          const alreadyAttempted = yield* Ref.getAndSet(httpSnapshotLoadAttempted, true);
+          if (!alreadyAttempted) {
+            const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
+              Effect.flatMap(
+                Option.match({
+                  onSome: Effect.succeed,
+                  onNone: () =>
+                    SubscriptionRef.changes(supervisor.prepared).pipe(
+                      Stream.filter(Option.isSome),
+                      Stream.map((value) => value.value),
+                      Stream.runHead,
+                      Effect.map(Option.getOrThrow),
+                    ),
+                }),
+              ),
+            );
+            const httpSnapshot = yield* snapshotLoader.load(prepared, threadId);
+            if (Option.isSome(httpSnapshot)) {
+              yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
+              current = yield* SubscriptionRef.get(state);
+            }
           }
         }
 

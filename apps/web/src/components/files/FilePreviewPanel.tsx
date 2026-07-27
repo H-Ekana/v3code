@@ -737,7 +737,10 @@ export default function FilePreviewPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
       {relativePath ? (
-        <div className="surface-subheader gap-2 px-3" data-surface-subheader>
+        <div
+          className="surface-subheader gap-2 border-primary/10 bg-background px-3"
+          data-surface-subheader
+        >
           <ScrollArea
             ref={breadcrumbRef}
             hideScrollbars
@@ -759,8 +762,8 @@ export default function FilePreviewPanel({
                     className={cn(
                       "max-w-40 truncate",
                       crumb.kind === "file"
-                        ? "font-medium text-foreground"
-                        : "text-muted-foreground",
+                        ? "font-medium text-primary"
+                        : "text-muted-foreground transition-colors duration-200 hover:text-foreground motion-reduce:transition-none",
                     )}
                     title={crumb.path || projectName}
                   >
@@ -932,7 +935,7 @@ export default function FilePreviewPanel({
             className={cn(
               "flex min-h-0 shrink-0 bg-background",
               relativePath
-                ? "w-[min(22rem,46%)] min-w-64 border-l border-border/60"
+                ? "w-[min(22rem,46%)] min-w-64 border-l border-primary/10"
                 : "min-w-0 flex-1",
             )}
           >

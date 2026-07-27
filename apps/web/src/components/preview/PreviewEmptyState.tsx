@@ -28,8 +28,8 @@ export function PreviewEmptyState({
   if (servers.length === 0) {
     return (
       <Empty>
-        <EmptyMedia variant="icon">
-          <Globe className="size-4.5 text-muted-foreground" />
+        <EmptyMedia variant="icon" className="border border-primary/15 bg-primary/8 text-primary">
+          <Globe className="size-4.5" />
         </EmptyMedia>
         <EmptyTitle>No preview yet</EmptyTitle>
         <EmptyDescription>
@@ -44,10 +44,12 @@ export function PreviewEmptyState({
     <div className="flex h-full min-h-0 overflow-y-auto px-5 py-8">
       <div className="m-auto flex w-full max-w-xl flex-col gap-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <RadioTower className="size-4 shrink-0" />
+          <span className="flex size-7 items-center justify-center rounded-lg bg-primary/8 text-primary ring-1 ring-primary/15">
+            <RadioTower className="size-3.5 shrink-0" />
+          </span>
           <h2 className="font-medium">Local servers</h2>
         </div>
-        <div className="flex flex-col divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70 bg-background">
+        <div className="flex flex-col divide-y divide-border/60 overflow-hidden rounded-xl border border-primary/10 bg-background">
           {servers.map((server) => (
             <PreviewLocalServerCard
               key={`${server.host}:${server.port}`}

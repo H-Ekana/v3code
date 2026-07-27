@@ -178,10 +178,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             (!customAnswerActive && progress.selectedOptionLabels.includes(option.label));
           const shortcutKey = index < 9 ? index + 1 : null;
           const className = cn(
-            "group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-all duration-150 focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25",
+            "group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-[background-color,border-color,box-shadow] duration-200 ease-out focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25 motion-reduce:transition-none",
             isSelected
-              ? "border-primary/30 bg-primary/8 text-foreground"
-              : "border-transparent bg-muted/22 text-foreground/85 hover:border-border/45 hover:bg-muted/34",
+              ? "border-primary/30 bg-primary/8 text-foreground ring-1 ring-primary/15"
+              : "border-transparent bg-muted/22 text-foreground/85 hover:border-primary/18 hover:bg-primary/[0.035]",
             isResponding && "opacity-50 cursor-not-allowed",
             !isResponding && "cursor-pointer",
           );
@@ -198,7 +198,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
               ) : shortcutKey !== null ? (
                 <kbd
                   className={cn(
-                    "flex size-5 shrink-0 items-center justify-center rounded border border-border/50 text-[11px] font-medium tabular-nums transition-colors duration-150",
+                    "flex size-5 shrink-0 items-center justify-center rounded border border-border/50 text-[11px] font-medium tabular-nums transition-colors duration-200 motion-reduce:transition-none",
                     "bg-background/35 text-muted-foreground/70 group-hover:border-border/70 group-hover:text-muted-foreground",
                   )}
                 >

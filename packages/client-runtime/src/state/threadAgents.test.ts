@@ -92,9 +92,82 @@ describe("deriveAgentPanelState", () => {
     const state = deriveAgentPanelState(base);
     expect(state.settledCount).toBe(1);
     expect(state.runningCount).toBe(0);
+    expect(state.backgroundRunningCount).toBe(0);
     expect(state.totalTokens).toBe(22_798);
-    expect(state.groups).toHaveLength(1);
-    expect(state.groups[0]?.workflow).toBeNull();
+    expect(state.groups).toHaveLength(0);
+    expect(state.subagents).toHaveLength(1);
+    expect(state.subagents[0]?.agent.agentId).toBe(persistedAgent.agentId);
+    expect(state.subagents[0]?.shells).toHaveLength(0);
+    expect(state.backgroundTasks).toHaveLength(0);
+  });
+
+  it("nests a parented shell under its sub-agent row", () => {
+    const subagent: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "subagent-1",
+    };
+    const shell: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "shell-1",
+      kind: "shell",
+      parentAgentId: "subagent-1",
+      status: "running",
+    };
+
+    const state = deriveAgentPanelState([subagent, shell]);
+
+    expect(state.subagents).toHaveLength(1);
+    expect(state.subagents[0]?.agent.agentId).toBe("subagent-1");
+    expect(state.subagents[0]?.shells.map((agent) => agent.agentId)).toEqual(["shell-1"]);
+    expect(state.backgroundTasks).toHaveLength(0);
+  });
+
+  it("puts unparented and orphaned shells in background tasks", () => {
+    const shell: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "shell-1",
+      kind: "shell",
+      parentAgentId: undefined,
+      status: "running",
+    };
+    const orphanedShell: ThreadAgentSnapshot = {
+      ...shell,
+      agentId: "shell-2",
+      parentAgentId: "missing-subagent",
+    };
+
+    const state = deriveAgentPanelState([shell, orphanedShell]);
+
+    expect(state.subagents).toHaveLength(0);
+    expect(state.backgroundTasks.map((agent) => agent.agentId)).toEqual(["shell-1", "shell-2"]);
+  });
+
+  it("excludes shells and monitors from the running agent count", () => {
+    const subagent: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "subagent-1",
+      status: "running",
+    };
+    const shell: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "shell-1",
+      kind: "shell",
+      parentAgentId: "subagent-1",
+      status: "running",
+    };
+    const monitor: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "monitor-1",
+      kind: "monitor",
+      parentAgentId: undefined,
+      status: "pending",
+    };
+
+    const state = deriveAgentPanelState([subagent, shell, monitor]);
+
+    expect(state.runningCount).toBe(1);
+    expect(state.backgroundRunningCount).toBe(2);
+    expect(state.totalTokens).toBe(68_394);
   });
 
   it("groups workflow members under declared phases with derived status", () => {
@@ -122,6 +195,8 @@ describe("deriveAgentPanelState", () => {
     expect(group?.workflow?.agentId).toBe("wf-1");
     expect(group?.phases[0]?.status).toBe("done");
     expect(group?.phases[1]?.status).toBe("pending");
+    expect(state.subagents).toHaveLength(0);
+    expect(state.backgroundTasks).toHaveLength(0);
   });
 });
 

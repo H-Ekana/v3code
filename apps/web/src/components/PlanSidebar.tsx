@@ -9,13 +9,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ScrollArea } from "./ui/scroll-area";
 import ChatMarkdown from "./ChatMarkdown";
-import {
-  CheckIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  EllipsisIcon,
-  LoaderIcon,
-} from "lucide-react";
+import { CheckIcon, ChevronRightIcon, EllipsisIcon, LoaderIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import type { ActivePlanState } from "../session-logic";
 import type { LatestProposedPlanState } from "../session-logic";
@@ -43,8 +37,8 @@ function stepStatusIcon(status: string): React.ReactNode {
   }
   if (status === "inProgress") {
     return (
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <LoaderIcon className="size-3 animate-spin" />
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary ring-1 ring-primary/15">
+        <LoaderIcon className="size-3 animate-spin motion-reduce:animate-none" />
       </span>
     );
   }
@@ -140,17 +134,17 @@ const PlanSidebar = memo(function PlanSidebar({
       className={cn(
         "flex min-h-0 flex-col bg-card/50",
         mode === "sidebar"
-          ? "h-full w-[340px] shrink-0 border-l border-border/70"
+          ? "h-full w-[340px] shrink-0 border-l border-primary/10"
           : "h-full w-full",
       )}
     >
       {/* Header */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-3">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-primary/10 bg-card/50 px-3">
         <div className="flex items-center gap-2">
           <Badge
             variant="info"
             size="sm"
-            className="rounded-md px-1.5 py-0 font-semibold tracking-wide uppercase"
+            className="rounded-md border-primary/20 bg-primary/10 px-1.5 py-0 font-semibold text-primary tracking-wide uppercase"
           >
             {label}
           </Badge>
@@ -212,8 +206,9 @@ const PlanSidebar = memo(function PlanSidebar({
                 <div
                   key={`${step.status}:${step.step}`}
                   className={cn(
-                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 transition-colors duration-200",
-                    step.status === "inProgress" && "bg-blue-500/5",
+                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 transition-[background-color,box-shadow] duration-200 motion-reduce:transition-none",
+                    step.status === "inProgress" &&
+                      "bg-primary/8 ring-1 ring-inset ring-primary/10",
                     step.status === "completed" && "bg-emerald-500/5",
                   )}
                 >
@@ -240,20 +235,21 @@ const PlanSidebar = memo(function PlanSidebar({
             <div className="space-y-2">
               <button
                 type="button"
-                className="group flex w-full items-center gap-1.5 text-left"
+                className="group flex w-full items-center gap-1.5 rounded-md text-left outline-none transition-colors duration-200 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
                 onClick={() => setProposedPlanExpanded((v) => !v)}
               >
-                {proposedPlanExpanded ? (
-                  <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground/40 transition-transform" />
-                ) : (
-                  <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/40 transition-transform" />
-                )}
-                <span className="text-[10px] font-semibold tracking-widest text-muted-foreground/40 uppercase group-hover:text-muted-foreground/60">
+                <ChevronRightIcon
+                  className={cn(
+                    "size-3 shrink-0 text-muted-foreground/40 transition-[color,transform] duration-200 group-hover:text-primary motion-reduce:transition-none",
+                    proposedPlanExpanded && "rotate-90 text-primary",
+                  )}
+                />
+                <span className="text-[10px] font-semibold tracking-widest text-muted-foreground/40 uppercase transition-colors duration-200 group-hover:text-primary motion-reduce:transition-none">
                   {planTitle ?? "Full Plan"}
                 </span>
               </button>
               {proposedPlanExpanded ? (
-                <div className="rounded-lg border border-border/50 bg-background/50 p-3">
+                <div className="rounded-lg border border-primary/10 bg-background/50 p-3">
                   <ChatMarkdown
                     text={displayedPlanMarkdown ?? ""}
                     cwd={markdownCwd}

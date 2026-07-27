@@ -53,7 +53,7 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
     <Link
       aria-label="Go to threads"
       className={cn(
-        "sidebar-brand relative z-10 ml-[var(--workspace-titlebar-content-left)] h-7 w-fit min-w-0 shrink-0 items-center gap-1 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
+        "sidebar-brand relative z-10 ml-[var(--workspace-titlebar-content-left)] h-8 w-fit min-w-0 shrink-0 items-center gap-1.5 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
         onBackdrop ? "text-white" : "text-foreground",
       )}
       to="/"
@@ -61,16 +61,16 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
       <img
         alt=""
         aria-hidden="true"
-        className="size-5 shrink-0 rounded-sm"
+        className="size-6 shrink-0 rounded-md shadow-[0_0_0_1px_color-mix(in_srgb,var(--primary)_18%,transparent)]"
         src="/apple-touch-icon.png"
       />
       <span
         className={cn(
-          "truncate text-sm font-medium tracking-tight",
+          "truncate text-base font-medium tracking-tight transition-colors duration-200 motion-reduce:transition-none",
           onBackdrop ? "text-white/70" : "text-muted-foreground",
         )}
       >
-        V3 Code
+        Code
       </span>
     </Link>
   );
@@ -104,10 +104,10 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
         <SidebarMenuItem>
           <SidebarMenuButton
             size="sm"
-            className="h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+            className="group/settings h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground/80 transition-[background-color,color,box-shadow] duration-200 ease-out hover:bg-sidebar-row-hover hover:text-sidebar-foreground hover:ring-1 hover:ring-inset hover:ring-primary/10 focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none"
             onClick={handleSettingsClick}
           >
-            <SettingsIcon className="size-4.5 shrink-0" />
+            <SettingsIcon className="size-4.5 shrink-0 transition-colors duration-200 group-hover/settings:text-primary motion-reduce:transition-none" />
             <span>Settings</span>
           </SidebarMenuButton>
         </SidebarMenuItem>

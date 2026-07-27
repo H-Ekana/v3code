@@ -373,7 +373,8 @@ function formatDesktopSshConnectionError(error: unknown): string {
   return withoutTaggedErrorPrefix.trim() || fallback;
 }
 
-const ENDPOINT_ROW_CLASSNAME = "rounded-xl px-3 py-2.5 sm:px-4";
+const ENDPOINT_ROW_CLASSNAME =
+  "rounded-xl border border-transparent px-3 py-2.5 transition-[background-color,border-color] duration-200 hover:border-primary/10 hover:bg-primary/[0.035] focus-within:border-ring/25 focus-within:bg-primary/[0.025] motion-reduce:transition-none sm:px-4";
 
 type AccessSectionPresentation = "current" | "endpoint-rail";
 
@@ -383,7 +384,10 @@ function accessRowClassName(_presentation: AccessSectionPresentation) {
 
 function endpointRowClassName(presentation: AccessSectionPresentation, isAvailable: boolean) {
   if (presentation === "endpoint-rail") {
-    return cn("relative rounded-xl px-3 py-3 sm:px-4", !isAvailable && "bg-muted/15");
+    return cn(
+      "relative rounded-xl border border-transparent px-3 py-3 transition-[background-color,border-color] duration-200 hover:border-primary/10 hover:bg-primary/[0.035] motion-reduce:transition-none sm:px-4",
+      !isAvailable && "bg-muted/15",
+    );
   }
 
   return cn(ENDPOINT_ROW_CLASSNAME, !isAvailable && "bg-muted/24");
@@ -1227,12 +1231,8 @@ const AdvertisedEndpointListRow = memo(function AdvertisedEndpointListRow({
   const canDisableTailscaleServe =
     isTailscaleHttpsEndpoint(endpoint) && endpoint.status === "available";
   const shouldShowEndpointUrl = !needsTailscaleSetup;
-  const isEndpointRail = presentation === "endpoint-rail";
   return (
     <div className={endpointRowClassName(presentation, isAvailable)}>
-      {isEndpointRail && isDefault ? (
-        <span className="absolute inset-y-2 left-0 w-1 rounded-r-full bg-primary" aria-hidden />
-      ) : null}
       <div className="flex min-h-6 min-w-0 flex-col gap-2 sm:-my-0.5 sm:flex-row sm:items-center">
         <div className="flex min-w-0 items-baseline gap-3">
           <h3 className="shrink-0 text-sm leading-5 font-medium text-foreground">

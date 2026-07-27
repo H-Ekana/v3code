@@ -129,6 +129,42 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect("allows a development launcher to opt into nightly branding", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        {},
+        {
+          T3CODE_DESKTOP_APP_STAGE_LABEL: "Nightly",
+          VITE_DEV_SERVER_URL: "http://localhost:5173",
+        },
+      );
+
+      assert.equal(environment.isDevelopment, true);
+      assert.equal(environment.branding.stageLabel, "Nightly");
+      assert.equal(environment.displayName, "V3 Code (Nightly)");
+    }),
+  );
+
+  it.effect("keeps packaged V3 Nightly identity and state separate from upstream", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({
+        appVersion: "0.0.29-nightly.20260725.899.v3.0.0.1",
+        isPackaged: true,
+      });
+
+      assert.equal(environment.branding.stageLabel, "Nightly");
+      assert.equal(environment.displayName, "V3 Code (V3 Nightly)");
+      assert.equal(
+        environment.stateDir,
+        environment.path.join("/Users/alice", ".t3", "userdata-v3"),
+      );
+      assert.equal(environment.userDataDirName, "v3code-v3");
+      assert.equal(environment.appUserModelId, "com.v3code.desktop.v3");
+      assert.equal(environment.linuxDesktopEntryName, "v3code-v3.desktop");
+      assert.equal(environment.linuxWmClass, "v3code-v3");
+    }),
+  );
+
   it.effect("resolves picker defaults without nullish sentinels", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment();

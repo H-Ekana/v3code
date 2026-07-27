@@ -68,7 +68,10 @@ export const MessageCopyButton = memo(function MessageCopyButton({
             type="button"
             size={size}
             variant={variant}
-            className={cn("text-muted-foreground hover:text-foreground", className)}
+            className={cn(
+              "text-muted-foreground transition-colors duration-200 hover:bg-primary/8 hover:text-primary motion-reduce:transition-none",
+              className,
+            )}
           />
         }
       >

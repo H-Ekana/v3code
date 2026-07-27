@@ -104,7 +104,11 @@ export function PreviewChromeRow({
 
   return (
     <div className="relative">
-      <form onSubmit={submit} className="surface-subheader gap-1 px-2" data-surface-subheader>
+      <form
+        onSubmit={submit}
+        className="surface-subheader gap-1 border-primary/10 bg-background px-2"
+        data-surface-subheader
+      >
         <div className="flex items-center gap-0.5" role="group" aria-label="Navigation">
           <Tooltip>
             <TooltipTrigger
@@ -159,7 +163,7 @@ export function PreviewChromeRow({
           </Tooltip>
         </div>
 
-        <InputGroup className="group/address h-7 flex-1 rounded-md border-transparent bg-transparent shadow-none before:shadow-none hover:bg-muted/40 focus-within:bg-background">
+        <InputGroup className="group/address h-7 flex-1 rounded-md border-transparent bg-transparent shadow-none transition-[background-color,box-shadow] duration-200 ease-out before:shadow-none hover:bg-primary/6 focus-within:bg-background focus-within:ring-1 focus-within:ring-ring motion-reduce:transition-none">
           <Tooltip>
             <TooltipTrigger
               render={
@@ -169,7 +173,7 @@ export function PreviewChromeRow({
                   className={cn(
                     onOpenInBrowser &&
                       !inputFocused &&
-                      "group-hover/address:pe-7 transition-[padding]",
+                      "transition-[padding] duration-200 group-hover/address:pe-7 motion-reduce:transition-none",
                   )}
                   onChange={(event) => setDraft(event.target.value)}
                   onFocus={() => {
@@ -201,7 +205,7 @@ export function PreviewChromeRow({
           {onOpenInBrowser && !inputFocused ? (
             <InputGroupAddon
               align="inline-end"
-              className="pointer-events-none absolute inset-y-0 right-0 opacity-0 transition-opacity group-hover/address:pointer-events-auto group-hover/address:opacity-100"
+              className="pointer-events-none absolute inset-y-0 right-0 opacity-0 transition-opacity duration-200 group-hover/address:pointer-events-auto group-hover/address:opacity-100 motion-reduce:transition-none"
             >
               <Tooltip>
                 <TooltipTrigger
@@ -235,6 +239,10 @@ export function PreviewChromeRow({
                   aria-label={pickActive ? "Cancel annotation" : "Annotate preview"}
                   aria-pressed={pickActive ? "true" : "false"}
                   type="button"
+                  className={cn(
+                    "transition-[background-color,color,box-shadow] duration-200 motion-reduce:transition-none",
+                    pickActive && "bg-primary/10 text-primary ring-1 ring-primary/20",
+                  )}
                 />
               }
             >
@@ -259,7 +267,10 @@ export function PreviewChromeRow({
                   onClick={(event) => onCapture(event.shiftKey)}
                   aria-label={recording ? "Stop recording" : "Capture screenshot"}
                   type="button"
-                  className="relative"
+                  className={cn(
+                    "relative transition-[background-color,color,box-shadow] duration-200 motion-reduce:transition-none",
+                    recording && "bg-astro-highlight/10 ring-1 ring-astro-highlight/25",
+                  )}
                   disabled={captureDisabled}
                 />
               }
@@ -279,7 +290,7 @@ export function PreviewChromeRow({
       {loadProgress > 0 ? (
         <div
           aria-hidden
-          className="pointer-events-none absolute bottom-0 left-0 z-10 h-0.5 rounded-r-full bg-primary transition-all duration-150 ease-out"
+          className="pointer-events-none absolute bottom-0 left-0 z-10 h-0.5 rounded-r-full bg-primary transition-all duration-200 ease-out motion-reduce:transition-none"
           style={{
             width: `${loadProgress}%`,
             boxShadow: "0 0 6px 1px var(--color-ring)",

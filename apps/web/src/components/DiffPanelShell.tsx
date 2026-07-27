@@ -10,9 +10,9 @@ export type DiffPanelMode = "inline" | "sheet" | "sidebar" | "embedded";
 function getDiffPanelHeaderRowClassName(mode: DiffPanelMode) {
   const shouldUseDragRegion = isElectron && mode !== "sheet" && mode !== "embedded";
   return cn(
-    "flex items-center justify-between gap-2 px-4",
+    "flex items-center justify-between gap-2 border-primary/10 bg-background px-4",
     shouldUseDragRegion
-      ? "drag-region h-[52px] border-b border-border wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+      ? "drag-region h-[52px] border-b wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
       : "surface-subheader",
   );
 }
@@ -29,7 +29,7 @@ export function DiffPanelShell(props: {
       className={cn(
         "flex h-full min-w-0 flex-col bg-background",
         props.mode === "inline"
-          ? "w-[42vw] min-w-[360px] max-w-[560px] shrink-0 border-l border-border"
+          ? "w-[42vw] min-w-[360px] max-w-[560px] shrink-0 border-l border-primary/10"
           : "w-full",
       )}
     >
@@ -63,7 +63,7 @@ export function DiffPanelLoadingState(props: { label: string }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col p-2">
       <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border/60 bg-card/25"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-primary/10 bg-card/25"
         role="status"
         aria-live="polite"
         aria-label={props.label}

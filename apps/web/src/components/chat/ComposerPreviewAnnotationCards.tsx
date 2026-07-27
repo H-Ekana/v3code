@@ -47,7 +47,7 @@ export function ComposerPreviewAnnotationCards({
         return (
           <section
             key={annotation.id}
-            className="group/preview-annotation relative flex min-w-0 max-w-full items-center overflow-hidden rounded-lg border border-border/80 bg-background/72"
+            className="group/preview-annotation relative flex min-w-0 max-w-full items-center overflow-hidden rounded-lg border border-primary/14 bg-background/72 focus-within:border-primary/28"
           >
             {image?.previewUrl ? (
               <button
@@ -59,11 +59,11 @@ export function ComposerPreviewAnnotationCards({
                 <img
                   src={image.previewUrl}
                   alt="Annotated preview crop"
-                  className="size-full object-cover transition duration-200 group-hover/preview-annotation:scale-[1.03]"
+                  className="size-full object-cover transition-transform duration-200 ease-out group-hover/preview-annotation:scale-[1.03] motion-reduce:transform-none motion-reduce:transition-none"
                 />
               </button>
             ) : (
-              <span className="grid size-10 shrink-0 place-items-center border-r border-border/70 text-blue-500">
+              <span className="grid size-10 shrink-0 place-items-center border-r border-primary/12 bg-primary/[0.035] text-primary">
                 <MousePointerClick className="size-3.5" />
               </span>
             )}
@@ -131,7 +131,7 @@ export function ComposerPreviewAnnotationCards({
             <button
               type="button"
               aria-label="Remove preview annotation"
-              className="absolute right-1.5 top-1.5 grid size-5 place-items-center rounded text-muted-foreground/60 transition hover:bg-muted hover:text-foreground"
+              className="absolute right-1.5 top-1.5 grid size-5 place-items-center rounded text-muted-foreground/60 transition-colors duration-200 hover:bg-primary/8 hover:text-foreground motion-reduce:transition-none"
               onClick={() => onRemove(annotation.id)}
             >
               <X className="size-3" />

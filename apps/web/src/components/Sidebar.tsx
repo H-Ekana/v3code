@@ -2220,7 +2220,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         <SidebarMenuButton
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
           size="sm"
-          className={`h-8 gap-2 rounded-md px-2 py-1.5 pr-8 text-left hover:bg-sidebar-row-hover group-hover/project-header:bg-sidebar-row-hover group-hover/project-header:text-sidebar-foreground max-sm:pr-14 ${
+          className={`h-8 gap-2 rounded-md px-2 py-1.5 pr-8 text-left transition-[background-color,color,box-shadow] duration-200 ease-out hover:bg-sidebar-row-hover hover:ring-1 hover:ring-inset hover:ring-primary/10 group-hover/project-header:bg-sidebar-row-hover group-hover/project-header:text-sidebar-foreground focus-visible:ring-1 focus-visible:ring-primary/50 motion-reduce:transition-none max-sm:pr-14 ${
             isManualProjectSorting ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"
           }`}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
@@ -2253,7 +2253,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </Tooltip>
           ) : (
             <ChevronRightIcon
-              className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
+              className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-[color,transform] duration-200 group-hover/project-header:text-primary motion-reduce:transition-none ${
                 projectExpanded ? "rotate-90" : ""
               }`}
             />
@@ -2831,12 +2831,12 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               render={
                 <SidebarMenuButton
                   size="sm"
-                  className="h-8 gap-2 rounded-md px-2 py-1.5 text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-0"
+                  className="group/search h-8 gap-2 rounded-md border border-transparent px-2 py-1.5 text-sidebar-muted-foreground/80 transition-[background-color,border-color,color] duration-200 ease-out hover:border-primary/15 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:border-primary/30 focus-visible:ring-1 focus-visible:ring-primary/50 motion-reduce:transition-none"
                   data-testid="command-palette-trigger"
                 />
               }
             >
-              <SearchIcon className="size-4 shrink-0 text-sidebar-muted-foreground/80" />
+              <SearchIcon className="size-4 shrink-0 text-sidebar-muted-foreground/80 transition-colors duration-200 group-hover/search:text-primary motion-reduce:transition-none" />
               <span className="flex-1 truncate text-left text-sm font-medium">Search</span>
               {commandPaletteShortcutLabel ? (
                 <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">
@@ -2873,7 +2873,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       <LocalSecondaryStatus />
       <SidebarGroup className="px-2 py-2">
         <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-          <span className="text-xs font-medium text-sidebar-muted-foreground/80">Projects</span>
+          <span className="flex items-center gap-1.5 text-xs font-medium text-sidebar-muted-foreground/80">
+            <span aria-hidden className="h-px w-3 bg-primary/35" />
+            Projects
+          </span>
           <div className="flex items-center gap-1">
             <ProjectSortMenu
               projectSortOrder={projectSortOrder}

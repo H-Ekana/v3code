@@ -190,7 +190,10 @@ export function ProviderModelsSection({
       <div className="mt-1 text-xs text-muted-foreground">
         {models.length} model{models.length === 1 ? "" : "s"} available.
       </div>
-      <div ref={listRef} className="mt-2 max-h-40 overflow-y-auto pb-1">
+      <div
+        ref={listRef}
+        className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-primary/10 bg-background/25 p-1"
+      >
         {orderedModels.map((model, index) => {
           const caps = model.capabilities;
           const capLabels: string[] = [];
@@ -227,7 +230,7 @@ export function ProviderModelsSection({
             <div
               key={`${instanceId}:${model.slug}`}
               className={cn(
-                "grid min-h-7 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-1",
+                "grid min-h-7 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1.5 py-1 transition-colors duration-150 hover:bg-primary/[0.055] motion-reduce:transition-none",
                 isHidden && "text-muted-foreground",
               )}
             >

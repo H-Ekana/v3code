@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" fill="none">
+  <defs>
+    <linearGradient id="left-clouds" x1="40" y1="690" x2="690" y2="1010" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#362064"/>
+      <stop offset=".5" stop-color="#63308B"/>
+      <stop offset="1" stop-color="#A844A5"/>
+    </linearGradient>
+    <linearGradient id="right-clouds" x1="940" y1="760" x2="1570" y2="910" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#392064"/>
+      <stop offset=".46" stop-color="#803391"/>
+      <stop offset="1" stop-color="#EC4FA8"/>
+    </linearGradient>
+    <linearGradient id="lower-clouds" x1="420" y1="890" x2="1190" y2="1050" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#24184D"/>
+      <stop offset=".5" stop-color="#4C256F"/>
+      <stop offset="1" stop-color="#91388E"/>
+    </linearGradient>
+    <radialGradient id="pink-edge" cx="0" cy="0" r="1" gradientTransform="translate(1450 760) rotate(145) scale(300 210)">
+      <stop stop-color="#FF62B9" stop-opacity=".5"/>
+      <stop offset=".55" stop-color="#B83D9E" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#66247E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wisp" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#7B4BC0" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#E457B0" stop-opacity=".08"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .cloud-drift {
+      transform-box: fill-box;
+      transform-origin: center bottom;
+      animation: cloud-drift 26s ease-in-out -5s infinite;
+    }
+
+    .cloud-bank-left {
+      --cloud-scale: .92;
+      opacity: .84;
+    }
+
+    .cloud-bank-right {
+      --cloud-scale: .97;
+      opacity: .78;
+    }
+
+    .cloud-bank-center {
+      --cloud-scale: .89;
+      opacity: .72;
+    }
+
+    .cloud-wisps {
+      --cloud-scale: .86;
+      opacity: .46;
+    }
+
+    @keyframes cloud-drift {
+      0%,
+      100% {
+        transform: translate(-12px, 4px) scale(var(--cloud-scale));
+      }
+
+      50% {
+        transform: translate(12px, -5px) scale(var(--cloud-scale));
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .cloud-drift {
+        animation: none;
+        transform: scale(var(--cloud-scale));
+      }
+    }
+  </style>
+
+  <g class="cloud-drift cloud-bank-left">
+    <path
+      d="M-120 1000V838C-78 784-17 765 43 791C63 713 135 655 221 655C310 655 385 715 401 797C439 756 493 730 552 730C654 730 738 806 750 906C800 915 842 950 860 1000H-120Z"
+      fill="url(#left-clouds)"
+    />
+    <path
+      d="M-92 1000V895C-50 843 8 824 68 846C91 789 147 748 213 748C283 748 342 794 361 858C397 832 442 817 490 817C582 817 660 876 688 960C719 961 748 976 768 1000H-92Z"
+      fill="#8B3C9C"
+      fill-opacity=".42"
+    />
+  </g>
+
+  <g class="cloud-drift cloud-bank-right">
+    <ellipse cx="1450" cy="760" rx="300" ry="210" fill="url(#pink-edge)"/>
+    <path
+      d="M814 1000C830 944 876 902 933 892C951 812 1023 752 1109 752C1165 752 1216 778 1249 819C1276 755 1339 710 1413 710C1501 710 1574 773 1590 857C1644 860 1689 898 1702 949V1000H814Z"
+      fill="url(#right-clouds)"
+    />
+    <path
+      d="M948 1000C970 948 1018 914 1072 914C1094 850 1154 804 1225 804C1281 804 1331 833 1360 878C1391 837 1440 811 1495 811C1579 811 1648 872 1661 952C1696 958 1726 974 1748 1000H948Z"
+      fill="#D649A5"
+      fill-opacity=".34"
+    />
+  </g>
+
+  <g class="cloud-drift cloud-bank-center">
+    <path
+      d="M284 1000C313 934 378 890 452 890C482 821 551 773 631 773C710 773 779 821 809 890C842 856 888 835 938 835C1018 835 1087 886 1113 958C1153 960 1188 975 1213 1000H284Z"
+      fill="url(#lower-clouds)"
+    />
+  </g>
+
+  <g class="cloud-drift cloud-wisps">
+    <path
+      d="M-48 520C-9 478 54 467 106 493C128 445 177 412 234 412C293 412 344 449 364 501C402 489 445 496 477 520H-48Z"
+      fill="url(#wisp)"
+    />
+    <path
+      d="M1236 574C1267 535 1317 520 1363 536C1387 484 1439 449 1499 449C1568 449 1626 495 1644 558C1673 554 1702 560 1726 574H1236Z"
+      fill="url(#wisp)"
+    />
+  </g>
+</svg>

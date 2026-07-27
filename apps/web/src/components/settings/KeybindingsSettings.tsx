@@ -813,7 +813,7 @@ function KeybindingTableRow({
   };
 
   return (
-    <div className="grid grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] items-center px-4 py-1.5 text-sm even:bg-muted/15 hover:bg-accent/40">
+    <div className="grid grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] items-center px-4 py-1.5 text-sm transition-colors duration-150 even:bg-muted/15 hover:bg-primary/[0.045] focus-within:bg-primary/[0.035] motion-reduce:transition-none">
       <div className="min-w-0 pr-4">
         <div className="flex min-w-0 items-center gap-1.5">
           <Tooltip>
@@ -985,7 +985,7 @@ function NewKeybindingTableRow({
   };
 
   return (
-    <div className="grid grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] items-center px-4 py-1.5 text-sm even:bg-muted/15 hover:bg-accent/40">
+    <div className="grid grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] items-center px-4 py-1.5 text-sm transition-colors duration-150 even:bg-muted/15 hover:bg-primary/[0.045] focus-within:bg-primary/[0.035] motion-reduce:transition-none">
       <div className="min-w-0 pr-4">
         <Select
           value={commandDraft}
@@ -1295,7 +1295,7 @@ export function KeybindingsSettingsPanel() {
           hideScrollbars
           className="w-full max-w-full rounded-none"
         >
-          <div className="grid min-w-[680px] grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] border-b border-border/70 bg-muted/25 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+          <div className="grid min-w-[680px] grid-cols-[minmax(190px,1.1fr)_minmax(220px,0.85fr)_minmax(210px,1fr)_60px] border-b border-primary/10 bg-primary/[0.035] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
             <div>Command</div>
             <div>Keybinding</div>
             <div>When</div>
