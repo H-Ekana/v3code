@@ -189,3 +189,60 @@ describe("AgentsPanel sections", () => {
     expect(markup).not.toContain("Nested shell");
   });
 });
+
+describe("AgentCard work kind", () => {
+  it("labels a live card with the companion job phase alongside its activity", () => {
+    const markup = renderAgent(
+      agent({
+        agentId: "rescue-1",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        delegateProvider: ProviderDriverKind.make("codex"),
+        name: "Trace card title churn",
+        status: "running",
+        phaseTitle: "verifying",
+        currentActivity: "Running focused reducer tests",
+      }),
+    );
+
+    expect(markup).toContain("verifying");
+    expect(markup).toContain("Running focused reducer tests");
+  });
+
+  it("renders the phase alone when a live card has no activity line yet", () => {
+    const markup = renderAgent(
+      agent({
+        agentId: "rescue-2",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        name: "Freshly launched rescue",
+        status: "running",
+        phaseTitle: "investigating",
+      }),
+    );
+
+    expect(markup).toContain("investigating");
+  });
+
+  // The settled case (a completed card must drop its last phase) is deliberately
+  // uncovered: settled sub-agents render inside the collapsed `Finished` group,
+  // which `renderToStaticMarkup` never expands, so the card emits no markup at
+  // all. An assertion here would pass against an empty string rather than
+  // against the behavior.
+
+  it("does not repeat the phase on a workflow child that already sits under a phase header", () => {
+    const markup = renderAgent(
+      agent({
+        agentId: "wf-child",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        kind: "workflow_agent",
+        name: "Reviewer",
+        status: "running",
+        phaseIndex: 0,
+        phaseTitle: "Inspect",
+        currentActivity: "Reading the diff",
+      }),
+    );
+
+    expect(markup).toContain("Reading the diff");
+    expect(markup).not.toContain("Inspect");
+  });
+});

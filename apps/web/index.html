@@ -76,18 +76,39 @@
         color: #f5f5f5;
       }
 
-      .v3-splash {
+      /* The boot art is split across three sibling layers so the app can be sandwiched
+         between them during the parting: the shell drops below #root while the foreground
+         clouds stay above it, which is what lets the composer rise THROUGH the sky rather
+         than behind it. A single container could never do this — `isolation: isolate`
+         composites all of its children as one unit, so nothing can be interleaved. */
+      .v3-splash,
+      .v3-splash-layer {
         position: fixed;
-        z-index: 70;
         inset: 0;
-        isolation: isolate;
         display: flex;
-        min-height: 100dvh;
         overflow: hidden;
         align-items: center;
         justify-content: center;
         background: transparent;
+      }
+
+      .v3-splash {
+        z-index: 70;
+        isolation: isolate;
         pointer-events: auto;
+      }
+
+      /* Never interactive: these sit above the app while it is already usable. */
+      .v3-splash-layer {
+        pointer-events: none;
+      }
+
+      #boot-foreground {
+        z-index: 71;
+      }
+
+      #boot-logo {
+        z-index: 72;
       }
 
       .v3-splash::before {
@@ -114,7 +135,9 @@
           radial-gradient(circle at 50% 52%, rgb(137 73 196 / 8%), transparent 23rem), #161616;
       }
 
-      html[data-startup-splash="bypass"] #boot-shell {
+      html[data-startup-splash="bypass"] #boot-shell,
+      html[data-startup-splash="bypass"] #boot-foreground,
+      html[data-startup-splash="bypass"] #boot-logo {
         display: none;
       }
 
@@ -122,25 +145,38 @@
         opacity: 0;
       }
 
+      /* The sandwich. The shell drops beneath the app while the foreground clouds and the
+         logo stay above it, so rising app content passes between the two cloud bands.
+         #root needs an explicit stacking context here: today it only outranks the shell
+         because its animated opacity accidentally creates one, which would invert the
+         moment opacity reached exactly 1. */
+      html[data-startup-splash="exiting"] #boot-shell {
+        z-index: 0;
+        pointer-events: none;
+      }
+
       html[data-startup-splash="exiting"] #root {
-        animation: v3-startup-app-arrive 820ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        position: relative;
+        z-index: 1;
+        animation: v3-startup-app-arrive 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
       }
 
       html[data-startup-splash="exiting"] .v3-splash::before {
-        animation: v3-startup-veil-open 720ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        animation: v3-startup-veil-open 1000ms cubic-bezier(0.16, 1, 0.3, 1) both;
       }
 
+      /* Lands at ~1200ms, converging with the logo flight's ~1210ms touchdown. */
       html[data-startup-splash="exiting"] [data-app-sidebar] {
-        animation: v3-startup-sidebar-arrive 700ms 80ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        animation: v3-startup-sidebar-arrive 980ms 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
       }
 
       html[data-startup-splash="exiting"] [data-slot="sidebar-inset"] {
-        animation: v3-startup-workspace-arrive 720ms 70ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        animation: v3-startup-workspace-arrive 900ms 100ms cubic-bezier(0.16, 1, 0.3, 1) both;
       }
 
       html[data-startup-splash="exiting"] [data-startup-composer-target] {
-        animation: v3-startup-composer-arrive 740ms 110ms cubic-bezier(0.16, 1, 0.3, 1) both;
-        will-change: transform, opacity, filter;
+        animation: v3-startup-composer-arrive 1250ms 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+        will-change: transform, opacity;
       }
 
       .v3-splash-art {
@@ -334,50 +370,58 @@
         }
       }
 
+      /* Slides in from fully off-screen so it arrives at the same instant the logo lands on
+         it — the two are meant to meet, travelling toward each other. */
       @keyframes v3-startup-sidebar-arrive {
         0% {
           opacity: 0;
-          filter: brightness(0.82);
-          transform: translate3d(-10px, 0, 0);
+          transform: translate3d(-100%, 0, 0);
+        }
+
+        22% {
+          opacity: 1;
         }
 
         100% {
           opacity: 1;
-          filter: brightness(1);
           transform: translate3d(0, 0, 0);
         }
       }
 
+      /* No blur or scale here either: this is a full-viewport subtree and an ancestor of the
+         composer's backdrop-filter, so both were expensive and visually wrong. */
       @keyframes v3-startup-workspace-arrive {
         0% {
           opacity: 0;
-          filter: blur(3px);
-          transform: translate3d(0, 12px, 0) scale(0.994);
+          transform: translate3d(0, 14px, 0);
         }
 
         100% {
           opacity: 1;
-          filter: blur(0);
-          transform: translate3d(0, 0, 0) scale(1);
+          transform: translate3d(0, 0, 0);
         }
       }
 
+      /* Rises from below the fold so it genuinely travels up through the falling clouds.
+         No blur: this element hosts a backdrop-filter, and an ancestor filter makes it the
+         backdrop root, which blanks the glass for the whole animation and then pops. */
       @keyframes v3-startup-composer-arrive {
         0% {
           opacity: 0;
-          filter: blur(3px) brightness(0.82);
-          transform: translate3d(0, min(10vh, 88px), 0) scale(0.98);
+          transform: translate3d(0, min(64vh, 560px), 0) scale(0.965);
         }
 
-        72% {
+        34% {
           opacity: 1;
-          filter: blur(0) brightness(1.025);
-          transform: translate3d(0, -2px, 0) scale(1.002);
+        }
+
+        78% {
+          opacity: 1;
+          transform: translate3d(0, -6px, 0) scale(1.004);
         }
 
         100% {
           opacity: 1;
-          filter: blur(0) brightness(1);
           transform: translate3d(0, 0, 0) scale(1);
         }
       }
@@ -462,6 +506,8 @@
         alt=""
         aria-hidden="true"
       />
+    </div>
+    <div id="boot-foreground" class="v3-splash-layer" aria-hidden="true">
       <img
         class="v3-splash-art v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-left"
         src="/v3-splash-clouds-foreground-v2.webp"
@@ -480,6 +526,8 @@
         alt=""
         aria-hidden="true"
       />
+    </div>
+    <div id="boot-logo" class="v3-splash-layer" aria-hidden="true">
       <div class="v3-splash-card">
         <img class="v3-splash-logo" src="/apple-touch-icon.png" alt="" aria-hidden="true" />
       </div>
