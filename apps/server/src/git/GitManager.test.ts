@@ -8,7 +8,9 @@ import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as References from "effect/References";
 import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -1379,6 +1381,48 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(second.pr?.number).toBe(214);
     }),
   );
+
+  it.effect("status warns once per failed PR lookup, not once per poll", () => {
+    const warnings: Array<Record<string, unknown>> = [];
+    const logger = Logger.make(({ fiber }) => {
+      const annotations = fiber.getRef(References.CurrentLogAnnotations);
+      if (annotations.operation === "lookupStatusPr") {
+        warnings.push(annotations);
+      }
+    });
+
+    return Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/pr-warn-once"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-warn-once"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          failWith: new GitHubCli.GitHubCliAuthenticationError({
+            command: "gh",
+            cwd: repoDir,
+            cause: new Error("gh auth login"),
+          }),
+        },
+      });
+
+      yield* manager.status({ cwd: repoDir });
+      // The periodic poll drops the remote status result but keeps the PR cache
+      // warm, so the second status replays the same cached failure. Re-logging
+      // it every poll buried the one line that mattered.
+      yield* manager.invalidateRemoteStatus(repoDir);
+      yield* manager.status({ cwd: repoDir });
+
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.errorTag).toBe("SourceControlProviderError");
+      // Without the detail the warning cannot distinguish "not authenticated"
+      // from "rate limited", which need opposite responses.
+      expect(warnings[0]?.detail).toContain("not authenticated");
+    }).pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+  });
 
   it.effect(
     "status does not reuse a stale PR after the branch is retargeted to a different upstream",

@@ -829,6 +829,19 @@ export const make = Effect.gen(function* () {
   // back to a null upstreamRef.
   const prLookupCacheKey = (cwd: string, details: { branch: string; upstreamRef: string | null }) =>
     [cwd, details.branch, details.upstreamRef ?? "", String(prLookupEpoch(cwd))].join("\u0000");
+  // The failure can come from any hosting provider (`SourceControlProviderError`),
+  // from git itself, or from a defect, so read both fields defensively. `detail`
+  // is what makes the warning actionable — "GitHub CLI is not authenticated" and
+  // "rate limit exceeded" share a tag but need opposite responses.
+  const prLookupErrorAnnotations = (error: unknown) => {
+    const record =
+      typeof error === "object" && error !== null ? (error as Record<string, unknown>) : null;
+    const detail = record?.detail;
+    return {
+      errorTag: record !== null && "_tag" in record ? String(record._tag) : typeof error,
+      ...(typeof detail === "string" && detail.length > 0 ? { detail } : {}),
+    };
+  };
   const prLookupCache = yield* Cache.makeWith(
     (key: string) => {
       const [cwd = "", branch = "", upstreamRef = ""] = key.split("\u0000");
@@ -840,6 +853,18 @@ export const make = Effect.gen(function* () {
         Effect.flatMap((headContext) =>
           findLatestPrForHeadContext(cwd, headContext).pipe(
             Effect.map((latest) => ({ latest, headContext })),
+          ),
+        ),
+        // Logged here rather than where the failure is caught: the cache replays
+        // a failed lookup for PR_LOOKUP_FAILURE_TTL, and every status poll inside
+        // that window would otherwise re-log the same warning.
+        Effect.tapError((error) =>
+          Effect.logWarning("PR lookup failed; keeping last known PR state.").pipe(
+            Effect.annotateLogs({
+              operation: "lookupStatusPr",
+              branch,
+              ...prLookupErrorAnnotations(error),
+            }),
           ),
         ),
       );
@@ -936,17 +961,10 @@ export const make = Effect.gen(function* () {
         ),
       ),
       Effect.map(({ pr }) => pr),
-      Effect.catch((error) =>
-        Effect.logWarning("PR lookup failed; keeping last known PR state.").pipe(
-          Effect.annotateLogs({
-            operation: "lookupStatusPr",
-            branch: details.branch,
-            errorTag:
-              typeof error === "object" && error !== null && "_tag" in error
-                ? String(error._tag)
-                : typeof error,
-          }),
-          Effect.andThen(resolveBranchHeadContext(cwd, details)),
+      // The warning for this failure is emitted by the cache lookup itself, so a
+      // replayed failure stays quiet while still falling back to the last badge.
+      Effect.catch(() =>
+        resolveBranchHeadContext(cwd, details).pipe(
           Effect.map((headContext) =>
             resolveLastKnownPr(branchKey, {
               upstreamRef: details.upstreamRef,
