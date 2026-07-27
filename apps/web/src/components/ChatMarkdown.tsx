@@ -860,7 +860,14 @@ interface MarkdownProseFileLinkProps {
 
 const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
 const MARKDOWN_FILE_LINK_CLASS_NAME =
-  "chat-markdown-file-link cursor-pointer transition-colors hover:bg-accent/70";
+  "chat-markdown-file-link cursor-pointer transition-colors text-astro-highlight hover:text-astro-highlight/80";
+
+/** Chip variant: the accent also tints its existing surface and border on hover. */
+const MARKDOWN_FILE_LINK_CHIP_CLASS_NAME =
+  "hover:border-astro-highlight/40 hover:bg-astro-highlight/12";
+
+/** Prose variant: inline text, so it takes the dotted underline instead of a surface. */
+const MARKDOWN_FILE_LINK_PROSE_CLASS_NAME = "chat-markdown-file-link-prose";
 
 function pathParentSegments(path: string): string[] {
   const normalized = path.replaceAll("\\", "/");
@@ -1335,7 +1342,7 @@ function useMarkdownFileLinkActions(
           [
             { id: "open", label: "Open in editor" },
             ...(onReveal
-              ? ([{ id: "reveal", label: revealLabel ?? "Show in File Manager" }] as const)
+              ? ([{ id: "reveal", label: revealLabel ?? "Open in File Manager" }] as const)
               : []),
             ...(onOpenInBrowser
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
@@ -1432,7 +1439,12 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         render={
           <a
             href={href}
-            className={cn(CHAT_FILE_TAG_CHIP_CLASS_NAME, MARKDOWN_FILE_LINK_CLASS_NAME, className)}
+            className={cn(
+              CHAT_FILE_TAG_CHIP_CLASS_NAME,
+              MARKDOWN_FILE_LINK_CLASS_NAME,
+              MARKDOWN_FILE_LINK_CHIP_CLASS_NAME,
+              className,
+            )}
             data-markdown-copy={copyMarkdown}
             onClick={actions.onClick}
             onContextMenu={actions.onContextMenu}
@@ -1478,6 +1490,11 @@ const MarkdownProseFileLink = memo(function MarkdownProseFileLink({
         render={
           <a
             {...anchorProps}
+            className={cn(
+              MARKDOWN_FILE_LINK_CLASS_NAME,
+              MARKDOWN_FILE_LINK_PROSE_CLASS_NAME,
+              anchorProps.className,
+            )}
             href={meta.targetPath}
             target={undefined}
             rel={undefined}
@@ -1552,10 +1569,13 @@ function ChatMarkdown({
     serverConfig?.availableEditors ?? EMPTY_AVAILABLE_EDITORS,
   );
   const revealPath = useRevealPath(environmentId);
-  const canRevealPath = serverConfig?.availableEditors.includes("file-manager") ?? false;
-  const revealLabel = serverConfig
-    ? revealInFileExplorerLabel(serverConfig.environment.platform.os)
-    : "Show in File Manager";
+  // Deliberately not gated on the `file-manager` editor being probed as
+  // available: revealing is its own RPC, and a missing probe should surface as
+  // an error toast rather than silently removing the menu item.
+  const revealLabel = revealInFileExplorerLabel(
+    serverConfig?.environment.platform.os ??
+      (typeof navigator === "undefined" ? "" : navigator.platform),
+  );
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
   // While the message is still streaming, re-parsing the whole accumulated text
   // on every delta is quadratic. `planIncrementalMarkdownSplit` refuses unless
@@ -1819,7 +1839,7 @@ function ChatMarkdown({
           threadRef && isPreviewSupportedInRuntime() && isBrowserPreviewFile(fileLinkMeta.filePath)
             ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
             : undefined;
-        const onReveal = canRevealPath ? revealPath : undefined;
+        const onReveal = revealPath;
         const copyMarkdown = `[${plainLabel ?? fileLinkMeta.basename}](${normalizedHref})`;
         if (!isPathLikeMarkdownLinkLabel(plainLabel, normalizedHref, fileLinkMeta, cwd)) {
           return (
@@ -1902,7 +1922,6 @@ function ChatMarkdown({
       },
     }),
     [
-      canRevealPath,
       cwd,
       diffThemeName,
       fileLinkParentSuffixByPath,

@@ -64,6 +64,42 @@ it("maps current Codex model capability fields", () => {
   ]);
 });
 
+it("prefers high reasoning for GPT-5.6-Sol", () => {
+  const capabilities = mapCodexModelCapabilities({
+    additionalSpeedTiers: [],
+    defaultReasoningEffort: "low",
+    defaultServiceTier: null,
+    description: "Frontier coding model",
+    displayName: "GPT-5.6-Sol",
+    hidden: false,
+    id: "gpt-5.6-sol",
+    isDefault: true,
+    model: "gpt-5.6-sol",
+    serviceTiers: [],
+    supportedReasoningEfforts: [
+      { description: "Fast responses", reasoningEffort: "low" },
+      { description: "Balanced reasoning", reasoningEffort: "medium" },
+      { description: "Deeper reasoning", reasoningEffort: "high" },
+      { description: "Maximum reasoning", reasoningEffort: "xhigh" },
+    ],
+  });
+
+  assert.deepStrictEqual(capabilities.optionDescriptors, [
+    {
+      id: "reasoningEffort",
+      label: "Reasoning",
+      type: "select",
+      options: [
+        { id: "low", label: "Low" },
+        { id: "medium", label: "Medium" },
+        { id: "high", label: "High", isDefault: true },
+        { id: "xhigh", label: "Extra High" },
+      ],
+      currentValue: "high",
+    },
+  ]);
+});
+
 it("uses standard routing when the catalog has no default service tier", () => {
   const capabilities = mapCodexModelCapabilities({
     additionalSpeedTiers: ["fast"],

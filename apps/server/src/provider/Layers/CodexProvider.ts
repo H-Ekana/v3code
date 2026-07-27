@@ -63,6 +63,10 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
 
 const DEFAULT_SERVICE_TIER_ID = "default";
 
+const PREFERRED_REASONING_EFFORT_BY_MODEL: Readonly<Record<string, string>> = {
+  "gpt-5.6-sol": "high",
+};
+
 function reasoningEffortLabel(reasoningEffort: string): string {
   return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
 }
@@ -110,8 +114,16 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
 export function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
 ): ModelCapabilities {
+  const preferredReasoningEffort = PREFERRED_REASONING_EFFORT_BY_MODEL[model.model];
+  const defaultReasoningEffort =
+    preferredReasoningEffort &&
+    model.supportedReasoningEfforts.some(
+      ({ reasoningEffort }) => reasoningEffort === preferredReasoningEffort,
+    )
+      ? preferredReasoningEffort
+      : model.defaultReasoningEffort;
   const reasoningOptions = model.supportedReasoningEfforts.map(({ reasoningEffort }) =>
-    reasoningEffort === model.defaultReasoningEffort
+    reasoningEffort === defaultReasoningEffort
       ? {
           id: reasoningEffort,
           label: reasoningEffortLabel(reasoningEffort),

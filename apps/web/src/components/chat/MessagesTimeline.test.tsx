@@ -32,6 +32,7 @@ vi.mock("@legendapp/list/react", async () => {
             layout?: boolean;
           };
         };
+    maintainScrollAtEndThreshold?: number;
     maintainVisibleContentPosition?:
       | boolean
       | {
@@ -75,6 +76,7 @@ vi.mock("@legendapp/list/react", async () => {
             ? props.maintainScrollAtEnd.on?.layout
             : undefined
         }
+        data-maintain-scroll-at-end-threshold={props.maintainScrollAtEndThreshold}
         data-maintain-visible-content-position={
           typeof props.maintainVisibleContentPosition === "object"
             ? "object"
@@ -194,6 +196,7 @@ function buildProps() {
     onAnchorReady: () => {},
     onAnchorSizeChanged: () => {},
     contentInsetEndAdjustment: 0,
+    followOutput: true,
     onIsAtEndChange: () => {},
     onManualNavigation: () => {},
   };
@@ -399,7 +402,7 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
     expect(markup).toContain('data-maintain-visible-content-position="object"');
     expect(markup).toContain('data-maintain-visible-content-position-data="true"');
-    expect(markup).toContain('data-maintain-visible-content-position-size="false"');
+    expect(markup).toContain('data-maintain-visible-content-position-size="true"');
     expect(onAnchorReady).toHaveBeenCalledOnce();
     expect(onAnchorReady).toHaveBeenCalledWith(secondEntry.message.id, 1);
     expect(onAnchorSizeChanged).toHaveBeenCalledWith(secondEntry.message.id, 240);
@@ -419,9 +422,25 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-maintain-scroll-at-end-data-change="true"');
     expect(markup).toContain('data-maintain-scroll-at-end-item-layout="true"');
     expect(markup).toContain('data-maintain-scroll-at-end-layout="true"');
+    expect(markup).toContain('data-maintain-scroll-at-end-threshold="0"');
+    expect(markup).toContain('data-maintain-visible-content-position-size="true"');
     expect(markup).toContain('data-user-message-collapsed="true"');
     expect(markup).toContain('data-user-message-fade="true"');
     expect(markup).toContain('data-user-message-footer="true"');
+  });
+
+  it("disables end-follow while preserving the visible history position", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        followOutput={false}
+        timelineEntries={[buildUserTimelineEntry("Reading older context.")]}
+      />,
+    );
+
+    expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
+    expect(markup).toContain('data-maintain-visible-content-position-data="true"');
+    expect(markup).toContain('data-maintain-visible-content-position-size="true"');
   });
 
   it("does not render collapse controls for short user messages", () => {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { getAnchoredTurnMetrics, getRowBottom } from "./timelineScrollAnchoring";
+import {
+  getAnchoredTurnMetrics,
+  getRowBottom,
+  shouldPositionTimelineAnchor,
+} from "./timelineScrollAnchoring";
 
 function buildState({
   positions,
@@ -22,6 +26,27 @@ function buildState({
 }
 
 describe("timeline scroll anchoring", () => {
+  it("does not re-arm a streamed anchor after manual navigation", () => {
+    expect(
+      shouldPositionTimelineAnchor({
+        liveFollowUserScrollGeneration: 4,
+        userScrollGeneration: 4,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPositionTimelineAnchor({
+        liveFollowUserScrollGeneration: null,
+        userScrollGeneration: 5,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPositionTimelineAnchor({
+        liveFollowUserScrollGeneration: 4,
+        userScrollGeneration: 5,
+      }),
+    ).toBe(false);
+  });
+
   it("measures row bottoms from LegendList row position and size", () => {
     const state = buildState({
       positions: [0, 120],
