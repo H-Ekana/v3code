@@ -81,7 +81,22 @@ export const ThreadAgentWorkflowPhase = Schema.Struct({
 });
 export type ThreadAgentWorkflowPhase = typeof ThreadAgentWorkflowPhase.Type;
 
-export const THREAD_AGENT_RECENT_ACTIVITY_LIMIT = 6;
+/**
+ * How many activity entries a roster snapshot retains per agent.
+ *
+ * Directly a storage cost, not just a display choice: every snapshot embeds the
+ * full roster, and a snapshot is appended on each material change, so raising
+ * this multiplies by (agents x snapshots). Entries are bounded to 180 chars, so
+ * the ceiling is roughly 9KB per agent per snapshot at this value.
+ *
+ * Kept well above what a card shows collapsed so "show all" has history to
+ * reveal, but far below "unbounded" — the full transcript belongs in the
+ * per-agent detail view, not duplicated into every snapshot.
+ */
+export const THREAD_AGENT_RECENT_ACTIVITY_LIMIT = 50;
+
+/** Entries a collapsed agent card shows before offering to expand. */
+export const THREAD_AGENT_COLLAPSED_ACTIVITY_COUNT = 6;
 
 export const ThreadAgentSnapshot = Schema.Struct({
   // Stable identity: Claude task_id, Codex child thread id. Provider

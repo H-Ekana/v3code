@@ -1,5 +1,8 @@
 import { memo, useEffect, useRef, useState } from "react";
-import type { ThreadAgentSnapshot } from "@t3tools/contracts";
+import {
+  THREAD_AGENT_COLLAPSED_ACTIVITY_COUNT,
+  type ThreadAgentSnapshot,
+} from "@t3tools/contracts";
 import {
   deriveAgentPanelState,
   formatAgentTokenCount,
@@ -153,6 +156,7 @@ function AgentCard({
   showProviderIcon?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [showAllActivity, setShowAllActivity] = useState(false);
   const settled = isTerminalAgentStatus(agent.status);
   // Settled cards lead with outcome (error first); live cards with activity.
   const activity =
@@ -170,98 +174,127 @@ function AgentCard({
   const hasFeed = agent.recentActivity.length > 0;
   const hasDetails = hasFeed || shells.length > 0;
   const isLive = agent.status === "running" || agent.status === "waiting";
+  // Newest first, matching how the card reads top-down.
+  const orderedActivity = agent.recentActivity.toReversed();
+  const activityCount = orderedActivity.length;
+  const visibleActivity = showAllActivity
+    ? orderedActivity
+    : orderedActivity.slice(0, THREAD_AGENT_COLLAPSED_ACTIVITY_COUNT);
+  const hiddenActivityCount = activityCount - visibleActivity.length;
 
   return (
-    <button
-      type="button"
-      onClick={() => hasDetails && setExpanded((value) => !value)}
-      aria-expanded={hasDetails ? expanded : undefined}
+    // A div wrapping a header button, rather than one big button: the expanded
+    // feed owns its own "show all" control, and a button cannot legally nest
+    // inside another button.
+    <div
       className={cn(
-        "group/agent w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-left outline-hidden transition-[background-color,border-color,box-shadow,opacity] duration-200 ease-out focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none",
-        hasDetails ? "cursor-pointer hover:border-primary/25" : "cursor-default",
+        "group/agent w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-left transition-[background-color,border-color,box-shadow,opacity] duration-200 ease-out motion-reduce:transition-none",
+        hasDetails && "hover:border-primary/25",
         isLive && "border-primary/20 bg-primary/[0.035] shadow-[0_0_8px_-4px_var(--primary)]",
         agent.status === "waiting" && "border-warning/25",
         settled && "opacity-80",
       )}
     >
-      <div className="flex items-center gap-2">
-        {showProviderIcon ? (
-          <AgentProviderIcon agent={agent} />
-        ) : (
-          <AgentStatusDot status={agent.status} />
+      <button
+        type="button"
+        onClick={() => hasDetails && setExpanded((value) => !value)}
+        aria-expanded={hasDetails ? expanded : undefined}
+        className={cn(
+          "w-full rounded-sm text-left outline-hidden focus-visible:ring-1 focus-visible:ring-primary/60",
+          hasDetails ? "cursor-pointer" : "cursor-default",
         )}
-        <span className="min-w-0 truncate text-[12.5px] font-semibold">{agent.name}</span>
-        {agent.agentType ? (
-          <Badge variant="secondary" size="sm" className="min-w-0 max-w-28 shrink truncate">
-            {agent.agentType}
-          </Badge>
-        ) : null}
-        {agent.model ? (
-          <Badge variant="outline" size="sm" className="shrink-0 text-muted-foreground">
-            {agent.model}
-          </Badge>
-        ) : null}
-        <span className="ml-auto shrink-0">
-          <AgentElapsed agent={agent} />
-        </span>
-        {agent.status === "completed" ? (
-          <CheckIcon className="size-3 shrink-0 text-success" />
-        ) : null}
-      </div>
-      {activity ? (
-        <div
-          className={cn(
-            "mt-1 truncate text-[11.5px]",
-            agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+      >
+        <div className="flex items-center gap-2">
+          {showProviderIcon ? (
+            <AgentProviderIcon agent={agent} />
+          ) : (
+            <AgentStatusDot status={agent.status} />
           )}
-        >
-          {activity}
+          <span className="min-w-0 truncate text-[12.5px] font-semibold">{agent.name}</span>
+          {agent.agentType ? (
+            <Badge variant="secondary" size="sm" className="min-w-0 max-w-28 shrink truncate">
+              {agent.agentType}
+            </Badge>
+          ) : null}
+          {agent.model ? (
+            <Badge variant="outline" size="sm" className="shrink-0 text-muted-foreground">
+              {agent.model}
+            </Badge>
+          ) : null}
+          <span className="ml-auto shrink-0">
+            <AgentElapsed agent={agent} />
+          </span>
+          {agent.status === "completed" ? (
+            <CheckIcon className="size-3 shrink-0 text-success" />
+          ) : null}
         </div>
-      ) : null}
-      <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-        {agent.usage ? (
-          <span className="font-mono tabular-nums text-foreground">
-            {formatAgentTokenCount(agent.usage.totalTokens)}{" "}
-            <span className="text-muted-foreground">tok</span>
-            {agent.status === "running" ? <span className="text-sky-500"> ↑</span> : null}
-          </span>
+        {activity ? (
+          <div
+            className={cn(
+              "mt-1 truncate text-[11.5px]",
+              agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+            )}
+          >
+            {activity}
+          </div>
         ) : null}
-        {agent.usage?.toolUses ? (
-          <>
-            <span className="text-border">·</span>
-            <span>{agent.usage.toolUses} tools</span>
-          </>
-        ) : null}
-        {agent.activationCount > 1 ? (
-          <>
-            <span className="text-border">·</span>
-            <span>run {agent.activationCount}</span>
-          </>
-        ) : null}
-        {shells.length > 0 ? (
-          <span className="rounded-sm bg-muted/50 px-1.5 py-0.5 text-muted-foreground/80">
-            · {shells.length} shell{shells.length === 1 ? "" : "s"}
-          </span>
-        ) : null}
-        {hasDetails ? (
-          <span className="ml-auto text-muted-foreground/70">
-            <ChevronRightIcon
-              className={cn(
-                "size-3 transition-[color,transform] duration-200 ease-out group-hover/agent:text-primary motion-reduce:transition-none",
-                expanded && "rotate-90",
-              )}
-            />
-          </span>
-        ) : null}
-      </div>
+        <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+          {agent.usage ? (
+            <span className="font-mono tabular-nums text-foreground">
+              {formatAgentTokenCount(agent.usage.totalTokens)}{" "}
+              <span className="text-muted-foreground">tok</span>
+              {agent.status === "running" ? <span className="text-sky-500"> ↑</span> : null}
+            </span>
+          ) : null}
+          {agent.usage?.toolUses ? (
+            <>
+              <span className="text-border">·</span>
+              <span>{agent.usage.toolUses} tools</span>
+            </>
+          ) : null}
+          {agent.activationCount > 1 ? (
+            <>
+              <span className="text-border">·</span>
+              <span>run {agent.activationCount}</span>
+            </>
+          ) : null}
+          {shells.length > 0 ? (
+            <span className="rounded-sm bg-muted/50 px-1.5 py-0.5 text-muted-foreground/80">
+              · {shells.length} shell{shells.length === 1 ? "" : "s"}
+            </span>
+          ) : null}
+          {hasDetails ? (
+            <span className="ml-auto text-muted-foreground/70">
+              <ChevronRightIcon
+                className={cn(
+                  "size-3 transition-[color,transform] duration-200 ease-out group-hover/agent:text-primary motion-reduce:transition-none",
+                  expanded && "rotate-90",
+                )}
+              />
+            </span>
+          ) : null}
+        </div>
+      </button>
       {expanded && hasDetails ? (
         <div className="mt-2 space-y-0.5 border-t border-primary/15 pt-2">
-          {agent.recentActivity.toReversed().map((entry) => (
+          {visibleActivity.map((entry) => (
             <div key={`${entry.at}-${entry.summary}`} className="flex gap-2 text-[11px]">
               <span className="shrink-0 font-mono tabular-nums text-muted-foreground/60">
                 {entry.at.slice(11, 19)}
               </span>
-              <span className="truncate text-muted-foreground">{entry.summary}</span>
+              <span
+                className={cn(
+                  "min-w-0 flex-1",
+                  // Full text once expanded — truncating the history defeats
+                  // the point of asking to see all of it.
+                  showAllActivity ? "break-words" : "truncate",
+                  entry.outcome === "error"
+                    ? "text-destructive-foreground"
+                    : "text-muted-foreground",
+                )}
+              >
+                {entry.summary}
+              </span>
             </div>
           ))}
           {shells.map((shell) => (
@@ -275,9 +308,20 @@ function AgentCard({
               ) : null}
             </div>
           ))}
+          {hiddenActivityCount > 0 || showAllActivity ? (
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setShowAllActivity((value) => !value)}
+                className="rounded-sm px-1 py-0.5 text-[11px] text-muted-foreground/70 outline-hidden transition-colors duration-200 hover:text-primary focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none"
+              >
+                {showAllActivity ? "Show less" : `Show all ${activityCount}`}
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
-    </button>
+    </div>
   );
 }
 

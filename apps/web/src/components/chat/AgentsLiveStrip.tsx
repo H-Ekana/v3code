@@ -35,13 +35,13 @@ const AgentsLiveStrip = memo(function AgentsLiveStrip({
       type="button"
       onClick={onOpen}
       className={cn(
-        "group/agents-live flex w-full items-center gap-2 rounded-xl border border-primary/12 px-3 py-1.5",
+        "group/agents-live mx-auto flex w-full max-w-[52rem] items-center gap-2 rounded-xl border border-primary/12 px-3 py-1.5",
         "bg-card/60 text-left text-xs outline-none transition-colors duration-200 hover:border-primary/25 hover:bg-card focus-visible:border-primary/30 focus-visible:ring-2 focus-visible:ring-ring/60 motion-reduce:transition-none",
       )}
       aria-label={`${liveCount} agents active — open agents panel`}
     >
       <span className="size-1.75 shrink-0 rounded-full bg-primary shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_65%,transparent)] animate-status-pulse motion-reduce:animate-none" />
-      <BotIcon className="size-3.5 shrink-0 text-primary/65 transition-colors duration-200 group-hover/agents-live:text-primary motion-reduce:transition-none" />
+      <BotIcon className="size-3.5 shrink-0 text-astro-highlight/80 transition-colors duration-200 group-hover/agents-live:text-astro-highlight motion-reduce:transition-none" />
       <span className="font-semibold">
         {liveCount} agent{liveCount === 1 ? "" : "s"}
       </span>
