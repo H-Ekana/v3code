@@ -7,18 +7,29 @@ import {
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
+  MessageId,
+  ProviderInstanceId,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
-  type TurnId,
+  TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import {
+  isV3DemoResponderSelection,
+  isV3DemoResponderTarget,
+  V3_DEMO_RESPONDER_ENV,
+  V3_DEMO_RESPONDER_INSTANCE_ID,
+  V3_DEMO_RESPONSE_TEXT,
+} from "@t3tools/shared/v3Demo";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -51,6 +62,7 @@ type ProviderIntentEvent = Extract<
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
       | "thread.turn-interrupt-requested"
+      | "thread.context-compact-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested";
@@ -87,6 +99,40 @@ const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
+const V3_DEMO_START_DELAY = Duration.millis(180);
+const V3_DEMO_FIRST_TOKEN_DELAY = Duration.millis(240);
+const V3_DEMO_TOKEN_DELAY = Duration.millis(110);
+
+function isV3DemoResponderThread(threadId: ThreadId, projectId: ProjectId): boolean {
+  return isV3DemoResponderTarget({
+    enabled: process.env[V3_DEMO_RESPONDER_ENV] === "1",
+    projectId,
+    threadId,
+  });
+}
+
+function isV3DemoResponderTurn(input: {
+  readonly threadId: ThreadId;
+  readonly projectId: ProjectId;
+  readonly selectedInstanceId: string | null | undefined;
+}): boolean {
+  if (process.env[V3_DEMO_RESPONDER_ENV] !== "1") {
+    return false;
+  }
+  return (
+    isV3DemoResponderSelection(input.selectedInstanceId) ||
+    isV3DemoResponderThread(input.threadId, input.projectId)
+  );
+}
+
+function chunkV3DemoResponse(text: string): ReadonlyArray<string> {
+  const words = text.match(/\S+\s*/gu) ?? [text];
+  const chunks: Array<string> = [];
+  for (let index = 0; index < words.length; index += 3) {
+    chunks.push(words.slice(index, index + 3).join(""));
+  }
+  return chunks;
+}
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -213,12 +259,18 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  type V3DemoResponderHandle = {
+    fiber: Fiber.Fiber<void, unknown> | null;
+  };
+  const v3DemoResponderFibers = new Map<ThreadId, V3DemoResponderHandle>();
+  const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly kind:
       | "provider.turn.start.failed"
       | "provider.turn.interrupt.failed"
+      | "provider.context.compact.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
       | "provider.session.stop.failed";
@@ -247,6 +299,33 @@ const make = Effect.gen(function* () {
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendContextCompactionStartedActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("context-compaction-started"),
+      eventId: serverEventId(),
+    }).pipe(
+      Effect.flatMap(({ commandId, eventId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: eventId,
+            tone: "info",
+            kind: "context-compaction.started",
+            summary: "Compacting context",
+            payload: { status: "inProgress" },
+            turnId: null,
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
@@ -320,6 +399,116 @@ const make = Effect.gen(function* () {
     return yield* projectionSnapshotQuery
       .getThreadDetailById(threadId)
       .pipe(Effect.map(Option.getOrUndefined));
+  });
+
+  const runV3DemoResponder = Effect.fn("runV3DemoResponder")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly runtimeMode: RuntimeMode;
+    readonly createdAt: string;
+  }) {
+    const turnId = yield* crypto.randomUUIDv4.pipe(
+      Effect.map((uuid) => TurnId.make(`v3-demo-turn:${uuid}`)),
+    );
+    const messageId = yield* crypto.randomUUIDv4.pipe(
+      Effect.map((uuid) => MessageId.make(`v3-demo-message:${uuid}`)),
+    );
+    const providerInstanceId = ProviderInstanceId.make(V3_DEMO_RESPONDER_INSTANCE_ID);
+
+    yield* setThreadSession({
+      threadId: input.threadId,
+      session: {
+        threadId: input.threadId,
+        status: "starting",
+        providerName: "V3 Test Responder",
+        providerInstanceId,
+        runtimeMode: input.runtimeMode,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: input.createdAt,
+      },
+      createdAt: input.createdAt,
+    });
+
+    yield* Effect.sleep(V3_DEMO_START_DELAY);
+    const startedAt = yield* currentIso;
+    yield* setThreadSession({
+      threadId: input.threadId,
+      session: {
+        threadId: input.threadId,
+        status: "running",
+        providerName: "V3 Test Responder",
+        providerInstanceId,
+        runtimeMode: input.runtimeMode,
+        activeTurnId: turnId,
+        lastError: null,
+        updatedAt: startedAt,
+      },
+      createdAt: startedAt,
+    });
+
+    yield* Effect.sleep(V3_DEMO_FIRST_TOKEN_DELAY);
+    for (const delta of chunkV3DemoResponse(V3_DEMO_RESPONSE_TEXT)) {
+      const createdAt = yield* currentIso;
+      yield* orchestrationEngine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: yield* serverCommandId("v3-demo-assistant-delta"),
+        threadId: input.threadId,
+        messageId,
+        delta,
+        turnId,
+        createdAt,
+      });
+      yield* Effect.sleep(V3_DEMO_TOKEN_DELAY);
+    }
+
+    const completedAt = yield* currentIso;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.message.assistant.complete",
+      commandId: yield* serverCommandId("v3-demo-assistant-complete"),
+      threadId: input.threadId,
+      messageId,
+      turnId,
+      createdAt: completedAt,
+    });
+    yield* setThreadSession({
+      threadId: input.threadId,
+      session: {
+        threadId: input.threadId,
+        status: "ready",
+        providerName: "V3 Test Responder",
+        providerInstanceId,
+        runtimeMode: input.runtimeMode,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: completedAt,
+      },
+      createdAt: completedAt,
+    });
+  });
+
+  const startV3DemoResponder = Effect.fn("startV3DemoResponder")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly runtimeMode: RuntimeMode;
+    readonly createdAt: string;
+  }) {
+    const previous = v3DemoResponderFibers.get(input.threadId);
+    if (previous?.fiber) {
+      yield* Fiber.interrupt(previous.fiber).pipe(Effect.ignore);
+    }
+
+    const handle: V3DemoResponderHandle = { fiber: null };
+    const program = runV3DemoResponder(input).pipe(
+      Effect.asVoid,
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (v3DemoResponderFibers.get(input.threadId) === handle) {
+            v3DemoResponderFibers.delete(input.threadId);
+          }
+        }),
+      ),
+    );
+    handle.fiber = yield* program.pipe(Effect.forkScoped);
+    v3DemoResponderFibers.set(input.threadId, handle);
   });
 
   const rejectStartedThreadModelChangeIfRequired = Effect.fnUntraced(function* (input: {
@@ -794,6 +983,22 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    if (
+      isV3DemoResponderTurn({
+        threadId: thread.id,
+        projectId: thread.projectId,
+        selectedInstanceId:
+          event.payload.modelSelection?.instanceId ?? thread.modelSelection.instanceId,
+      })
+    ) {
+      yield* startV3DemoResponder({
+        threadId: thread.id,
+        runtimeMode: thread.runtimeMode,
+        createdAt: event.payload.createdAt,
+      });
+      return;
+    }
+
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
@@ -891,6 +1096,32 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    if (
+      process.env[V3_DEMO_RESPONDER_ENV] === "1" &&
+      (v3DemoResponderFibers.has(thread.id) ||
+        isV3DemoResponderSelection(thread.session?.providerInstanceId))
+    ) {
+      const handle = v3DemoResponderFibers.get(thread.id);
+      if (handle?.fiber) {
+        yield* Fiber.interrupt(handle.fiber).pipe(Effect.ignore);
+      }
+      v3DemoResponderFibers.delete(thread.id);
+      yield* setThreadSession({
+        threadId: thread.id,
+        session: {
+          threadId: thread.id,
+          status: "interrupted",
+          providerName: "V3 Test Responder",
+          providerInstanceId: ProviderInstanceId.make(V3_DEMO_RESPONDER_INSTANCE_ID),
+          runtimeMode: thread.runtimeMode,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: event.payload.createdAt,
+        },
+        createdAt: event.payload.createdAt,
+      });
+      return;
+    }
     const hasSession = thread.session && thread.session.status !== "stopped";
     if (!hasSession) {
       return yield* appendProviderFailureActivity({
@@ -905,6 +1136,31 @@ const make = Effect.gen(function* () {
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
     yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+  });
+
+  const processContextCompactRequested = Effect.fn("processContextCompactRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.context-compact-requested" }>,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    yield* appendContextCompactionStartedActivity({
+      threadId: thread.id,
+      createdAt: event.payload.createdAt,
+    });
+    yield* providerService.compactConversation({ threadId: thread.id }).pipe(
+      Effect.catchCause((cause) =>
+        appendProviderFailureActivity({
+          threadId: thread.id,
+          kind: "provider.context.compact.failed",
+          summary: "Context compaction failed",
+          detail: formatFailureDetail(cause),
+          turnId: null,
+          createdAt: event.payload.createdAt,
+        }).pipe(Effect.asVoid),
+      ),
+    );
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
@@ -1004,7 +1260,10 @@ const make = Effect.gen(function* () {
     }
 
     const now = event.payload.createdAt;
-    if (thread.session && thread.session.status !== "stopped") {
+    const isV3DemoSession =
+      process.env[V3_DEMO_RESPONDER_ENV] === "1" &&
+      isV3DemoResponderSelection(thread.session?.providerInstanceId);
+    if (thread.session && thread.session.status !== "stopped" && !isV3DemoSession) {
       yield* providerService.stopSession({ threadId: thread.id });
     }
 
@@ -1043,6 +1302,21 @@ const make = Effect.gen(function* () {
         if (!thread?.session || thread.session.status === "stopped") {
           return;
         }
+        if (
+          process.env[V3_DEMO_RESPONDER_ENV] === "1" &&
+          isV3DemoResponderSelection(thread.session.providerInstanceId)
+        ) {
+          yield* setThreadSession({
+            threadId: thread.id,
+            session: {
+              ...thread.session,
+              runtimeMode: thread.runtimeMode,
+              updatedAt: event.payload.updatedAt,
+            },
+            createdAt: event.payload.updatedAt,
+          });
+          return;
+        }
         const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
         yield* ensureSessionForThread(
           event.payload.threadId,
@@ -1056,6 +1330,9 @@ const make = Effect.gen(function* () {
         return;
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
+        return;
+      case "thread.context-compact-requested":
+        yield* processContextCompactRequested(event);
         return;
       case "thread.approval-response-requested":
         yield* processApprovalResponseRequested(event);
@@ -1090,6 +1367,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
         event.type === "thread.turn-interrupt-requested" ||
+        event.type === "thread.context-compact-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
         event.type === "thread.session-stop-requested"

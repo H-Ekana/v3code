@@ -1057,6 +1057,24 @@ function mapToRuntimeEvents(
       return [];
     }
     const itemType = toCanonicalItemType(item.type);
+    // `thread/compact/start` returns before compaction finishes. Current Codex
+    // app-server versions report the terminal state through the standard
+    // contextCompaction item lifecycle; `thread/compacted` is legacy and is
+    // not guaranteed to follow. Promote the completed item to the canonical
+    // thread state used by the rest of the app so the UI cannot remain stuck
+    // in its optimistic "compacting" state.
+    if (itemType === "context_compaction") {
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          type: "thread.state.changed",
+          payload: {
+            state: "compacted",
+            ...(event.payload !== undefined ? { detail: event.payload } : {}),
+          },
+        },
+      ];
+    }
     if (itemType === "plan") {
       const detail = itemDetail(itemType, item);
       if (!detail) {
@@ -1794,6 +1812,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
+  const compactThread: NonNullable<CodexAdapterShape["compactThread"]> = (threadId) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) => session.runtime.compactThread),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/compact/start", cause),
+      ),
+    );
+
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.readThread),
@@ -1918,6 +1946,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     startSession,
     sendTurn,
     interruptTurn,
+    compactThread,
     readThread,
     rollbackThread,
     respondToRequest,

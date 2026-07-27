@@ -188,6 +188,55 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }),
   );
 
+  it.effect("runs Grok's ACP compact command and reports completion", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-manual-context-compact");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-compact-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
+      });
+
+      assert.isDefined(adapter.compactThread);
+      yield* adapter.compactThread(threadId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+
+      assert.isTrue(
+        requests.some(
+          (entry) =>
+            entry.method === "session/prompt" && JSON.stringify(entry).includes('"/compact"'),
+        ),
+      );
+      assert.isTrue(
+        runtimeEvents.some(
+          (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+        ),
+      );
+
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("closes the ACP child process when a session stops", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-stop-session-close");

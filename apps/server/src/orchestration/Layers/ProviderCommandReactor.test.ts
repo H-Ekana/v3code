@@ -12,6 +12,14 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
+  V3_DEMO_PROJECT_ID,
+  V3_DEMO_RESPONDER_ENV,
+  V3_DEMO_RESPONDER_INSTANCE_ID,
+  V3_DEMO_RESPONDER_MODEL,
+  V3_DEMO_RESPONSE_TEXT,
+  V3_DEMO_THREAD_ID,
+} from "@t3tools/shared/v3Demo";
+import {
   ApprovalRequestId,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -99,6 +107,7 @@ describe("ProviderCommandReactor", () => {
   const createdBaseDirs = new Set<string>();
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -143,12 +152,15 @@ describe("ProviderCommandReactor", () => {
 
   async function createHarness(input?: {
     readonly baseDir?: string;
+    readonly projectId?: ProjectId;
+    readonly threadId?: ThreadId;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    readonly compactConversationEffect?: ProviderServiceShape["compactConversation"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -163,6 +175,8 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
     };
+    const projectId = input?.projectId ?? asProjectId("project-1");
+    const threadId = input?.threadId ?? ThreadId.make("thread-1");
     const startSessionEffect = input?.startSessionEffect;
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
@@ -232,6 +246,9 @@ describe("ProviderCommandReactor", () => {
       }),
     );
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
+    const compactConversation = vi.fn<ProviderServiceShape["compactConversation"]>(
+      input?.compactConversationEffect ?? (() => Effect.void),
+    );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((input: unknown) =>
@@ -308,6 +325,7 @@ describe("ProviderCommandReactor", () => {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
+      compactConversation,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
@@ -395,7 +413,7 @@ describe("ProviderCommandReactor", () => {
       engine.dispatch({
         type: "project.create",
         commandId: CommandId.make("cmd-project-create"),
-        projectId: asProjectId("project-1"),
+        projectId,
         title: "Provider Project",
         workspaceRoot: "/tmp/provider-project",
         defaultModelSelection: modelSelection,
@@ -406,8 +424,8 @@ describe("ProviderCommandReactor", () => {
       engine.dispatch({
         type: "thread.create",
         commandId: CommandId.make("cmd-thread-create"),
-        threadId: ThreadId.make("thread-1"),
-        projectId: asProjectId("project-1"),
+        threadId,
+        projectId,
         title: "Thread",
         modelSelection: modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -424,6 +442,7 @@ describe("ProviderCommandReactor", () => {
       startSession,
       sendTurn,
       interruptTurn,
+      compactConversation,
       respondToRequest,
       respondToUserInput,
       stopSession,
@@ -475,6 +494,184 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("streams the local test response for the V3 demo project without calling a provider", async () => {
+    vi.stubEnv(V3_DEMO_RESPONDER_ENV, "1");
+    const demoThreadId = ThreadId.make(V3_DEMO_THREAD_ID);
+    const harness = await createHarness({
+      projectId: asProjectId(V3_DEMO_PROJECT_ID),
+      threadId: demoThreadId,
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-v3-demo-turn-start"),
+        threadId: demoThreadId,
+        message: {
+          messageId: asMessageId("v3-demo-user-message"),
+          role: "user",
+          text: "exercise the chat animations",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === demoThreadId);
+      return (
+        thread?.session?.status === "ready" &&
+        thread.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.text === V3_DEMO_RESPONSE_TEXT &&
+            !message.streaming,
+        )
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === demoThreadId);
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      text: V3_DEMO_RESPONSE_TEXT,
+      streaming: false,
+    });
+  });
+
+  it("uses the real provider path for a new thread in the V3 demo project", async () => {
+    vi.stubEnv(V3_DEMO_RESPONDER_ENV, "1");
+    const harness = await createHarness({
+      projectId: asProjectId(V3_DEMO_PROJECT_ID),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-v3-demo-project-real-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("v3-demo-project-real-user-message"),
+          role: "user",
+          text: "use the configured provider",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the local responder when a new thread explicitly selects it", async () => {
+    vi.stubEnv(V3_DEMO_RESPONDER_ENV, "1");
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-selected-v3-demo-responder"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("selected-v3-demo-responder-user-message"),
+          role: "user",
+          text: "exercise the new-chat animation",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make(V3_DEMO_RESPONDER_INSTANCE_ID),
+          model: V3_DEMO_RESPONDER_MODEL,
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.session?.status === "ready" &&
+        thread.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.text === V3_DEMO_RESPONSE_TEXT &&
+            !message.streaming,
+        )
+      );
+    });
+
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("interrupts the V3 demo response locally without calling a provider", async () => {
+    vi.stubEnv(V3_DEMO_RESPONDER_ENV, "1");
+    const demoThreadId = ThreadId.make(V3_DEMO_THREAD_ID);
+    const harness = await createHarness({
+      projectId: asProjectId(V3_DEMO_PROJECT_ID),
+      threadId: demoThreadId,
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-v3-demo-interrupt-start"),
+        threadId: demoThreadId,
+        message: {
+          messageId: asMessageId("v3-demo-interrupt-user-message"),
+          role: "user",
+          text: "start then stop",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads.find((entry) => entry.id === demoThreadId)?.session?.status === "running"
+      );
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-v3-demo-interrupt"),
+        threadId: demoThreadId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads.find((entry) => entry.id === demoThreadId)?.session?.status ===
+        "interrupted"
+      );
+    });
+
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
@@ -1756,6 +1953,41 @@ describe("ProviderCommandReactor", () => {
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
       threadId: "thread-1",
     });
+  });
+
+  it("projects context compaction as running before invoking the provider", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.context.compact",
+        commandId: CommandId.make("cmd-context-compact"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.compactConversation.mock.calls.length === 1);
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "context-compaction.started") ?? false
+      );
+    });
+
+    expect(harness.compactConversation.mock.calls[0]?.[0]).toEqual({
+      threadId: ThreadId.make("thread-1"),
+    });
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "context-compaction.started")
+        ?.payload,
+    ).toEqual({ status: "inProgress" });
   });
 
   it("starts a fresh session when only projected session state exists", async () => {

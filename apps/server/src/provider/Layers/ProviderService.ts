@@ -45,7 +45,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterRequestError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -72,6 +76,10 @@ type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["S
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
+});
+
+const ProviderCompactConversationInput = Schema.Struct({
+  threadId: ThreadId,
 });
 
 function toValidationError(
@@ -754,6 +762,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const compactConversation: ProviderServiceMethod<"compactConversation"> = Effect.fn(
+    "compactConversation",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.compactConversation",
+      schema: ProviderCompactConversationInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.compactConversation",
+      allowRecovery: true,
+    });
+    if (!routed.adapter.compactThread) {
+      return yield* new ProviderAdapterRequestError({
+        provider: routed.adapter.provider,
+        method: "thread.context.compact",
+        detail: "This provider does not expose native context compaction.",
+      });
+    }
+    yield* Effect.annotateCurrentSpan({
+      "provider.operation": "compact-context",
+      "provider.kind": routed.adapter.provider,
+      "provider.thread_id": input.threadId,
+    });
+    yield* routed.adapter.compactThread(routed.threadId);
+    yield* analytics.record("provider.context.compacted", {
+      provider: routed.adapter.provider,
+    });
+  });
+
   const respondToRequest: ProviderServiceMethod<"respondToRequest"> = Effect.fn("respondToRequest")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -1072,6 +1111,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     startSession,
     sendTurn,
     interruptTurn,
+    compactConversation,
     respondToRequest,
     respondToUserInput,
     stopSession,

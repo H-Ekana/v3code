@@ -1355,6 +1355,26 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         );
       });
 
+    const compactThread: NonNullable<GrokAdapterShape["compactThread"]> = (threadId) =>
+      Effect.gen(function* () {
+        const compactTurn = yield* sendTurn({
+          threadId,
+          input: "/compact",
+          attachments: [],
+        });
+        yield* offerRuntimeEvent({
+          type: "thread.state.changed",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId,
+          turnId: compactTurn.turnId,
+          payload: {
+            state: "compacted",
+            detail: { source: "manual", command: "/compact" },
+          },
+        });
+      });
+
     const respondToRequest: GrokAdapterShape["respondToRequest"] = (
       threadId,
       requestId,
@@ -1450,6 +1470,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
       startSession,
       sendTurn,
       interruptTurn,
+      compactThread,
       readThread,
       rollbackThread,
       respondToRequest,
