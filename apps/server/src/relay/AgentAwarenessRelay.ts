@@ -22,6 +22,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -113,6 +114,11 @@ export function resolveAgentActivityPublishingStartupState(input: {
   }
   return input.publishEnabled ? "enabled" : "disabled";
 }
+
+/** First retry gap for the initial active-threads snapshot. */
+const ACTIVE_SNAPSHOT_RETRY_MIN_MS = 5_000;
+/** Ceiling for that retry gap once T3 Connect looks absent rather than slow. */
+const ACTIVE_SNAPSHOT_RETRY_MAX_MS = 5 * 60_000;
 
 const RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH = 160;
 const REDACTED_RELAY_AGENT_FAILURE_DETAIL = "The agent run failed.";
@@ -541,23 +547,28 @@ export const make = Effect.gen(function* () {
     return true;
   });
 
-  const publishActiveThreadsOnceWhenConfigured = (logEnabledWhenReady: boolean) =>
-    Effect.gen(function* () {
-      while (!(yield* Ref.get(activeSnapshotPublishedRef))) {
-        const published = yield* publishActiveThreadsUnsafe.pipe(Effect.orElseSucceed(() => false));
-        if (published) {
-          yield* Ref.set(activeSnapshotPublishedRef, true);
-          if (logEnabledWhenReady) {
-            const relayConfig = yield* readRelayConfig.pipe(Effect.orElseSucceed(() => null));
-            yield* Effect.logInfo("agent activity publishing enabled after link reconciliation", {
-              relayUrl: relayConfig?.url,
-            });
-          }
-          return;
-        }
-        yield* Effect.sleep("5 seconds");
+  /**
+   * Retries the first snapshot until it lands, backing off as it goes.
+   *
+   * This has no terminating condition by design — T3 Connect can be linked long
+   * after startup, and the orchestration listener must be armed when it is. But
+   * on an install that is never linked (the common case) a fixed interval means
+   * a wakeup every 5s for the life of the process, doing nothing. Backing off to
+   * a long idle period keeps runtime linking working while making the unlinked
+   * case effectively free.
+   */
+  const publishActiveThreadsOnceWhenConfigured = Effect.gen(function* () {
+    let retryDelayMs = ACTIVE_SNAPSHOT_RETRY_MIN_MS;
+    while (!(yield* Ref.get(activeSnapshotPublishedRef))) {
+      const published = yield* publishActiveThreadsUnsafe.pipe(Effect.orElseSucceed(() => false));
+      if (published) {
+        yield* Ref.set(activeSnapshotPublishedRef, true);
+        return;
       }
-    });
+      yield* Effect.sleep(Duration.millis(retryDelayMs));
+      retryDelayMs = Math.min(retryDelayMs * 2, ACTIVE_SNAPSHOT_RETRY_MAX_MS);
+    }
+  });
 
   const worker = yield* makeDrainableWorker(publishThread);
 
@@ -587,7 +598,7 @@ export const make = Effect.gen(function* () {
       switch (startupState) {
         case "waiting-for-link":
           yield* Effect.logInfo(
-            "agent activity publishing standby; waiting for T3 Connect link reconciliation",
+            "agent activity publishing inactive; no T3 Connect link is configured. Restart the server after linking to enable it.",
           );
           break;
         case "disabled":
@@ -599,10 +610,9 @@ export const make = Effect.gen(function* () {
           });
           break;
       }
+
       yield* Effect.forkScoped(
-        Effect.sleep("1 second").pipe(
-          Effect.andThen(publishActiveThreadsOnceWhenConfigured(startupState !== "enabled")),
-        ),
+        Effect.sleep("1 second").pipe(Effect.andThen(publishActiveThreadsOnceWhenConfigured)),
       );
       yield* Effect.forkScoped(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
