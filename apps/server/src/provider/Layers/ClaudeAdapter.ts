@@ -57,6 +57,7 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -69,6 +70,15 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { buildClaudeHarnessInstructions } from "../ClaudeDeveloperInstructions.ts";
+import {
+  type CodexCompanionJobRecord,
+  isTerminalCompanionStatus,
+  parseLaunchedCodexJobId,
+  readCompanionJobRecord,
+  readCompanionProgressSince,
+  resolveCompanionJobsDir,
+} from "../codexCompanionJobs.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
@@ -94,6 +104,21 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJ
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+
+/** How often a detached Codex companion job's progress log is tailed. */
+const COMPANION_POLL_INTERVAL_MS = 2_000;
+/**
+ * Upper bound on watching a single job, so a companion that dies without
+ * writing a terminal status cannot leave a fiber polling forever.
+ */
+const COMPANION_WATCH_LIMIT_MS = 2 * 60 * 60 * 1_000;
+/**
+ * Give up if the job record never materialises — the launch line was parsed but
+ * the store is somewhere we cannot see (different workspace root, or the plugin
+ * wrote under a state dir we did not resolve).
+ */
+const COMPANION_MISSING_RECORD_POLL_LIMIT = 30;
+
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -195,6 +220,25 @@ interface ClaudeSessionContext {
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
+  /** Working directory, used to locate the Codex companion's job store. */
+  readonly cwd: string | undefined;
+  /**
+   * `tool_use_id` of a Task call -> the `task_id` of the subagent it spawned.
+   * Messages produced *inside* a subagent carry that tool_use_id as their
+   * `parent_tool_use_id`, so this is how a tool result gets attributed to an
+   * agent — the SDK never states the linkage the other way round.
+   */
+  readonly agentIdByToolUseId: Map<string, string>;
+  /** Detached Codex companion job watchers, keyed by companion job id. */
+  readonly companionWatchers: Map<string, Fiber.Fiber<void, never>>;
+  /**
+   * Every companion job this session has ever watched. Separate from
+   * `companionWatchers`, which is emptied as fibers finish: re-detecting a
+   * settled job's launch line would otherwise start a second watcher that reads
+   * the terminal record and delivers the same result into the conversation
+   * twice. Deduplication has to outlive the fiber, so it lives here.
+   */
+  readonly companionJobsSeen: Set<string>;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
@@ -2365,6 +2409,266 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  /**
+   * Streams a detached Codex companion job's progress onto the roster card of
+   * the subagent that launched it.
+   *
+   * The `codex:codex-rescue` subagent is a thin forwarder: it shells out once,
+   * gets a job id back, and finishes in ~30s while the real Codex work runs for
+   * minutes in a process that never talks to this adapter. Without this the
+   * card shows a lone `Bash` row and then nothing. The companion already
+   * records everything we need to disk, so we tail it and re-emit it as normal
+   * task events — the roster reducer cannot tell the difference.
+   */
+  /**
+   * Feeds a finished job's output back into the conversation.
+   *
+   * The roster knowing the job finished is not enough: the forwarder's Task
+   * tool completed minutes earlier, so the main thread ended its turn and has
+   * no way to learn the outcome. It routinely promises to "relay the report
+   * once it finishes" and then never does. Handing the result back as ordinary
+   * turn input is what makes that promise keepable.
+   *
+   * `sendTurn` already does the right thing in both states — it starts a turn
+   * when the thread is idle and steers the live one when it is not.
+   */
+  const deliverCompanionResult = Effect.fn("deliverCompanionResult")(function* (
+    context: ClaudeSessionContext,
+    jobId: string,
+    record: CodexCompanionJobRecord,
+  ) {
+    if (!record.result) {
+      return;
+    }
+    const label = record.title ?? "Codex background job";
+    const outcome =
+      record.status === "completed"
+        ? "finished"
+        : record.status === "cancelled"
+          ? "was cancelled"
+          : "failed";
+    // Provenance up front: without it this reads as the user speaking, and the
+    // model has no way to tell delegated output from a new instruction.
+    const text = [
+      `[automated] The detached Codex job \`${jobId}\` (${label}) ${outcome}.`,
+      "This is its final output, delivered by the runtime rather than by the user.",
+      "",
+      record.result.trim(),
+    ].join("\n");
+
+    yield* Effect.logDebug("claude.companionJob.delivering", {
+      jobId,
+      status: record.status,
+      resultLength: record.result.length,
+    });
+
+    yield* sendTurn({
+      threadId: context.session.threadId,
+      input: text,
+      attachments: [],
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("claude.companionJob.deliveryFailed", {
+          jobId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+  });
+
+  const watchCompanionJob = (context: ClaudeSessionContext, agentId: string, jobId: string) =>
+    Effect.gen(function* () {
+      // `cwd` is optional on startSession (threads without a persisted one),
+      // so fall back to the server's workspace rather than silently disabling.
+      const workspaceRoot = context.cwd ?? serverConfig.cwd;
+      if (!workspaceRoot) {
+        return;
+      }
+      const jobsDir = resolveCompanionJobsDir(workspaceRoot);
+      if (!jobsDir) {
+        return;
+      }
+
+      const taskId = RuntimeTaskId.make(agentId);
+      let offset = 0;
+      let inode: number | undefined;
+      let lastPhase: string | undefined;
+      let waitedMs = 0;
+      let pollsWithoutRecord = 0;
+      // Whether this watcher has taken responsibility for the card's status.
+      // Once it has, it owes the card a terminal event on *every* exit path.
+      let pinnedRunning = false;
+
+      /**
+       * Settles the card when the watcher gives up without seeing the job
+       * finish. Without this a card pinned to `running` stays that way forever
+       * — the "Working for 8h" wedge this app exists to avoid. The companion's
+       * SessionEnd hook deletes job records out from under us, so abandoning a
+       * watch is a routine event, not an edge case.
+       */
+      const settleAbandoned = Effect.fn("watchCompanionJob.abandon")(function* (reason: string) {
+        if (!pinnedRunning) {
+          return;
+        }
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "task.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          payload: {
+            taskId,
+            status: "failed",
+            endTime: stamp.createdAt,
+            errorMessage: `Lost track of the Codex background job (${reason}).`,
+            timelineBypass: true,
+          },
+        });
+      });
+
+      const emitProgressEvents = Effect.fn("watchCompanionJob.poll")(function* () {
+        const record = readCompanionJobRecord(jobsDir, jobId);
+        const progress = readCompanionProgressSince(jobsDir, jobId, offset, inode);
+        offset = progress.nextOffset;
+        inode = progress.inode;
+
+        if (!record) {
+          pollsWithoutRecord += 1;
+          if (pollsWithoutRecord >= COMPANION_MISSING_RECORD_POLL_LIMIT) {
+            yield* settleAbandoned("its record disappeared");
+            return true;
+          }
+          return false;
+        }
+        pollsWithoutRecord = 0;
+
+        const description = record.title ?? "Codex background job";
+        const settled = isTerminalCompanionStatus(record.status);
+
+        // Re-assert `running` before replaying lines. The forwarder subagent
+        // settles long before the job does, and a settled card suppresses
+        // `currentActivity` in the reducer — so without this the feed would
+        // fill in but the card would still read as finished.
+        if (!settled && (progress.lines.length > 0 || record.phase !== lastPhase)) {
+          lastPhase = record.phase;
+          pinnedRunning = true;
+          const stamp = yield* makeEventStamp();
+          yield* offerRuntimeEvent({
+            type: "task.updated",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            createdAt: stamp.createdAt,
+            threadId: context.session.threadId,
+            payload: {
+              taskId,
+              status: "running",
+              ...(record.phase ? { phaseTitle: record.phase } : {}),
+              timelineBypass: true,
+            },
+          });
+        }
+
+        for (const line of progress.lines) {
+          const stamp = yield* makeEventStamp();
+          yield* offerRuntimeEvent({
+            type: "task.progress",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            createdAt: stamp.createdAt,
+            threadId: context.session.threadId,
+            payload: {
+              taskId,
+              description,
+              summary: line.message,
+              ...(line.outcome ? { outcome: line.outcome } : {}),
+              timelineBypass: true,
+            },
+          });
+        }
+
+        if (!settled) {
+          return false;
+        }
+
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "task.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          payload: {
+            taskId,
+            status:
+              record.status === "completed"
+                ? "completed"
+                : record.status === "cancelled"
+                  ? "killed"
+                  : "failed",
+            endTime: stamp.createdAt,
+            ...(record.phase ? { phaseTitle: record.phase } : {}),
+            timelineBypass: true,
+          },
+        });
+
+        yield* deliverCompanionResult(context, jobId, record);
+        return true;
+      });
+
+      while (waitedMs < COMPANION_WATCH_LIMIT_MS) {
+        if (context.stopped) {
+          // The session is going away; leave the card settled rather than
+          // frozen mid-run for whoever reopens the thread.
+          yield* settleAbandoned("the session ended");
+          return;
+        }
+        const done = yield* emitProgressEvents();
+        if (done) {
+          return;
+        }
+        yield* Effect.sleep(Duration.millis(COMPANION_POLL_INTERVAL_MS));
+        waitedMs += COMPANION_POLL_INTERVAL_MS;
+      }
+      yield* settleAbandoned("it exceeded the watch limit");
+    });
+
+  const startCompanionWatcher = Effect.fn("startCompanionWatcher")(function* (
+    context: ClaudeSessionContext,
+    agentId: string,
+    jobId: string,
+  ) {
+    // Checked against the durable set, not the live fiber map: the launch line
+    // is re-observable after the job has already settled (the main thread
+    // quotes it back, a result is replayed), and a second watcher would find a
+    // terminal record and deliver the same output into the conversation again.
+    if (context.companionJobsSeen.has(jobId)) {
+      return;
+    }
+    context.companionJobsSeen.add(jobId);
+    yield* Effect.logDebug("claude.companionWatcher.starting", { jobId, agentId });
+    // Daemon: the job outlives the message handler that observed its launch,
+    // and often the turn as well. Teardown is explicit in stopSessionInternal.
+    const fiber = yield* Effect.forkDetach(
+      watchCompanionJob(context, agentId, jobId).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logDebug("claude.companionWatcher.failed", {
+            jobId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+    );
+    context.companionWatchers.set(jobId, fiber);
+    // Drop the reference once it finishes; a long session can launch many jobs
+    // and the map would otherwise retain a fiber per job until teardown.
+    fiber.addObserver(() => {
+      if (context.companionWatchers.get(jobId) === fiber) {
+        context.companionWatchers.delete(jobId);
+      }
+    });
+  });
+
   const handleUserMessage = Effect.fn("handleUserMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -2375,6 +2679,40 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (context.turnState) {
       context.turnState.items.push(message.message);
+    }
+
+    // Deliberately ahead of the in-flight-tool matching below: `inFlightTools`
+    // is keyed by content-block index, and a sub-agent's blocks share that
+    // index space with its parent's, so a parent block can evict the
+    // sub-agent's entry before its result lands. Detection needs only the
+    // result text and `parent_tool_use_id`, so it must not ride on that match.
+    for (const toolResult of toolResultBlocksFromUserMessage(message)) {
+      if (toolResult.isError) {
+        continue;
+      }
+      const companionJobId = parseLaunchedCodexJobId(toolResult.text);
+      if (!companionJobId) {
+        continue;
+      }
+      // `parent_tool_use_id` is the Task call that spawned the sub-agent whose
+      // Bash call this is — i.e. the rescue forwarder's own card. The SDK sets
+      // it on sub-agent tool_result blocks unconditionally, so this does not
+      // depend on `forwardSubagentText`.
+      const parentToolUseId = message.parent_tool_use_id;
+      const launchingAgentId = parentToolUseId
+        ? context.agentIdByToolUseId.get(parentToolUseId)
+        : undefined;
+      yield* Effect.logDebug("claude.companionJob.detected", {
+        jobId: companionJobId,
+        // A null parent is normal and expected: the main thread quoting the
+        // launch line back in its own reply produces one. Only a *non*-null
+        // parent with no mapped agent would indicate lost attribution.
+        parentToolUseId: parentToolUseId ?? null,
+        launchingAgentId: launchingAgentId ?? null,
+      });
+      if (launchingAgentId) {
+        yield* startCompanionWatcher(context, launchingAgentId, companionJobId);
+      }
     }
 
     for (const toolResult of toolResultBlocksFromUserMessage(message)) {
@@ -2741,6 +3079,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const toolUseId = readString(record.tool_use_id);
         const workflowName = readString(record.workflow_name);
         const prompt = readString(record.prompt);
+        if (toolUseId) {
+          context.agentIdByToolUseId.set(toolUseId, message.task_id);
+        }
         yield* offerRuntimeEvent({
           ...base,
           type: "task.started",
@@ -3293,6 +3634,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* Fiber.interrupt(streamFiber);
     }
 
+    // Companion watchers are daemons, so nothing else reaps them. `stopped` is
+    // already true above, which also makes each loop exit on its own next tick.
+    const companionWatchers = Array.from(context.companionWatchers.values());
+    context.companionWatchers.clear();
+    for (const watcher of companionWatchers) {
+      if (watcher.pollUnsafe() === undefined) {
+        yield* Fiber.interrupt(watcher);
+      }
+    }
+
     yield* Effect.try({
       try: () => context.query.close(),
       catch: (cause) =>
@@ -3748,11 +4099,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(ultracode ? { ultracode: true } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const harnessInstructions = buildClaudeHarnessInstructions();
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          // Shipped with the app, not read from the project, so behaviour is
+          // identical on a machine that has never seen this repo.
+          append: harnessInstructions,
+        },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
         // normalized to `xhigh` above and paired with `settings.ultracode`.
@@ -3867,6 +4225,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turns: [],
         inFlightTools,
         claudeTasks,
+        ...(input.cwd ? { cwd: input.cwd } : { cwd: undefined }),
+        agentIdByToolUseId: new Map<string, string>(),
+        companionWatchers: new Map<string, Fiber.Fiber<void, never>>(),
+        companionJobsSeen: new Set<string>(),
         turnState: undefined,
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
@@ -4065,6 +4427,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const compactThread: NonNullable<ClaudeAdapterShape["compactThread"]> = Effect.fn(
+    "compactThread",
+  )(function* (threadId) {
+    yield* sendTurn({
+      threadId,
+      input: "/compact",
+      attachments: [],
+    });
+  });
+
   const readThread: ClaudeAdapterShape["readThread"] = Effect.fn("readThread")(
     function* (threadId) {
       const context = yield* requireSession(threadId);
@@ -4168,6 +4540,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     startSession,
     sendTurn,
     interruptTurn,
+    compactThread,
     readThread,
     rollbackThread,
     respondToRequest,

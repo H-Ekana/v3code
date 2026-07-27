@@ -109,6 +109,7 @@ function createProviderServiceHarness() {
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
     interruptTurn: () => unsupported(),
+    compactConversation: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
@@ -430,6 +431,94 @@ describe("ProviderRuntimeIngestion", () => {
       delegateProvider: "codex",
       agentType: "codex:codex-rescue",
     });
+  });
+
+  it("revives a settled rescue forwarder while its detached Codex job keeps running", () => {
+    const agents = new Map<string, ThreadAgentSnapshot>();
+    const base = {
+      eventId: asEventId("companion-evt"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      threadId: asThreadId("thread-1"),
+    } as const;
+
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.started",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("rescue-1"),
+        description: "Codex rescue",
+        taskType: "local_agent",
+        agentType: "codex:codex-rescue",
+      },
+    });
+
+    // The forwarder finishes ~30s in, long before the job it launched.
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.completed",
+      createdAt: "2026-01-01T00:00:30.000Z",
+      payload: { taskId: RuntimeTaskId.make("rescue-1"), status: "completed" },
+    });
+    expect(agents.get("rescue-1")?.status).toBe("completed");
+
+    // The companion watcher re-pins it to running and streams the real work.
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.updated",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("rescue-1"),
+        status: "running",
+        phaseTitle: "verifying",
+        timelineBypass: true,
+      },
+    });
+    const revived = agents.get("rescue-1");
+    expect(revived?.status).toBe("running");
+    expect(revived?.phaseTitle).toBe("verifying");
+    // Reviving must not lose the delegate icon resolved at launch.
+    expect(revived?.delegateProvider).toBe("codex");
+
+    expect(
+      foldTaskAgentEvent(agents, {
+        ...base,
+        type: "task.progress",
+        createdAt: "2026-01-01T00:01:02.000Z",
+        payload: {
+          taskId: RuntimeTaskId.make("rescue-1"),
+          description: "Codex Task",
+          summary: "Command failed: pnpm test (exit 1)",
+          outcome: "error",
+          timelineBypass: true,
+        },
+      }),
+    ).toBe(true);
+    const running = agents.get("rescue-1");
+    expect(running?.currentActivity).toBe("Command failed: pnpm test (exit 1)");
+    expect(running?.recentActivity.at(-1)).toMatchObject({
+      summary: "Command failed: pnpm test (exit 1)",
+      outcome: "error",
+    });
+
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.updated",
+      createdAt: "2026-01-01T00:40:00.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("rescue-1"),
+        status: "failed",
+        endTime: "2026-01-01T00:40:00.000Z",
+        timelineBypass: true,
+      },
+    });
+    const settled = agents.get("rescue-1");
+    expect(settled?.status).toBe("failed");
+    expect(settled?.endedAt).toBe("2026-01-01T00:40:00.000Z");
+    // A settled card shows its outcome, not a stale in-flight line.
+    expect(settled?.currentActivity).toBeUndefined();
+    // The feed survives settling — that history is the whole point.
+    expect(settled?.recentActivity.at(-1)?.outcome).toBe("error");
   });
 
   it("appends latest-wins agent rosters only on material changes and sweeps orphans", async () => {

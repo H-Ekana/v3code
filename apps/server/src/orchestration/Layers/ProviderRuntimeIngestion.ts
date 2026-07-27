@@ -181,6 +181,7 @@ export function foldTaskAgentEvent(
   const activityChanged =
     (summary !== undefined && summary !== previous?.currentActivity) ||
     (lastToolName !== undefined && lastToolName !== previous?.lastToolName);
+  const outcome = "outcome" in payload ? payload.outcome : undefined;
   const recentActivity = activityChanged
     ? [
         ...(previous?.recentActivity ?? []),
@@ -189,6 +190,7 @@ export function foldTaskAgentEvent(
           // Bounded: Codex child item summaries can carry full command/item
           // text, and each entry is duplicated into every roster snapshot.
           summary: boundAgentText(summary ?? lastToolName ?? "Activity updated"),
+          ...(outcome ? { outcome } : {}),
         },
       ].slice(-THREAD_AGENT_RECENT_ACTIVITY_LIMIT)
     : (previous?.recentActivity ?? []);

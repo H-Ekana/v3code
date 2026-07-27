@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -246,6 +247,38 @@ async function readFirstPromptText(
   return content.text;
 }
 
+/**
+ * Text of the nth message offered to the prompt queue. Used to assert on input
+ * the runtime injects itself, which by definition is not the first message.
+ */
+function readNthPromptText(
+  input: { readonly prompt: AsyncIterable<SDKUserMessage> } | undefined,
+  index: number,
+): Effect.Effect<string | undefined> {
+  return Effect.promise(async () => {
+    const iterator = input?.prompt[Symbol.asyncIterator]();
+    if (!iterator) {
+      return undefined;
+    }
+    for (let position = 0; position <= index; position += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        return undefined;
+      }
+      if (position !== index) {
+        continue;
+      }
+      const content = next.value.message.content;
+      if (typeof content === "string") {
+        return content;
+      }
+      const block = content[0];
+      return block && block.type === "text" ? block.text : undefined;
+    }
+    return undefined;
+  });
+}
+
 async function readFirstPromptMessage(
   input:
     | {
@@ -356,6 +389,29 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("routes manual context compaction through Claude's compact command", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.ok(adapter.compactThread);
+      yield* adapter.compactThread(THREAD_ID);
+
+      const promptText = yield* Effect.promise(() =>
+        readFirstPromptText(harness.getLastCreateQueryInput()),
+      );
+      assert.equal(promptText, "/compact");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("forwards sub-agent text so child activity reaches the agent roster", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -374,6 +430,203 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("ships harness instructions in the system prompt, not via project files", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const systemPrompt = harness.getLastCreateQueryInput()?.options.systemPrompt;
+      assert.equal(
+        typeof systemPrompt === "object" && !Array.isArray(systemPrompt)
+          ? systemPrompt.preset
+          : undefined,
+        "claude_code",
+        "must extend the preset rather than replace it",
+      );
+      const append =
+        typeof systemPrompt === "object" && !Array.isArray(systemPrompt)
+          ? systemPrompt.append
+          : undefined;
+      // The behaviour must travel with the installer: a fresh machine opening
+      // an unrelated project gets this without any repo-level configuration.
+      assert.ok(append?.includes("[automated]"), "expected the delegated-output contract");
+      assert.ok(
+        append?.includes("thin forwarder"),
+        "expected the rescue-forwarder caveat, which is harness behaviour",
+      );
+      // A personal model/effort preference would be wrong for anyone else who
+      // installs the app, so it must not be baked into the shipped prompt.
+      assert.ok(!append?.includes("gpt-5.6-sol"), "must not ship user-specific preferences");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("streams a detached Codex companion job onto the launching agent's card", () => {
+    // A rescue forwarder shells out once and exits; the real Codex work runs in
+    // a detached process that never reaches this adapter. The companion writes
+    // its progress to disk, so stand up a realistic job store and assert the
+    // adapter replays it against the forwarder's own task id.
+    const pluginData = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-plugin-"));
+    const workspace = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "v3code-ws-"));
+    const canonicalWorkspace = NodeFS.realpathSync.native(workspace);
+    const slug = NodePath.basename(workspace).replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const hash = NodeCrypto.createHash("sha256")
+      .update(canonicalWorkspace)
+      .digest("hex")
+      .slice(0, 16);
+    const jobsDir = NodePath.join(pluginData, "state", `${slug}-${hash}`, "jobs");
+    NodeFS.mkdirSync(jobsDir, { recursive: true });
+
+    const jobId = "task-mdk3j2-a8f9x1";
+    // Already settled, so the watcher drains in a single poll and the test does
+    // not depend on wall-clock sleeps.
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, `${jobId}.json`),
+      JSON.stringify({
+        id: jobId,
+        status: "failed",
+        phase: "verifying",
+        title: "Codex Task",
+        rendered: "NOT CONFIRMED - the guard is missing at foo.ts:12",
+      }),
+      "utf8",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, `${jobId}.log`),
+      "[2026-07-27T12:00:00.000Z] Running command: pnpm test\n" +
+        "[2026-07-27T12:04:00.000Z] Command failed: pnpm test (exit 1)\n",
+      "utf8",
+    );
+
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = pluginData;
+
+    const harness = makeHarness({ cwd: workspace });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "rescue this", attachments: [] });
+
+      // The forwarder subagent starts; this is what links its Task tool_use_id
+      // to the task id its card is keyed by.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: "sdk-session-companion",
+        uuid: "task-started-1",
+        task_id: "agent-rescue-1",
+        description: "Codex rescue",
+        task_type: "local_agent",
+        subagent_type: "codex:codex-rescue",
+        tool_use_id: "toolu-task-1",
+      } as unknown as SDKMessage);
+
+      // The forwarder's single Bash call.
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-companion",
+        uuid: "companion-tool-start",
+        parent_tool_use_id: "toolu-task-1",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-bash-1",
+            name: "Bash",
+            input: { command: "node codex-companion.mjs task --background" },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-companion",
+        uuid: "companion-tool-stop",
+        parent_tool_use_id: "toolu-task-1",
+        event: { type: "content_block_stop", index: 0 },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-companion",
+        uuid: "companion-tool-result",
+        parent_tool_use_id: "toolu-task-1",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-bash-1",
+              content: `Codex Task started in the background as ${jobId}. Check /codex:status ${jobId} for progress.`,
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      for (let tick = 0; tick < 40; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+      runtimeEventsFiber.interruptUnsafe();
+
+      const progress = runtimeEvents.filter((event) => event.type === "task.progress");
+      assert.deepEqual(
+        progress.map((event) => event.payload.summary),
+        ["Running command: pnpm test", "Command failed: pnpm test (exit 1)"],
+      );
+      // Attributed to the forwarder's card, not to a floating orphan row.
+      assert.equal(String(progress[0]?.payload.taskId), "agent-rescue-1");
+      assert.equal(progress[1]?.payload.outcome, "error");
+
+      // The job's own terminal status settles the card, so it does not hang
+      // "running" after the forwarder already finished.
+      const settled = runtimeEvents.filter(
+        (event) => event.type === "task.updated" && event.payload.status === "failed",
+      );
+      assert.equal(settled.length, 1);
+
+      // The forwarder's turn ended minutes ago, so the main thread only learns
+      // the outcome if the runtime hands it back as turn input.
+      const delivered = yield* readNthPromptText(harness.getLastCreateQueryInput(), 1);
+      assert.ok(
+        delivered?.includes("NOT CONFIRMED - the guard is missing at foo.ts:12"),
+        `expected Codex's result to be delivered into the conversation, got: ${delivered}`,
+      );
+      // Provenance, so the model does not read delegated output as a user instruction.
+      assert.ok(delivered?.startsWith("[automated]"), "expected an automated-origin marker");
+      assert.ok(delivered?.includes(jobId), "expected the job id for traceability");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousPluginData === undefined) {
+            delete process.env.CLAUDE_PLUGIN_DATA;
+          } else {
+            process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+          }
+        }),
+      ),
     );
   });
 

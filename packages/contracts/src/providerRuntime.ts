@@ -520,6 +520,9 @@ const TaskProgressPayload = Schema.Struct({
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(RuntimeTaskUsage),
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  // Health of this single step (a failed command inside a still-running agent),
+  // carried onto the roster's activity entry. Absent means unknown, not success.
+  outcome: Schema.optional(Schema.Literals(["ok", "error"])),
   ...TaskAgentLinkage,
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;

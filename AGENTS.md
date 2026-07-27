@@ -38,8 +38,18 @@ an unresponsive stop button — that failure mode is already diagnosed and has a
   survives a config change and is visible in the transcript.
 - `--effort` accepts `none | minimal | low | medium | high | xhigh`.
 - A `codex:codex-rescue` subagent is a thin forwarder: it launches a detached background Codex job
-  and completes in ~30s, so it shows as finished in the Agents panel while the real job runs for
-  minutes. Never report a rescue subagent's completion as the work being done.
+  and completes in ~30s. Never report a rescue subagent's completion as the work being done — the
+  job it started is still running.
+- The server now tails that detached job and replays its progress onto the forwarder's own card
+  (`apps/server/src/provider/codexCompanionJobs.ts`), so the Agents panel reflects the real work
+  rather than a lone `Bash` row. The card is re-pinned to `running` after the forwarder settles and
+  only settles again when the job itself does.
+- When the job finishes, its final output is delivered back into the thread as turn input prefixed
+  with `[automated]`. That contract is documented to agents by the app itself, in
+  `apps/server/src/provider/ClaudeDeveloperInstructions.ts`, which is appended to every Claude
+  session's system prompt. Put harness behaviour there rather than here so it ships with the
+  installer; keep this file for repo conventions and never put user preferences in the shipped
+  prompt.
 - To check what a Codex job is actually doing, see the "Where to find out what agents are actually
   doing" section of `docs/project/ideal-agents-sidebar.md` — job registry (`codex-companion.mjs
 status --json`), per-job progress log, and the full session JSONL transcript. Check these
