@@ -1,5 +1,244 @@
 # Known Issues
 
+# 🔴 **CLAUDE STRUCTURED QUESTION CAN VANISH WHILE THE TURN STAYS RUNNING**
+
+## **STATUS: CONFIRMED, NOT FIXED. Live request may be recoverable without restarting.**
+
+A Claude `AskUserQuestion` call can be accepted and persisted correctly while its question card never
+appears in the composer. Ordinary messages sent afterwards are stored and forwarded to Claude's queue,
+but they cannot run because the current provider call is still blocked waiting for the structured
+answer. The user sees a permanent `Working` timer and messages that appear to disappear.
+
+### Verified evidence
+
+Thread `fe577358-c5a6-415b-b180-f9a76d0f6f70` ("Research update-capable installer"), Claude session
+`df06d083-8720-455f-a884-416930998889`, request
+`0e3fa3dc-eccf-4116-aac8-9a2ef5c173a1`:
+
+- Claude's raw JSONL ends at an `AskUserQuestion` tool call containing two complete questions.
+- `orchestration_events` contains the matching `user-input.requested` activity.
+- `projection_thread_activities` contains the complete request and all options.
+- `projection_threads.pending_user_input_count` is `1`.
+- Both later "Hey are you stuck?" messages exist in `projection_thread_messages`.
+- Claude recorded two `queue-operation: enqueue` entries for those messages.
+- The turn and both session tables still report `running`.
+
+This isolates the failure after provider ingestion and persistence: the client did not hydrate or
+render a valid pending-input activity. It is not message loss and it is not an actively thinking
+model.
+
+### Why restart recovery is special
+
+The structured request payload is durable, but the function that can answer it is not.
+`ClaudeAdapter.ts` keeps pending `AskUserQuestion` callbacks in its in-memory `pendingUserInputs`
+map. A server/app restart can therefore leave a perfectly preserved question card whose request ID
+no longer has a live callback. Re-emitting that old card after restart is unsafe: submitting it can
+only fail with `Unknown pending user-input request`.
+
+### Recovery
+
+1. **Before restarting**, submit `thread.user-input.respond` directly with the preserved request ID.
+   If the adapter still owns the callback, Claude continues from the exact blocked position and then
+   drains the queued messages.
+2. If the provider reports an unknown/stale request, close V3 Code, back up the database, settle the
+   stale pending-input activity, interrupt the wedged turn, and restore the questions as ordinary
+   visible assistant text. Reopen the app and answer them in a fresh turn.
+3. Never recreate an interactive question card using a request ID whose live callback is gone.
+
+### Where to fix
+
+| Area                              | Path                                                                    |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| Claude pending callback lifecycle | `apps/server/src/provider/Layers/ClaudeAdapter.ts`                      |
+| Pending-input projection          | `apps/server/src/orchestration/Layers/ProjectionPipeline.ts`            |
+| Client derivation and rendering   | `apps/web/src/session-logic.ts`, `apps/web/src/components/ChatView.tsx` |
+
+The durable fix needs both client hydration coverage and a restart policy: either rehydrate a
+provider-answerable callback, or explicitly expire the persisted request and prompt the user again.
+
+---
+
+# 🔴 **A DELEGATED CODEX JOB CAN BE SILENTLY INTERRUPTED MID-RUN AND REPORT NOTHING**
+
+## **STATUS: CONFIRMED, ROOT CAUSE UNKNOWN. Observed three times on 2026-07-27. Work is recoverable.**
+
+A `codex:codex-rescue` sub-agent launches a detached job, the job runs real work for several minutes,
+and is then **cancelled by something outside itself**. The parent session is never told. There is no
+error, no failed card, no output — the delegation simply never comes back, and the caller is left
+waiting indefinitely on a job that died.
+
+This is distinct from the companion-job stranding issue further down. There, the job _finishes_ and
+the card is stranded. Here the job is _killed_ and the result is destroyed.
+
+## Symptom
+
+- The rescue subagent returns `launched successfully` with a job id in ~25s. **This is meaningless.**
+  The forwarder reports that the job started, not that it will finish.
+- Nothing further ever arrives. No `[automated]` turn input, no failure, no card transition.
+- Waiting longer does not help. The job is already dead by the time you start wondering.
+
+## Verified evidence — three runs, same day
+
+Jobs 1 and 2 were dispatched from session `887fbf7d-ebfa-4f69-8f2e-afb59a9c5913` on a read-only
+research brief. Job 3 came from a different session (`18a5e029-ed9d-4c55-a44e-eca707a99096`) on a
+**write** brief — the motion-foundation slice of the interaction-polish plan. All three used
+`--model gpt-5.6-sol --effort high`.
+
+|                            | Job 1                  | Job 2 (relaunch of the same brief) | Job 3 (different session, write task) |
+| -------------------------- | ---------------------- | ---------------------------------- | ------------------------------------- |
+| Job id                     | `task-ms3hzjly-pwjmgj` | `task-ms3ibzhi-1fm9ff`             | `task-ms3k0p9e-suby04`                |
+| Started (local)            | 22:55:33               | 23:05:13                           | 23:52:19                              |
+| Tool calls completed       | **44**                 | **66**                             | **43**                                |
+| `agent_message` narrations | 3                      | 2                                  | 7                                     |
+| Ended                      | `turn_aborted`         | `turn_aborted`                     | `turn_aborted`                        |
+| `reason`                   | `interrupted`          | `interrupted`                      | `interrupted`                         |
+| Ran for                    | 335.6s (~5m36s)        | 520.2s (~8m40s)                    | 1186.9s (~19m47s)                     |
+| Delivered to parent        | **nothing**            | **nothing**                        | **nothing**                           |
+
+Aborted turn ids: `019fa49c-646d-7cd3-b42a-5b4f616f71c4`, `019fa4a5-4238-7b90-a3ca-806811642abc`,
+and `019fa4d0-7c82-7a10-a74e-015dd30e7ef2`.
+
+**The three durations — 5m36s, 8m40s, 19m47s — rule out a fixed timeout or deadline.** Whatever
+cancels these fires on an event, not a clock. Tool-call count is not the trigger either: job 3 died
+after _fewer_ calls (43) than job 1, which survived 44.
+
+### What job 3 adds
+
+- **Write work survives; the report does not.** Jobs 1–2 were read-only research, so an abort
+  destroyed everything. Job 3's file edits were already on disk, so the slice was recoverable — but
+  it died mid-verification and left a **failing test** (`ui/card.test.tsx` still asserted the inline
+  focus classes it had just replaced with the `motion-focus` recipe). An aborted write job can
+  therefore leave the tree red with no signal that anything is wrong.
+- **Detection is manual.** `codex-companion.mjs status` kept reporting `running` / `verifying` with
+  `updatedAt` frozen at the last log line. The only reliable tell was that the elapsed time had
+  outgrown the command cadence — every previous command took 0.4s–35s, and the last one had been
+  "running" for 21 minutes. `Get-Process -Id <pid>` then confirmed the process was gone.
+- Job 3 aborted at 18:42:21Z, **9 seconds after** its last command started (18:42:12Z) and 17s after
+  the previous one completed cleanly. The abort lands mid-command, not at a turn boundary.
+
+**Do not `/codex:cancel` a job you suspect is already dead** — see the stale-`pid` hazard below. The
+PID has likely been recycled onto an unrelated process, and cancel kills the whole process tree.
+
+`reason: "interrupted"` is the same reason code a user pressing stop produces. Nobody pressed stop.
+Something in the delegation path is issuing a cancel, or dropping a connection that Codex interprets
+as one.
+
+## Where the work actually survives
+
+**The transcripts are complete and on disk.** This is the single most useful fact in this entry.
+
+```
+~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ISO-timestamp>-<uuid>.jsonl
+```
+
+For the two runs above:
+
+```
+rollout-2026-07-27T22-55-33-019fa49c-33ea-71b1-bf30-3f68f5d21b3a.jsonl   (816 KB, 193 lines)
+rollout-2026-07-27T23-05-13-019fa4a5-106b-7c60-a017-f53b82b659e3.jsonl   (1.0 MB, 281 lines)
+```
+
+Each line is JSON with a `payload.type`. What you get, and what you do not:
+
+| `payload.type`         | Recoverable? | Contains                                                                    |
+| ---------------------- | ------------ | --------------------------------------------------------------------------- |
+| `function_call`        | ✅           | every command the agent ran, with full arguments                            |
+| `function_call_output` | ✅           | the full output it saw — file contents, grep hits, everything               |
+| `agent_message`        | ✅           | the agent's narration to the user; usually carries its headline conclusions |
+| `user_message`         | ✅           | the dispatched prompt — use this to identify _which_ rollout is yours       |
+| `turn_aborted`         | ✅           | `reason`, `turn_id`, `started_at`, `completed_at`, `duration_ms`            |
+| `reasoning`            | ❌           | `summary` is an empty array and `encrypted_content` is opaque               |
+
+So the agent's **evidence and stated conclusions survive; its private deliberation does not.** In
+practice the `agent_message` entries plus the `function_call_output` bodies were enough to reconstruct
+the substantive findings of both runs, including answers the interrupted agents had already reached
+but never got to report.
+
+### Recovery procedure
+
+Identify the rollout by grepping for a distinctive phrase from the prompt you dispatched — the job id
+is **not** in the transcript, so it cannot be used to find the file:
+
+```powershell
+rg -l "some distinctive phrase from your brief" $env:USERPROFILE\.codex\sessions\2026\07\27
+```
+
+Then extract narration and outcome without loading the whole file:
+
+```powershell
+Get-Content $f | ForEach-Object {
+  try { $o = $_ | ConvertFrom-Json } catch { return }
+  if ($o.payload.type -eq 'agent_message') { "=== $($o.payload.message)" }
+  elseif ($o.payload.type -eq 'turn_aborted') { "=== ABORTED: $($o.payload.reason) after $([int]($o.payload.duration_ms/1000))s" }
+}
+```
+
+Pair `function_call` with `function_call_output` **by index** (they alternate 1:1) and truncate each
+body, or a single read will blow out the context of whoever is doing the recovery.
+
+## Where the job record lives — and a trap
+
+The record is **not** in any `%TEMP%\codex-jobs-*`, `%TEMP%\codex-companion\*`, or
+`%TEMP%\codex-plugin-*` directory. Those exist, are populated, and are _stale decoys_. The live store
+is:
+
+```
+~/.claude/plugins/data/codex-openai-codex/state/<workspace-hash>/state.json
+```
+
+Searching the temp directories instead produced a confident, wrong conclusion that the first job had
+"never registered" — when in fact it was running at that moment. **Check this file first.**
+
+Two further traps in that file:
+
+- **`startedAt` is UTC while the app and process list are local.** A job stamped
+  `2026-07-27T18:23:58Z` started at `23:53:58` local (IST, +5:30). Mistaking this for a five-hour-old
+  job makes a live job look abandoned.
+- **The job list is capped (8 entries observed) and both interrupted jobs were absent from it
+  afterwards**, even though older _completed_ jobs from earlier the same day survived. One of them had
+  been directly observed in that file as `"status": "running", "pid": 46996` while it was alive. So an
+  interrupted job appears to be removed rather than marked failed — leaving no on-disk trace that it
+  ever ran. **The rollout transcript is then the only record.**
+
+The store also carries `running` entries whose pids are long dead (observed: `34528`, `28900`), the
+same stale-liveness weakness described in the companion-job entry below. A `pid` in this file is never
+safe to trust.
+
+## Impact
+
+- ~110 tool calls of paid research were discarded across the two runs.
+- The caller had no way to know. Both jobs were reported as successfully launched and then simply went
+  quiet, which is indistinguishable from "still working" for an unbounded period.
+- Any conclusion drawn from a delegated job that "never came back" is suspect: the job may have found
+  the answer and been killed before it could say so. In this instance the interrupted runs had already
+  produced findings that **overturned the plan built from the run that did succeed**.
+
+## Diagnosis leads (none confirmed)
+
+- Different durations rule out a fixed timeout.
+- The broker process for job 2 (`node`, pid `28000`, spawned with the job at 23:05:07) was dead
+  shortly after, and its `%TEMP%\cxc-*` working directory had been removed. Whether the broker dying
+  causes the interrupt or is a consequence of it is unknown.
+- `reason: "interrupted"` is a cancellation code, not a crash or a resource failure. Something sends
+  it. The cancel path in the plugin is a candidate, especially given it is already known (below) to act
+  on unverified pids.
+- Not a credits/usage-limit failure — that surfaces as an explicit limit message or an
+  `app-server connection closed` at startup, and produces no tool calls at all.
+
+## Where to look
+
+| Area                            | Path                                                    |
+| ------------------------------- | ------------------------------------------------------- |
+| Rescue forwarder / job dispatch | `codex-companion.mjs` (plugin, not this repo)           |
+| Job record reader               | `apps/server/src/provider/codexCompanionJobs.ts:196`    |
+| Companion watcher lifecycle     | `apps/server/src/provider/Layers/ClaudeAdapter.ts:2619` |
+
+**Strongly recommended:** treat a job that vanishes from the state store without a terminal status as a
+failure and surface it to the caller. Silence is currently indistinguishable from progress, which is the
+core defect — the same "the panel lies about who is working" failure this fork exists to fix.
+
+---
+
 # 🟣 NEWLY COMPLETED THREAD CAN LOSE ITS `DONE` BADGE AND UNSEEN-COMPLETION GLOW
 
 ## **STATUS: CONFIRMED, NOT FIXED. Regression diagnosed on 2026-07-27.**
