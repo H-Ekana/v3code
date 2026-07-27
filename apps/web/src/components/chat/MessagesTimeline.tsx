@@ -151,6 +151,7 @@ const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const minimapPreviewCache = new WeakMap<object, string | null>();
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -416,11 +417,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [timelineViewportElement, rows.length]);
 
+  const threadRef = useMemo(() => parseScopedThreadKey(routeThreadKey), [routeThreadKey]);
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       timestampFormat,
       routeThreadKey,
-      threadRef: parseScopedThreadKey(routeThreadKey),
+      threadRef,
       markdownCwd,
       resolvedTheme,
       workspaceRoot,
@@ -435,6 +437,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [
       timestampFormat,
       routeThreadKey,
+      threadRef,
       markdownCwd,
       resolvedTheme,
       workspaceRoot,
@@ -572,22 +575,25 @@ function deriveTimelineMinimapItems(
     if (row?.kind !== "message" || row.message.role !== "user") {
       continue;
     }
+    const finalAssistantRow = resolveFinalAssistantRowForTurn(rows, index);
 
     items.push({
       id: row.id,
       rowIndex: index,
-      userText: compactMinimapPreview(row.message.text),
-      assistantText: compactMinimapPreview(resolveFinalAssistantTextForTurn(rows, index)),
+      userText: compactMinimapPreview(row, row.message.text),
+      assistantText: finalAssistantRow
+        ? compactMinimapPreview(finalAssistantRow, finalAssistantRow.message.text)
+        : null,
     });
   }
   return items;
 }
 
-function resolveFinalAssistantTextForTurn(
+function resolveFinalAssistantRowForTurn(
   rows: ReadonlyArray<MessagesTimelineRow>,
   userRowIndex: number,
 ) {
-  let finalAssistantText: string | null = null;
+  let finalAssistantRow: Extract<MessagesTimelineRow, { kind: "message" }> | null = null;
   for (let index = userRowIndex + 1; index < rows.length; index += 1) {
     const row = rows[index];
     if (row?.kind !== "message") {
@@ -597,15 +603,25 @@ function resolveFinalAssistantTextForTurn(
       break;
     }
     if (row.message.role === "assistant") {
-      finalAssistantText = row.message.text ?? null;
+      finalAssistantRow = row;
     }
   }
-  return finalAssistantText;
+  return finalAssistantRow;
 }
 
-function compactMinimapPreview(text: string | null | undefined) {
+function compactMinimapPreview(key: object | null, text: string | null | undefined) {
+  if (key !== null) {
+    const cached = minimapPreviewCache.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
   const compact = text?.replace(/\s+/g, " ").trim() ?? "";
-  return compact.length > 0 ? compact : null;
+  const preview = compact.length > 0 ? compact : null;
+  if (key !== null) {
+    minimapPreviewCache.set(key, preview);
+  }
+  return preview;
 }
 
 function resolveTimelineRowTop(state: TimelinePositionState, rowIndex: number) {

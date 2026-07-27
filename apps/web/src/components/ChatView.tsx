@@ -1448,6 +1448,7 @@ function ChatViewContent(props: ChatViewProps) {
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
+  const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
@@ -1483,8 +1484,11 @@ function ChatViewContent(props: ChatViewProps) {
     return labels;
   }, [activeThreadKnownSessions]);
   const activeThreadRef = useMemo(
-    () => (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null),
-    [activeThread],
+    () =>
+      activeThreadEnvironmentId && activeThreadId
+        ? scopeThreadRef(activeThreadEnvironmentId, activeThreadId)
+        : null,
+    [activeThreadEnvironmentId, activeThreadId],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
@@ -5659,15 +5663,19 @@ function ChatViewContent(props: ChatViewProps) {
   const onExpandTimelineImage = useCallback((preview: ExpandedImagePreview) => {
     setExpandedImage(preview);
   }, []);
-  const onOpenTurnDiff = useCallback(
-    (turnId: TurnId, filePath?: string) => {
-      if (!isServerThread || !activeThreadRef) return;
-      useDiffPanelStore.getState().selectTurn(activeThreadRef, turnId, filePath);
-      useRightPanelStore.getState().open(activeThreadRef, "diff");
-      onDiffPanelOpen?.();
-    },
-    [activeThreadRef, isServerThread, onDiffPanelOpen],
-  );
+  const isServerThreadRef = useRef(isServerThread);
+  isServerThreadRef.current = isServerThread;
+  const activeThreadRefForTurnDiffRef = useRef(activeThreadRef);
+  activeThreadRefForTurnDiffRef.current = activeThreadRef;
+  const onDiffPanelOpenRef = useRef(onDiffPanelOpen);
+  onDiffPanelOpenRef.current = onDiffPanelOpen;
+  const onOpenTurnDiff = useCallback((turnId: TurnId, filePath?: string) => {
+    const currentActiveThreadRef = activeThreadRefForTurnDiffRef.current;
+    if (!isServerThreadRef.current || !currentActiveThreadRef) return;
+    useDiffPanelStore.getState().selectTurn(currentActiveThreadRef, turnId, filePath);
+    useRightPanelStore.getState().open(currentActiveThreadRef, "diff");
+    onDiffPanelOpenRef.current?.();
+  }, []);
   // Both the Map and the revert handler are read from refs at call-time so
   // the callback reference is fully stable and never busts context identity.
   const revertTurnCountRef = useRef(revertTurnCountByUserMessageId);
