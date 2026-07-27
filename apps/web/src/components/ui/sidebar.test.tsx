@@ -2,10 +2,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  Sidebar,
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuSubButton,
   SidebarProvider,
+  SidebarRail,
   SidebarTrigger,
 } from "./sidebar";
 import { resolveSidebarState } from "./sidebarState";
@@ -48,6 +50,26 @@ describe("sidebar interactive cursors", () => {
 
     expect(html).toContain("[-webkit-app-region:no-drag]");
     expect(html).toContain("size-[var(--workspace-titlebar-control-size)]!");
+    expect(html).toContain("sidebar-trigger-icon-open");
+    expect(html).toContain('data-open="true"');
+  });
+
+  it("gives a resizable rail full separator and value semantics", () => {
+    const html = renderToStaticMarkup(
+      <SidebarProvider>
+        <Sidebar resizable={{ minWidth: 240, maxWidth: 480 }}>
+          <SidebarRail />
+        </Sidebar>
+      </SidebarProvider>,
+    );
+
+    expect(html).toContain('role="separator"');
+    expect(html).toContain('aria-orientation="vertical"');
+    expect(html).toContain('aria-valuemin="240"');
+    expect(html).toContain('aria-valuemax="480"');
+    expect(html).toContain('aria-valuenow="256"');
+    expect(html).toContain('tabindex="0"');
+    expect(html).toContain("sidebar-resize-tip");
   });
 
   it("uses a pointer cursor for menu buttons by default", () => {

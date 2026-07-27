@@ -152,6 +152,15 @@ const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const minimapPreviewCache = new WeakMap<object, string | null>();
+const TIMELINE_SCROLL_NAVIGATION_KEYS = new Set([
+  " ",
+  "ArrowDown",
+  "ArrowUp",
+  "End",
+  "Home",
+  "PageDown",
+  "PageUp",
+]);
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -182,6 +191,7 @@ interface MessagesTimelineProps {
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
   onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
   contentInsetEndAdjustment: number;
+  followOutput: boolean;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
   hideEmptyPlaceholder?: boolean;
@@ -217,6 +227,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onAnchorReady,
   onAnchorSizeChanged,
   contentInsetEndAdjustment,
+  followOutput,
   onIsAtEndChange,
   onManualNavigation,
   hideEmptyPlaceholder = false,
@@ -386,6 +397,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       strip.dataset.inView = inView ? "true" : "false";
     }
   }, [listRef, minimapItems, minimapStripMap, onIsAtEndChange]);
+  const handleTimelineKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (TIMELINE_SCROLL_NAVIGATION_KEYS.has(event.key)) {
+        onManualNavigation();
+      }
+    },
+    [onManualNavigation],
+  );
 
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
@@ -487,7 +506,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   return (
     <TimelineRowCtx value={sharedState}>
       <TimelineRowActivityCtx value={activityState}>
-        <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+        <div
+          ref={setTimelineViewportElement}
+          className="relative h-full min-h-0"
+          onKeyDownCapture={handleTimelineKeyDown}
+          onPointerDownCapture={onManualNavigation}
+          onTouchMoveCapture={onManualNavigation}
+          onWheelCapture={onManualNavigation}
+        >
           <LegendList<MessagesTimelineRow>
             ref={listRef}
             data={rows}
@@ -499,7 +525,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={contentInsetEndAdjustment}
             maintainScrollAtEnd={
-              anchoredEndSpace
+              anchoredEndSpace || !followOutput
                 ? false
                 : {
                     animated: false,
@@ -510,9 +536,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                     },
                   }
             }
+            maintainScrollAtEndThreshold={0}
             maintainVisibleContentPosition={{
               data: true,
-              size: false,
+              size: true,
             }}
             onScroll={handleScroll}
             className={cn(

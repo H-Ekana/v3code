@@ -944,13 +944,13 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
               className={cn(
                 rowSurfaceClassName,
                 // The "pop out": scale and the brand ring/glow ease in on the
-                // surface (which transitions transform) while the <li> above
-                // tracks the pointer untransitioned, then ease back out on
-                // drop. Opaque `bg-popover` because sidebar rows are otherwise
-                // translucent — a see-through card in hand would read as text
-                // painted over text as it crosses its neighbours.
+                // surface (which transitions scale) while the <li> above tracks
+                // the pointer untransitioned, then ease back out on drop.
+                // --sidebar-row-lifted is opaque because sidebar rows are
+                // otherwise translucent — a see-through card in hand would read
+                // as text painted over text as it crosses its neighbours.
                 sortable?.isDragging &&
-                  "scale-[1.02] cursor-grabbing bg-popover shadow-sidebar-card-lifted ease-(--ease-lift) motion-reduce:scale-100",
+                  "scale-[1.02] cursor-grabbing bg-(--sidebar-row-lifted) shadow-sidebar-card-lifted ease-(--ease-lift) motion-reduce:scale-100",
               )}
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}

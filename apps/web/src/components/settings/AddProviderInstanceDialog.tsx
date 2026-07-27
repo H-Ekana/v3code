@@ -70,6 +70,9 @@ const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const DEFAULT_DRIVER_OPTION = DRIVER_OPTIONS[0]!;
 const EMPTY_CONFIG_DRAFT: Record<string, unknown> = {};
+const INSTANCE_ID_INPUT_ID = "add-provider-instance-id";
+const INSTANCE_ID_HELP_ID = "add-provider-instance-id-help";
+const INSTANCE_ID_ERROR_ID = "add-provider-instance-id-error";
 interface ComingSoonDriverOption {
   readonly value: ProviderDriverKind;
   readonly label: string;
@@ -117,6 +120,40 @@ function validateInstanceId(id: string, existing: ReadonlySet<string>): string |
 interface AddProviderInstanceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+export function ProviderInstanceIdField(props: {
+  readonly driver: ProviderDriverKind;
+  readonly value: string;
+  readonly error: string | null;
+  readonly visible: boolean;
+  readonly onChange: (value: string) => void;
+}) {
+  const showError = props.error !== null;
+
+  return (
+    <label htmlFor={INSTANCE_ID_INPUT_ID} className={cn("grid gap-2", !props.visible && "hidden")}>
+      <span className="text-xs font-medium text-foreground">Instance ID</span>
+      <Input
+        id={INSTANCE_ID_INPUT_ID}
+        className="bg-background"
+        placeholder={`${props.driver}_work`}
+        value={props.value}
+        onChange={(event) => props.onChange(event.target.value)}
+        aria-invalid={showError}
+        aria-describedby={showError ? INSTANCE_ID_ERROR_ID : INSTANCE_ID_HELP_ID}
+      />
+      {showError ? (
+        <span id={INSTANCE_ID_ERROR_ID} className="text-[11px] text-destructive" role="alert">
+          {props.error}
+        </span>
+      ) : (
+        <span id={INSTANCE_ID_HELP_ID} className="text-[11px] text-muted-foreground">
+          Routing key used by threads and sessions. Letters, digits, '-', or '_'.
+        </span>
+      )}
+    </label>
+  );
 }
 
 export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderInstanceDialogProps) {
@@ -236,6 +273,10 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
               instanceIdError={instanceIdError}
               onNavigation={applyWizardNavigation}
             />
+            <p className="sr-only" role="status" aria-live="polite">
+              Step {wizardStep + 1} of {ADD_PROVIDER_WIZARD_STEPS.length}:{" "}
+              {ADD_PROVIDER_WIZARD_STEPS[wizardStep]}
+            </p>
           </DialogHeader>
 
           <div
@@ -319,25 +360,13 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 </span>
               </label>
 
-              <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">Instance ID</span>
-                <Input
-                  className="bg-background"
-                  placeholder={`${driver}_work`}
-                  value={instanceId}
-                  onChange={(event) => {
-                    setInstanceIdOverride(event.target.value);
-                  }}
-                  aria-invalid={showInstanceIdError}
-                />
-                {showInstanceIdError ? (
-                  <span className="text-[11px] text-destructive">{instanceIdError}</span>
-                ) : (
-                  <span className="text-[11px] text-muted-foreground">
-                    Routing key used by threads and sessions. Letters, digits, '-', or '_'.
-                  </span>
-                )}
-              </label>
+              <ProviderInstanceIdField
+                driver={driver}
+                value={instanceId}
+                error={showInstanceIdError ? instanceIdError : null}
+                visible={wizardStep === 1}
+                onChange={setInstanceIdOverride}
+              />
 
               <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
                 <span className="text-xs font-medium text-foreground">Accent color</span>
@@ -347,7 +376,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                     value={normalizeProviderAccentColor(accentColor) ?? PROVIDER_ACCENT_SWATCHES[0]}
                     onChange={(event) => setAccentColor(event.target.value)}
                     aria-label="Provider instance accent color"
-                    className="h-8 w-10 cursor-pointer rounded-xl border border-input bg-background p-0.5"
+                    className="a11y-provider-color-input h-8 w-10 cursor-pointer rounded-xl border border-input bg-background p-0.5"
                   />
                   <div className="flex flex-wrap gap-1.5">
                     {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
@@ -357,7 +386,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                           key={swatch}
                           type="button"
                           className={cn(
-                            "size-6 cursor-pointer rounded-full border transition-[transform,box-shadow,border-color] duration-200 motion-reduce:transition-none",
+                            "a11y-provider-color-swatch size-6 cursor-pointer rounded-full border transition-[transform,box-shadow,border-color] duration-200 motion-reduce:transition-none",
                             selected
                               ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
                               : "border-black/10 hover:scale-105 dark:border-white/20",
@@ -398,7 +427,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 </div>
               ) : wizardStep === 2 ? (
                 <div className="grid gap-2">
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
                     This driver has no required configuration. You can add the instance now.
                   </p>
                 </div>

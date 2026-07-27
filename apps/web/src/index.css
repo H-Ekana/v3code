@@ -1,4 +1,13 @@
 @import "tailwindcss";
+@import "./styles/motion.css";
+@import "./styles/a11y-controls.css";
+@import "./styles/conversation.css";
+@import "./styles/composer-controls.css";
+@import "./styles/agents-threads.css";
+@import "./styles/navigation.css";
+@import "./styles/feedback.css";
+@import "./styles/workbench.css";
+@import "./styles/files-diffs.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
@@ -84,6 +93,26 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   50% {
     background-position: 100% 50%;
     opacity: 1;
+  }
+}
+
+@keyframes chat-new-text-arrow-drift {
+  0%,
+  100% {
+    transform: translateY(-1px);
+  }
+  50% {
+    transform: translateY(2px);
+  }
+}
+
+.chat-new-text-arrow {
+  animation: chat-new-text-arrow-drift 1.15s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-new-text-arrow {
+    animation: none;
   }
 }
 
@@ -1289,6 +1318,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --card-foreground: var(--color-zinc-800);
   --popover: var(--color-white);
   --popover-foreground: var(--color-zinc-800);
+  /* Neutral default for the lifted drag card; the dark sidebar palette tints
+     it toward --primary. Declared here so every theme scope resolves it to an
+     opaque color — a transparent fill would let rows show through the card
+     being dragged over them. */
+  --sidebar-row-lifted: var(--popover);
   --primary: oklch(0.488 0.217 292);
   --primary-foreground: var(--color-white);
   --astro-highlight: oklch(0.56 0.23 330);
@@ -1409,9 +1443,24 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --sidebar-foreground: var(--foreground);
   --sidebar-muted-foreground: var(--muted-foreground);
   --sidebar-control-surface: var(--muted);
-  --sidebar-row-hover: color-mix(in srgb, var(--foreground) 8%, transparent);
-  --sidebar-row-active: color-mix(in srgb, var(--foreground) 11%, transparent);
-  --sidebar-row-selected: color-mix(in srgb, var(--foreground) 7%, transparent);
+  /* Row fills carry the composer's violet instead of a neutral gray lift, so
+     the sidebar and the center composer read as one surface family. The tint
+     is a primary/foreground blend rather than raw --primary: the composer is
+     one focal card and can afford a 16% violet fill, while these are a list of
+     dozens of rows that only need the hue.
+
+     Alphas are up from 8/11/7 by exactly 1.5x, the ratio of the old fill's
+     relative luminance to the tint's (violet is far poorer in green, which
+     carries ~71% of luminance). That holds each row at the lightness it had
+     before, so the selected < hover < active ladder is untouched and only the
+     hue moves. Re-derive the factor if the tint ratio below changes. */
+  --sidebar-row-tint: color-mix(in srgb, var(--primary) 60%, var(--foreground));
+  --sidebar-row-hover: color-mix(in srgb, var(--sidebar-row-tint) 12%, transparent);
+  --sidebar-row-active: color-mix(in srgb, var(--sidebar-row-tint) 16.5%, transparent);
+  --sidebar-row-selected: color-mix(in srgb, var(--sidebar-row-tint) 10.5%, transparent);
+  /* Opaque, so a card lifted for rearranging still occludes the rows it
+     crosses, but tinted to sit in the same family as the rows around it. */
+  --sidebar-row-lifted: color-mix(in srgb, var(--sidebar-row-tint) 12%, var(--popover));
   --sidebar-border: var(--border);
   /* The stage-channel header art must ramp to THIS panel's surface, not the
      global chrome background, or the fade shows a seam (same rule as the
@@ -1663,6 +1712,17 @@ label:has(> select#reasoning-effort) select {
 
 .chat-markdown a:not(.chat-markdown-file-link):hover,
 .chat-markdown a:not(.chat-markdown-file-link):focus-visible {
+  background-image: radial-gradient(circle, currentcolor 0.75px, transparent 1px);
+  background-position: left bottom;
+  background-repeat: repeat-x;
+  background-size: 4px 2px;
+}
+
+/* Prose file links keep the dotted underline every other inline link gets; the
+   chip variant is excluded above because it already has its own surface.
+   Colors live in the Tailwind class lists so they win the utilities layer. */
+.chat-markdown a.chat-markdown-file-link-prose:hover,
+.chat-markdown a.chat-markdown-file-link-prose:focus-visible {
   background-image: radial-gradient(circle, currentcolor 0.75px, transparent 1px);
   background-position: left bottom;
   background-repeat: repeat-x;

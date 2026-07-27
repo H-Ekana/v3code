@@ -1,5 +1,12 @@
 export type TimelineScrollMode = "following-end" | "anchoring-new-turn" | "free-scrolling";
 
+export function shouldPositionTimelineAnchor(input: {
+  readonly liveFollowUserScrollGeneration: number | null;
+  readonly userScrollGeneration: number;
+}): boolean {
+  return input.liveFollowUserScrollGeneration === input.userScrollGeneration;
+}
+
 export interface TimelineListMeasurementState {
   readonly data: readonly unknown[];
   readonly scroll: number;

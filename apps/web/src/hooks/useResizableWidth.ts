@@ -1,9 +1,17 @@
 import * as Schema from "effect/Schema";
-import { type PointerEvent as ReactPointerEvent, useCallback, useRef, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useRef,
+  useState,
+} from "react";
 
 import { getLocalStorageItem, setLocalStorageItem } from "./useLocalStorage";
 
 const WidthSchema = Schema.Finite;
+const DEFAULT_KEYBOARD_STEP = 8;
+const DEFAULT_KEYBOARD_LARGE_STEP = 32;
 
 export interface UseResizableWidthOptions {
   /** localStorage key the persisted width is stored under. */
@@ -17,13 +25,63 @@ export interface UseResizableWidthOptions {
    *   - "right" → panel grows rightward (left-anchored panels)
    */
   readonly edge: "left" | "right";
+  /** Width change, in pixels, for an unmodified arrow-key press. */
+  readonly keyboardStep?: number;
+  /** Width change, in pixels, while Shift is held. */
+  readonly keyboardLargeStep?: number;
 }
 
 export interface ResizableWidthHandlers {
+  readonly onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
   readonly onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
   readonly onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
   readonly onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
   readonly onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
+}
+
+export interface ResizableWidthSeparatorProps {
+  readonly role: "separator";
+  readonly tabIndex: 0;
+  readonly "aria-orientation": "vertical";
+  readonly "aria-valuemin": number;
+  readonly "aria-valuemax": number;
+  readonly "aria-valuenow": number;
+}
+
+export interface KeyboardResizeInput {
+  readonly currentWidth: number;
+  readonly key: string;
+  readonly minWidth: number;
+  readonly maxWidth: number;
+  readonly step?: number;
+  readonly largeStep?: number;
+  readonly useLargeStep?: boolean;
+}
+
+/**
+ * Resolve the width requested by a resize-handle key press. Returning `null`
+ * lets consumers distinguish unrelated keys without duplicating the mapping.
+ */
+export function getKeyboardResizedWidth(input: KeyboardResizeInput): number | null {
+  const step = input.useLargeStep
+    ? (input.largeStep ?? DEFAULT_KEYBOARD_LARGE_STEP)
+    : (input.step ?? DEFAULT_KEYBOARD_STEP);
+  const clamp = (value: number) => Math.max(input.minWidth, Math.min(input.maxWidth, value));
+
+  switch (input.key) {
+    case "ArrowLeft":
+    case "ArrowUp":
+      return clamp(input.currentWidth - step);
+    case "ArrowRight":
+    case "ArrowDown":
+      return clamp(input.currentWidth + step);
+    case "Home":
+      return input.minWidth;
+    case "End":
+      return input.maxWidth;
+    default:
+      return null;
+  }
 }
 
 /**
@@ -37,9 +95,19 @@ export interface ResizableWidthHandlers {
  */
 export function useResizableWidth(options: UseResizableWidthOptions): {
   readonly width: number;
+  readonly isResizing: boolean;
   readonly handlers: ResizableWidthHandlers;
+  readonly separatorProps: ResizableWidthSeparatorProps;
 } {
-  const { storageKey, defaultWidth, minWidth, maxWidth, edge } = options;
+  const {
+    storageKey,
+    defaultWidth,
+    minWidth,
+    maxWidth,
+    edge,
+    keyboardStep = DEFAULT_KEYBOARD_STEP,
+    keyboardLargeStep = DEFAULT_KEYBOARD_LARGE_STEP,
+  } = options;
 
   const clamp = useCallback(
     (value: number): number => {
@@ -60,6 +128,7 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
       return defaultWidth;
     }
   });
+  const [isResizing, setIsResizing] = useState(false);
 
   const clampedWidth = clamp(width);
 
@@ -88,7 +157,19 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
     document.body.style.removeProperty("cursor");
     document.body.style.removeProperty("user-select");
     dragStateRef.current = null;
+    setIsResizing(false);
   }, []);
+
+  const persistWidth = useCallback(
+    (nextWidth: number) => {
+      try {
+        setLocalStorageItem(storageKey, nextWidth, WidthSchema);
+      } catch (error) {
+        console.error("Could not persist panel width.", error);
+      }
+    },
+    [storageKey],
+  );
 
   const onPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
@@ -111,6 +192,7 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
         rafId: null,
         target,
       };
+      setIsResizing(true);
     },
     [clampedWidth],
   );
@@ -140,14 +222,10 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
       const finalWidth = clamp(state.pending);
       releasePointer(event.pointerId);
       // Commit once at drag-end to avoid 60Hz localStorage writes.
-      try {
-        setLocalStorageItem(storageKey, finalWidth, WidthSchema);
-      } catch (error) {
-        console.error("Could not persist panel width.", error);
-      }
+      persistWidth(finalWidth);
       setWidth(finalWidth);
     },
-    [clamp, releasePointer, storageKey],
+    [clamp, persistWidth, releasePointer],
   );
 
   const onPointerCancel = useCallback(
@@ -161,8 +239,38 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
     [releasePointer],
   );
 
+  const onKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLElement>) => {
+      const nextWidth = getKeyboardResizedWidth({
+        currentWidth: clampedWidth,
+        key: event.key,
+        minWidth,
+        maxWidth,
+        step: keyboardStep,
+        largeStep: keyboardLargeStep,
+        useLargeStep: event.shiftKey,
+      });
+      if (nextWidth === null) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      setWidth(nextWidth);
+      persistWidth(nextWidth);
+    },
+    [clampedWidth, keyboardLargeStep, keyboardStep, maxWidth, minWidth, persistWidth],
+  );
+
   return {
     width: clampedWidth,
-    handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel },
+    isResizing,
+    handlers: { onKeyDown, onPointerDown, onPointerMove, onPointerUp, onPointerCancel },
+    separatorProps: {
+      role: "separator",
+      tabIndex: 0,
+      "aria-orientation": "vertical",
+      "aria-valuemin": minWidth,
+      "aria-valuemax": maxWidth,
+      "aria-valuenow": clampedWidth,
+    },
   };
 }

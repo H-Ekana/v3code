@@ -1,7 +1,15 @@
 "use client";
 
 import { PipetteIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 
 import { ColorSelector } from "../color-selector";
 import { Button } from "../ui/button";
@@ -22,6 +30,52 @@ const FALLBACK_ACCENT_COLOR = PROVIDER_ACCENT_SWATCHES[0];
 
 function clamp(value: number, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
+}
+
+export function getKeyboardSaturationValue(
+  current: { readonly s: number; readonly v: number },
+  key: string,
+  useLargeStep = false,
+): { readonly s: number; readonly v: number } | null {
+  const step = useLargeStep ? 0.1 : 0.01;
+  switch (key) {
+    case "ArrowLeft":
+      return { ...current, s: clamp(current.s - step) };
+    case "ArrowRight":
+      return { ...current, s: clamp(current.s + step) };
+    case "ArrowUp":
+      return { ...current, v: clamp(current.v + step) };
+    case "ArrowDown":
+      return { ...current, v: clamp(current.v - step) };
+    case "Home":
+      return { ...current, s: 0 };
+    case "End":
+      return { ...current, s: 1 };
+    default:
+      return null;
+  }
+}
+
+export function getKeyboardHue(
+  currentHue: number,
+  key: string,
+  useLargeStep = false,
+): number | null {
+  const step = useLargeStep ? 10 : 1;
+  switch (key) {
+    case "ArrowLeft":
+    case "ArrowDown":
+      return clamp(currentHue - step, 0, 360);
+    case "ArrowRight":
+    case "ArrowUp":
+      return clamp(currentHue + step, 0, 360);
+    case "Home":
+      return 0;
+    case "End":
+      return 360;
+    default:
+      return null;
+  }
 }
 
 function hexToHsv(hex: string) {
@@ -122,10 +176,27 @@ function ProviderCustomColorPanel(props: {
     };
   };
 
+  const handlePlaneKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const next = getKeyboardSaturationValue(hsv, event.key, event.shiftKey);
+    if (next === null) return;
+    event.preventDefault();
+    commitHsv({ ...hsv, ...next });
+  };
+
+  const handleHueKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const nextHue = getKeyboardHue(hsv.h, event.key, event.shiftKey);
+    if (nextHue === null) return;
+    event.preventDefault();
+    commitHsv({ ...hsv, h: nextHue });
+  };
+
   return (
     <div className="w-56 bg-popover">
       <div
-        className="relative h-36 cursor-crosshair touch-none"
+        className={cn(
+          "relative h-36 cursor-crosshair touch-none rounded-t-md outline-none",
+          "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        )}
         style={{
           backgroundColor: `hsl(${hsv.h} 100% 50%)`,
           backgroundImage:
@@ -137,6 +208,14 @@ function ProviderCustomColorPanel(props: {
             updateFromPlane(event);
           }
         }}
+        onKeyDown={handlePlaneKeyDown}
+        role="slider"
+        tabIndex={0}
+        aria-label="Accent color saturation and brightness"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(hsv.s * 100)}
+        aria-valuetext={`Saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`}
       >
         <span
           className="pointer-events-none absolute size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgb(0_0_0/0.35)]"
@@ -145,7 +224,10 @@ function ProviderCustomColorPanel(props: {
       </div>
       <div className="grid gap-3 p-3">
         <div
-          className="relative h-3 cursor-pointer touch-none rounded-full"
+          className={cn(
+            "a11y-slider-hit-target relative h-3 cursor-pointer touch-none rounded-full outline-none",
+            "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-popover",
+          )}
           style={{
             background: "linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)",
           }}
@@ -155,6 +237,14 @@ function ProviderCustomColorPanel(props: {
               updateFromHue(event);
             }
           }}
+          onKeyDown={handleHueKeyDown}
+          role="slider"
+          tabIndex={0}
+          aria-label="Accent color hue"
+          aria-valuemin={0}
+          aria-valuemax={360}
+          aria-valuenow={Math.round(hsv.h)}
+          aria-valuetext={`${Math.round(hsv.h)} degrees`}
         >
           <span
             className="pointer-events-none absolute top-1/2 size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgb(0_0_0/0.35)]"
@@ -193,20 +283,27 @@ function ProviderCustomColorPicker(props: {
           <button
             type="button"
             className={cn(
-              "flex size-6 cursor-pointer items-center justify-center rounded-full text-white transition-transform duration-200 active:scale-90",
-              "hover:scale-105",
+              "a11y-color-trigger flex size-6 cursor-pointer items-center justify-center rounded-full outline-none",
+              "transition-transform [transition-duration:var(--motion-press,100ms)] active:scale-90 motion-reduce:transition-none",
+              "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
             )}
-            style={{
-              backgroundColor: normalized,
-              ...(props.selected
-                ? {
-                    boxShadow: `inset 0 0 0 2px var(--card), 0 0 0 2px ${normalized}`,
-                  }
-                : {}),
-            }}
             aria-label={`Choose custom accent color for ${props.displayName}`}
+            aria-pressed={props.selected}
           >
-            <PipetteIcon className="size-3 text-foreground/25" aria-hidden />
+            <span
+              aria-hidden
+              className="grid size-6 place-items-center rounded-full"
+              style={{
+                backgroundColor: normalized,
+                ...(props.selected
+                  ? {
+                      boxShadow: `inset 0 0 0 2px var(--card), 0 0 0 2px ${normalized}`,
+                    }
+                  : {}),
+              }}
+            >
+              <PipetteIcon className="size-3 text-foreground/45" />
+            </span>
           </button>
         }
       />
@@ -306,19 +403,20 @@ export function ProviderAccentColorPicker(props: {
           onCommit={commitAccentColor}
         />
         <ColorSelector
-          key={selectedValue}
           colors={[...PROVIDER_ACCENT_SWATCHES]}
           defaultValue={selectedValue}
+          value={selectedValue}
           size="lg"
           onColorSelect={commitAccentColor}
           className="flex-wrap gap-1.5"
+          aria-label={`Accent color for ${displayName}`}
         />
         <Button
           type="button"
           size="icon"
           variant="ghost"
           className={cn(
-            "size-7 shrink-0 text-muted-foreground transition-opacity",
+            "a11y-color-clear size-7 shrink-0 text-muted-foreground transition-opacity motion-reduce:transition-none",
             normalized ? "opacity-100" : "pointer-events-none opacity-0",
           )}
           onClick={() => commitAccentColor("")}

@@ -28,8 +28,54 @@ Symptom that you got it wrong: `gh` fails with `No commits between main and <bra
 branch in `pingdotgg/t3code`, where it does not exist. Do not "fix" it by pushing the branch
 upstream. Re-run with `--repo H-Ekana/v3code`.
 
-Work on a branch off `main` and land it through a PR. Do not commit directly to `main`; CI on the PR
-is the first full verification, since local runs are deliberately limited to focused tests.
+## Branches — never switch or create one without explicit approval
+
+**This checkout works on `main`.** Multiple agents share this single working tree at the same time,
+so the branch is shared state: switching it, or committing a snapshot to move it, yanks the tree out
+from under every other agent mid-edit and can lose their uncommitted work.
+
+Without the user explicitly asking for it in the current conversation, you must NOT run:
+
+- `git checkout -b` / `git switch -c` / `git branch <name>` — no new branches;
+- `git checkout <branch>` / `git switch <branch>` — no changing the current branch;
+- `git worktree add` — no additional worktrees on this repo;
+- `git reset --hard`, `git clean -fd`, `git stash` (including `git stash -u`), `git checkout -- .`,
+  or `git restore --worktree` over paths you did not personally edit — these discard other agents'
+  in-flight work;
+- `git rebase`, `git merge`, `git cherry-pick`, or anything else that moves `HEAD` or rewrites the
+  tree.
+
+"The task would be tidier on a branch" is not approval. Ask, and wait for a yes.
+
+### Why committing is the dangerous one: `lint-staged` runs `git reset --hard`
+
+**A commit is not a local, additive act in this checkout.** `git commit` fires the pre-commit hook,
+which runs `lint-staged`. On its error path `lint-staged` runs **`git reset --hard HEAD`**, then
+tries to reapply its own backup stash, then drops it. If that sequence is interrupted — the process
+is killed, another agent's git command collides with it, the reapply fails — the reset has already
+landed and the reapply has not. **Every other agent's uncommitted work in this shared tree is gone.**
+
+This is not hypothetical. It is the established root cause of the 2026-07-27 incident: an entire
+night of concurrent WIP was destroyed this way, and part of it was still unrecovered a day later.
+See `docs/project/nightly-motion-polish-review.md`. The `git stash list` entry named
+"lint-staged automatic backup" is the fingerprint of this happening.
+
+Consequences for you:
+
+- Do not run `git commit` without explicit approval — not "to be safe", not "to checkpoint my work",
+  not "so it isn't lost". Committing to protect work is precisely what destroys other agents' work.
+- Never use `--no-verify` to dodge the hook either. Ask instead.
+- If you see a `lint-staged automatic backup` stash you did not create, **stop and report it**.
+  Do not drop it: it may be the only copy of another agent's work. Do not apply it either — it can
+  span the whole repository, including vendored `.repos/` trees.
+
+Committing is likewise opt-in: leave your work uncommitted in the working tree and tell the user
+what you changed, unless they asked you to commit. When the user does approve a branch and a PR,
+open it against the fork per the table above — `--repo H-Ekana/v3code`, never upstream.
+
+If you find the tree in an unexpected state (files reverted, a branch you did not create, a detached
+`HEAD`), **stop and report it**. Do not attempt a repair that overwrites files, because another agent
+is probably mid-write in them.
 
 ## Task Completion Requirements
 

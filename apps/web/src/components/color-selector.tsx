@@ -1,15 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { cn } from "~/lib/utils";
 
 interface ColorSelectorProps {
   colors: string[];
   size?: "default" | "sm" | "lg";
   defaultValue: string;
+  value?: string;
   name?: string;
   onColorSelect?: (color: string) => void;
   className?: string;
+  "aria-label"?: string;
 }
 
 const colorMap = {
@@ -54,46 +56,114 @@ export function ColorSelector({
   colors,
   size = "default",
   defaultValue,
+  value,
   name,
   onColorSelect,
   className,
+  "aria-label": ariaLabel,
 }: ColorSelectorProps) {
-  const [selectedColor, setSelectedColor] = useState<string>(defaultValue);
+  const [uncontrolledColor, setUncontrolledColor] = useState<string>(defaultValue);
+  const selectedColor = value ?? uncontrolledColor;
+  const selectedIndex = colors.indexOf(selectedColor);
+  const [activeIndex, setActiveIndex] = useState(() => Math.max(0, selectedIndex));
+  const swatchRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const handleColorSelect = (color: string) => {
-    setSelectedColor(color);
+    if (value === undefined) {
+      setUncontrolledColor(color);
+    }
     onColorSelect?.(color);
+  };
+
+  useEffect(() => {
+    if (colors.length === 0) return;
+    setActiveIndex((currentIndex) => {
+      if (currentIndex < colors.length) return currentIndex;
+      return Math.max(0, selectedIndex);
+    });
+  }, [colors.length, selectedIndex]);
+
+  const moveActiveSwatch = (nextIndex: number) => {
+    if (colors.length === 0) return;
+    const wrappedIndex = (nextIndex + colors.length) % colors.length;
+    setActiveIndex(wrappedIndex);
+    swatchRefs.current[wrappedIndex]?.focus();
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    switch (event.key) {
+      case "ArrowLeft":
+      case "ArrowUp":
+        event.preventDefault();
+        moveActiveSwatch(index - 1);
+        break;
+      case "ArrowRight":
+      case "ArrowDown":
+        event.preventDefault();
+        moveActiveSwatch(index + 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        moveActiveSwatch(0);
+        break;
+      case "End":
+        event.preventDefault();
+        moveActiveSwatch(colors.length - 1);
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        handleColorSelect(colors[index]!);
+        break;
+    }
   };
 
   const sizeClass = getSizeClass(size);
 
   return (
-    <div className={cn("flex gap-2", className)}>
+    <div
+      className={cn("flex gap-2", className)}
+      role="radiogroup"
+      aria-label={ariaLabel ?? (name ? `${name} color` : "Color")}
+    >
       {name && <input type="hidden" name={name} value={selectedColor} />}
-      {colors.map((color) => {
+      {colors.map((color, index) => {
         const colorValue = getColorValue(color);
+        const selected = selectedColor === color;
         return (
-          <div
+          <button
             key={color}
-            className={`${sizeClass} cursor-pointer rounded-full transition-transform duration-200 active:scale-90`}
-            style={{
-              backgroundColor: colorValue,
-              ...(selectedColor === color && {
-                boxShadow: `inset 0 0 0 2px var(--card), 0 0 0 2px ${colorValue}`,
-              }),
+            type="button"
+            ref={(element) => {
+              swatchRefs.current[index] = element;
             }}
+            className={cn(
+              "a11y-color-swatch grid cursor-pointer place-items-center rounded-full outline-none",
+              "transition-transform [transition-duration:var(--motion-press,100ms)] active:scale-90 motion-reduce:transition-none",
+              "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              sizeClass,
+            )}
             onClick={() => handleColorSelect(color)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                handleColorSelect(color);
-              }
-            }}
-            tabIndex={0}
-            role="button"
+            onFocus={() => setActiveIndex(index)}
+            onKeyDown={(event) => handleKeyDown(event, index)}
+            tabIndex={index === activeIndex ? 0 : -1}
+            role="radio"
             aria-label={`Select ${color} color`}
-            aria-pressed={selectedColor === color}
-          />
+            aria-checked={selected}
+          >
+            <span
+              aria-hidden
+              className={cn(sizeClass, "rounded-full border border-black/10 dark:border-white/20")}
+              style={{
+                backgroundColor: colorValue,
+                ...(selected
+                  ? {
+                      boxShadow: `inset 0 0 0 2px var(--card), 0 0 0 2px ${colorValue}`,
+                    }
+                  : {}),
+              }}
+            />
+          </button>
         );
       })}
     </div>

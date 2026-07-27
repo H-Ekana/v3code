@@ -176,6 +176,15 @@ function AgentCard({
   const hasFeed = agent.recentActivity.length > 0;
   const hasDetails = hasFeed || shells.length > 0;
   const isLive = agent.status === "running" || agent.status === "waiting";
+  // The Codex companion writes its live job phase (investigating | editing |
+  // running | verifying | reviewing | finalizing) into `phaseTitle` on every
+  // watcher tick, and nothing ever rendered it — the richest work-kind signal
+  // we already collect was being discarded. Workflow children carry
+  // `phaseTitle` too, but they sit under a `PhaseHeader` that already states
+  // it, so `phaseIndex` (set only on workflow children) gates the duplicate.
+  // Settled cards drop it: a finished agent's last phase is noise next to its
+  // outcome.
+  const workKind = isLive && agent.phaseIndex === undefined ? agent.phaseTitle : undefined;
   // Newest first, matching how the card reads top-down.
   const orderedActivity = agent.recentActivity.toReversed();
   const activityCount = orderedActivity.length;
@@ -230,13 +239,19 @@ function AgentCard({
             <CheckIcon className="size-3 shrink-0 text-success" />
           ) : null}
         </div>
-        {activity ? (
+        {activity || workKind ? (
           <div
             className={cn(
               "mt-1 truncate text-[11.5px]",
               agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
             )}
           >
+            {workKind ? (
+              <span className="font-semibold tracking-wide text-primary/85 uppercase">
+                {workKind}
+              </span>
+            ) : null}
+            {workKind && activity ? <span className="text-border"> · </span> : null}
             {activity}
           </div>
         ) : null}

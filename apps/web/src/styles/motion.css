@@ -1,0 +1,238 @@
+/*
+ * Shared interaction language. Keep these recipes semantic: consumers own
+ * geometry and content while this file owns timing, emphasis, and portal order.
+ */
+
+:root {
+  --motion-press: 100ms;
+  --motion-hover: 140ms;
+  --motion-state: 200ms;
+  --motion-layout: 240ms;
+  --motion-accent: 300ms;
+  --motion-signature: 480ms;
+
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --layer-sticky-chrome: 20;
+  --layer-backdrop: 40;
+  --layer-modal: 50;
+  --layer-dropdown: 60;
+  --layer-toast: 70;
+  --layer-tooltip: 80;
+}
+
+.motion-focus,
+.motion-hover,
+.motion-press,
+.motion-resting,
+.motion-selected,
+.motion-destructive {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: var(--motion-state);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+.motion-press {
+  transition-duration: var(--motion-press);
+}
+
+.motion-selected:is(
+  [aria-current]:not([aria-current="false"]),
+  [aria-selected="true"],
+  [data-checked],
+  [data-pressed],
+  [data-selected]
+) {
+  border-color: color-mix(in srgb, var(--primary) 32%, var(--border));
+  background-color: color-mix(in srgb, var(--primary) 10%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--primary) 18%, transparent),
+    0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--accent-foreground);
+  transition-duration: var(--motion-state);
+  transition-timing-function: var(--ease-out-quint);
+}
+
+.motion-hover:hover:not(:disabled, [data-disabled]) {
+  transition-duration: var(--motion-hover);
+}
+
+.motion-focus:focus-visible,
+.motion-focus:has(:focus-visible) {
+  border-color: var(--ring);
+  outline: none;
+  box-shadow:
+    0 0 0 1px var(--background),
+    0 0 0 3px color-mix(in srgb, var(--ring) 54%, transparent),
+    0 0 4px color-mix(in srgb, var(--ring) 18%, transparent);
+  transition-duration: var(--motion-hover);
+}
+
+.motion-destructive {
+  --motion-semantic-accent: var(--destructive);
+}
+
+.motion-destructive:is(:hover, :focus-visible, [data-highlighted]):not(:disabled, [data-disabled]),
+.motion-destructive:has(:focus-visible) {
+  border-color: color-mix(in srgb, var(--destructive) 48%, var(--border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--destructive) 22%, transparent),
+    0 0 4px color-mix(in srgb, var(--destructive) 18%, transparent);
+}
+
+.motion-focus[aria-invalid="true"]:focus-visible,
+.motion-focus:has([aria-invalid="true"]:focus-visible) {
+  border-color: var(--destructive);
+  box-shadow:
+    0 0 0 1px var(--background),
+    0 0 0 3px color-mix(in srgb, var(--destructive) 42%, transparent),
+    0 0 4px color-mix(in srgb, var(--destructive) 16%, transparent);
+}
+
+.motion-press:active:not(:disabled, [data-disabled]) {
+  transform: translateY(1px) scale(0.98);
+  transition-duration: var(--motion-press);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+.motion-pending {
+  position: relative;
+  isolation: isolate;
+}
+
+.motion-pending::after {
+  position: absolute;
+  inset: -1px;
+  border: 1px solid currentColor;
+  border-radius: inherit;
+  box-shadow: 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+  content: "";
+  opacity: 0.72;
+  pointer-events: none;
+  animation: motion-pending-duty-cycle 2s steps(1, end) infinite;
+}
+
+.motion-arrival {
+  animation: motion-arrival var(--motion-state) var(--ease-out-expo) both;
+}
+
+.motion-completion {
+  animation: motion-completion var(--motion-state) var(--ease-out-quint) both;
+}
+
+.motion-resting {
+  transition-duration: var(--motion-state);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+.layer-sticky-chrome {
+  z-index: var(--layer-sticky-chrome);
+}
+
+.layer-backdrop {
+  z-index: var(--layer-backdrop);
+}
+
+.layer-modal {
+  z-index: var(--layer-modal);
+}
+
+.layer-dropdown {
+  z-index: var(--layer-dropdown);
+}
+
+.layer-toast {
+  z-index: var(--layer-toast);
+}
+
+.layer-tooltip {
+  z-index: var(--layer-tooltip);
+}
+
+@keyframes motion-pending-duty-cycle {
+  0%,
+  24%,
+  100% {
+    opacity: 0.82;
+  }
+
+  25%,
+  82% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes motion-arrival {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0;
+  }
+}
+
+@keyframes motion-completion {
+  from {
+    opacity: 0.4;
+    scale: 0.88;
+    box-shadow: 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent);
+  }
+
+  42% {
+    opacity: 1;
+    scale: 1;
+    box-shadow: 0 0 4px color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+
+  72% {
+    opacity: 1;
+    scale: 1;
+    box-shadow: 0 0 4px color-mix(in srgb, var(--astro-highlight) 24%, transparent);
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+    box-shadow: 0 0 0 color-mix(in srgb, var(--astro-highlight) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-focus,
+  .motion-hover,
+  .motion-press,
+  .motion-resting,
+  .motion-selected,
+  .motion-destructive {
+    transition-duration: 0.01ms;
+  }
+
+  .motion-press:active:not(:disabled, [data-disabled]) {
+    transform: none;
+  }
+
+  .motion-pending::after {
+    animation: none;
+    opacity: 0.45;
+  }
+
+  .motion-arrival,
+  .motion-completion {
+    animation: motion-arrival-reduced var(--motion-press) linear both;
+  }
+}
+
+@keyframes motion-arrival-reduced {
+  from {
+    opacity: 0.72;
+  }
+
+  to {
+    opacity: 1;
+  }
+}

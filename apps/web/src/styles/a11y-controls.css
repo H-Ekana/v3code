@@ -1,0 +1,117 @@
+/* Accessibility and coarse-pointer controls — owned by the a11y controls area. */
+
+.sidebar-trigger-icon {
+  transition: opacity var(--motion-hover, 120ms) linear;
+}
+
+.sidebar-trigger-icon-open {
+  opacity: 0;
+}
+
+.sidebar-trigger-icon-closed,
+[data-open="true"] .sidebar-trigger-icon-open {
+  opacity: 1;
+}
+
+[data-open="true"] .sidebar-trigger-icon-closed {
+  opacity: 0;
+}
+
+.sidebar-resize-rail::after {
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  width: 1px;
+  background: transparent;
+  content: "";
+  pointer-events: none;
+  transition: background-color var(--motion-hover, 140ms)
+    var(--ease-out-quart, cubic-bezier(0.25, 1, 0.5, 1));
+}
+
+.sidebar-resize-rail:hover::after,
+.sidebar-resize-rail:focus-visible::after,
+.sidebar-resize-rail[data-resizing="true"]::after {
+  background: color-mix(in oklch, var(--primary) 88%, var(--astro-highlight));
+}
+
+[data-collapsible="offcanvas"] .sidebar-resize-rail::after {
+  left: 100%;
+}
+
+.sidebar-resize-tip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--astro-highlight);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.5);
+}
+
+.sidebar-resize-rail[data-resizing="true"] .sidebar-resize-tip {
+  animation: sidebar-resize-tip-arrival 140ms var(--ease-out-quint, cubic-bezier(0.22, 1, 0.36, 1))
+    both;
+}
+
+@keyframes sidebar-resize-tip-arrival {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.5);
+  }
+
+  35% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+}
+
+.a11y-slider-hit-target::before {
+  position: absolute;
+  inset: -16px 0;
+  content: "";
+}
+
+@media (pointer: coarse) {
+  .a11y-resize-handle {
+    left: -22px;
+    width: 44px;
+  }
+
+  .a11y-color-swatch,
+  .a11y-color-trigger,
+  .a11y-color-clear,
+  .a11y-provider-color-input,
+  .a11y-provider-color-swatch,
+  [data-slot="sidebar-trigger"],
+  [data-slot="sidebar-group-action"],
+  [data-slot="sidebar-menu-action"],
+  [data-slot="sidebar-menu-button"],
+  [data-slot="sidebar-menu-sub-button"] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .sidebar-resize-rail {
+    width: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-trigger-icon,
+  .sidebar-resize-rail::after {
+    transition: none;
+  }
+
+  .sidebar-resize-rail[data-resizing="true"] .sidebar-resize-tip {
+    animation: none;
+  }
+}
