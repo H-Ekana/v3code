@@ -17,3 +17,6 @@
 - [Operations](./operations/ci.md)
 - [Providers](./providers/codex.md)
 - [Reference](./reference/encyclopedia.md)
+- Project plans
+  - [Nightly interaction and motion polish](./project/nightly-interaction-motion-polish-plan.md)
+  - [Ideal agents sidebar](./project/ideal-agents-sidebar.md)
