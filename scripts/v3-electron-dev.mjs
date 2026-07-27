@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
+import { V3_DEMO_RESPONDER_ENV } from "@t3tools/shared/v3Demo";
 import { prepareV3SidebarDemo } from "./v3-sidebar-demo.mjs";
 
 function isV3Workspace(directory) {
@@ -54,6 +55,7 @@ export function createV3ElectronDevLaunch(invocationRoot, baseEnvironment = proc
     T3CODE_DEV_INSTANCE: "v3-subagent-sidebar",
     T3CODE_DISABLE_AUTO_UPDATE: "1",
     T3CODE_DESKTOP_APP_STAGE_LABEL: "Nightly",
+    [V3_DEMO_RESPONDER_ENV]: "1",
     VITE_V3_DEMO_AGENT_SIDEBAR: "1",
   };
 

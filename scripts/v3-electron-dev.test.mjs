@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { test } from "node:test";
 
+import { V3_DEMO_RESPONDER_ENV } from "@t3tools/shared/v3Demo";
 import { createV3ElectronDevLaunch, resolveV3WorkspaceRoot } from "./v3-electron-dev.mjs";
 
 const repositoryRoot = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
@@ -24,6 +25,7 @@ test("creates an isolated desktop development launch", () => {
   assert.equal(launch.environment.T3CODE_DISABLE_AUTO_UPDATE, "1");
   assert.equal(launch.environment.T3CODE_DESKTOP_APP_STAGE_LABEL, "Nightly");
   assert.equal(launch.environment.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD, "1");
+  assert.equal(launch.environment[V3_DEMO_RESPONDER_ENV], "1");
   assert.equal(launch.environment.VITE_V3_DEMO_AGENT_SIDEBAR, "1");
   assert.match(launch.environment.APPDATA, /v3-electron-dev-appdata$/);
   assert.match(launch.dataHome, /sidebar-preview$/);

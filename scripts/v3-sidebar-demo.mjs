@@ -3,12 +3,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import * as Effect from "effect/Effect";
+import { V3_DEMO_PROJECT_ID, V3_DEMO_THREAD_ID } from "@t3tools/shared/v3Demo";
 
 import { runMigrations } from "../apps/server/src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "../apps/server/src/persistence/NodeSqliteClient.ts";
 
-export const V3_DEMO_PROJECT_ID = "v3-agent-playground";
-export const V3_DEMO_THREAD_ID = "v3-agent-sidebar-demo";
+export { V3_DEMO_PROJECT_ID, V3_DEMO_THREAD_ID };
 
 const PROJECTOR_NAMES = [
   "projection.projects",

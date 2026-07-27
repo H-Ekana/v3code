@@ -1,4 +1,5 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import { V3_DEMO_RESPONDER_INSTANCE_ID, withV3DemoResponderProvider } from "@t3tools/shared/v3Demo";
 import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
@@ -85,6 +86,23 @@ describe("isProviderInstancePickerVisible", () => {
 });
 
 describe("applyProviderInstanceSettings", () => {
+  it("keeps the built-in Task Responder selectable without a settings entry", () => {
+    const entries = deriveProviderInstanceEntries(withV3DemoResponderProvider([], true));
+    const [entry] = applyProviderInstanceSettings(entries, {
+      providerInstances: {},
+      providers: {} as never,
+    });
+
+    expect(entry).toMatchObject({
+      instanceId: V3_DEMO_RESPONDER_INSTANCE_ID,
+      displayName: "Task Responder",
+      enabled: true,
+      status: "ready",
+      isDefault: true,
+    });
+    expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
+  });
+
   it("uses settings when a streamed snapshot still reports a disabled default as enabled", () => {
     const entries = deriveProviderInstanceEntries([
       provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex" }),

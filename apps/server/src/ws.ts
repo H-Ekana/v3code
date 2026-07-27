@@ -116,9 +116,13 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import { V3_DEMO_RESPONDER_ENV, withV3DemoResponderProvider } from "@t3tools/shared/v3Demo";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const withConfiguredV3DemoResponder = (
+  providers: Parameters<typeof withV3DemoResponderProvider>[0],
+) => withV3DemoResponderProvider(providers, process.env[V3_DEMO_RESPONDER_ENV] === "1");
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
@@ -1068,7 +1072,7 @@ const makeWsRpcLayer = (
 
       const loadServerConfig = Effect.gen(function* () {
         const keybindingsConfig = yield* keybindings.loadConfigState;
-        const providers = yield* providerRegistry.getProviders;
+        const providers = withConfiguredV3DemoResponder(yield* providerRegistry.getProviders);
         const settings = ServerSettings.redactServerSettingsForClient(
           yield* serverSettings.getSettings,
         );
@@ -1996,6 +2000,7 @@ const makeWsRpcLayer = (
                 })),
               );
               const providerStatuses = providerRegistry.streamChanges.pipe(
+                Stream.map(withConfiguredV3DemoResponder),
                 Stream.map((providers) => ({
                   version: 1 as const,
                   type: "providerStatuses" as const,

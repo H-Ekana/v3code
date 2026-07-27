@@ -191,6 +191,10 @@
       "types": "./src/hostProcess.ts",
       "import": "./src/hostProcess.ts"
     },
+    "./v3Demo": {
+      "types": "./src/v3Demo.ts",
+      "import": "./src/v3Demo.ts"
+    },
     "./httpReadiness": {
       "types": "./src/httpReadiness.ts",
       "import": "./src/httpReadiness.ts"
