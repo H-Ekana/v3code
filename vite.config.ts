@@ -39,6 +39,7 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/web/public/mockServiceWorker.js",
+      "apps/web/public/splash-lab-app.css",
       "apps/web/src/lib/vendor/qrcodegen.ts",
       "apps/mobile/uniwind-types.d.ts",
       "*.icon/**",
