@@ -1,1 +1,218 @@
 /* File browser and diff transitions — owned by the files and diffs area. */
+
+:root {
+  /*
+   * Files/diffs state crossfade duration. Deliberately its own token, held apart
+   * from --motion-hover (140ms) and the FILES_SKELETON_DELAY_MS timing so the
+   * skeleton delay and the state handoff tune independently — they used to be
+   * accidentally equal, so the enter animation finished over an empty container
+   * before the skeleton ever appeared. Plan item 17 crossfade band 140-180ms;
+   * landed at the loud end for review. Mirrors FILES_CROSSFADE_MS in
+   * lib/filesDiffsMotion.ts.
+   */
+  --files-crossfade: 180ms;
+}
+
+/*
+ * Retained-content crossfade. Both the outgoing (retained, inert) and incoming
+ * layers occupy the same grid cell so they overlap; the incoming one animates in
+ * while the outgoing one fades and drifts away. Amplitudes are at the loud end
+ * of the plan bands (8px vertical handoff, 6px directional scope slide) pending
+ * a review tune-down.
+ */
+.files-crossfade {
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: clip;
+}
+
+.files-crossfade-layer {
+  display: flex;
+  flex-direction: column;
+  grid-area: 1 / 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.files-crossfade-entering {
+  animation: files-crossfade-in var(--files-crossfade) var(--ease-out-quart) backwards;
+}
+
+.files-crossfade-entering[data-diff-scope-direction="forward"] {
+  animation-name: files-crossfade-in-forward;
+}
+
+.files-crossfade-entering[data-diff-scope-direction="backward"] {
+  animation-name: files-crossfade-in-backward;
+}
+
+.files-crossfade-leaving {
+  pointer-events: none;
+  animation: files-crossfade-out var(--files-crossfade) var(--ease-out-quart) forwards;
+}
+
+.files-crossfade-leaving[data-diff-scope-direction="forward"] {
+  animation-name: files-crossfade-out-forward;
+}
+
+.files-crossfade-leaving[data-diff-scope-direction="backward"] {
+  animation-name: files-crossfade-out-backward;
+}
+
+@keyframes files-crossfade-in {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes files-crossfade-out {
+  from {
+    opacity: 1;
+    translate: 0 0;
+  }
+
+  to {
+    opacity: 0;
+    translate: 0 -8px;
+  }
+}
+
+@keyframes files-crossfade-in-forward {
+  from {
+    opacity: 0;
+    translate: 6px 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes files-crossfade-in-backward {
+  from {
+    opacity: 0;
+    translate: -6px 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes files-crossfade-out-forward {
+  from {
+    opacity: 1;
+    translate: 0 0;
+  }
+
+  to {
+    opacity: 0;
+    translate: -6px 0;
+  }
+}
+
+@keyframes files-crossfade-out-backward {
+  from {
+    opacity: 1;
+    translate: 0 0;
+  }
+
+  to {
+    opacity: 0;
+    translate: 6px 0;
+  }
+}
+
+/*
+ * Level 2 state handoff. Loading, error, empty, and content regions cross into
+ * place once, over one shared duration, using only opacity and a 4px translate.
+ * `backwards` fill keeps the first painted frame at the start of the animation
+ * without leaving a permanent transform (and therefore a permanent stacking
+ * context) over diff and file content once it settles.
+ *
+ * Nothing here targets a row. Large trees and virtualized diffs animate as a
+ * single container or not at all; see `shouldRevealChangedFiles`.
+ */
+.files-state-enter {
+  animation: files-state-enter var(--motion-hover) var(--ease-out-quart) backwards;
+}
+
+/* Diff-scope changes read as short directional navigation, not a page swap. */
+.files-state-enter[data-diff-scope-direction="forward"] {
+  animation-name: files-scope-forward;
+}
+
+.files-state-enter[data-diff-scope-direction="backward"] {
+  animation-name: files-scope-backward;
+}
+
+/* One container-level reveal for a changed-files tree — never a per-row stagger. */
+.files-tree-reveal {
+  animation: files-state-enter var(--motion-hover) var(--ease-out-quart) backwards;
+}
+
+@keyframes files-state-enter {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes files-scope-forward {
+  from {
+    opacity: 0;
+    translate: 4px 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes files-scope-backward {
+  from {
+    opacity: 0;
+    translate: -4px 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .files-state-enter,
+  .files-state-enter[data-diff-scope-direction="forward"],
+  .files-state-enter[data-diff-scope-direction="backward"],
+  .files-tree-reveal {
+    animation: files-state-reduced var(--motion-press) linear backwards;
+  }
+}
+
+@keyframes files-state-reduced {
+  from {
+    opacity: 0.72;
+  }
+
+  to {
+    opacity: 1;
+  }
+}

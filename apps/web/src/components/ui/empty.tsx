@@ -6,7 +6,11 @@ function Empty({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-1 flex-col items-center justify-center gap-6 text-balance p-6 text-center md:p-12",
+        // Level 2 arrival. Empty states mount when a surface resolves from
+        // loading to "nothing here", so this reads as the loading -> empty
+        // crossfade rather than as decoration. `motion-arrival` degrades to a
+        // plain opacity settle under reduced motion.
+        "motion-arrival flex min-w-0 flex-1 flex-col items-center justify-center gap-6 text-balance p-6 text-center md:p-12",
         className,
       )}
       data-slot="empty"
@@ -34,6 +38,13 @@ const emptyMediaVariants = cva(
     variants: {
       variant: {
         default: "bg-transparent",
+        /**
+         * Small semantic mark: one icon in a quiet tinted disc, with no
+         * decorative stacked-card layers behind it. Callers set the semantic
+         * tone via `className` (e.g. `text-success`, `text-destructive`).
+         */
+        semantic:
+          "relative flex size-9 shrink-0 items-center justify-center rounded-full border border-border/60 bg-muted/40 text-muted-foreground [&_svg:not([class*='size-'])]:size-4.5",
         icon: "relative flex size-9 shrink-0 items-center justify-center rounded-md border bg-card not-dark:bg-clip-padding text-foreground shadow-sm/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-md)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)] [&_svg:not([class*='size-'])]:size-4.5",
       },
     },

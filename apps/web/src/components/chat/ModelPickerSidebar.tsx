@@ -1,5 +1,5 @@
 import { type ProviderInstanceId } from "@t3tools/contracts";
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -25,11 +25,63 @@ function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
   return msg ? `${label} — ${kind}. ${msg}` : `${label} — ${kind}.`;
 }
 
+/**
+ * The rail marker is parked at `top: 0` and positioned entirely by transform,
+ * so moving it between providers is a compositor-only change (FLIP) rather
+ * than an animated `top`, which would relayout the rail on every step.
+ */
 const SELECTED_INDICATOR_CLASS =
-  "pointer-events-none absolute -right-1 top-1/2 z-10 h-5 w-0.75 -translate-y-1/2 rounded-l-full bg-primary";
+  "pointer-events-none absolute right-0 top-0 z-10 h-5 w-0.75 rounded-l-full bg-primary";
+/**
+ * Shared focus treatment for the rail buttons. Previously focus was signalled
+ * by a background change alone, which is indistinguishable from hover.
+ */
+const RAIL_BUTTON_CLASS =
+  "motion-focus relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:outline-none";
 const BADGE_BASE_CLASS =
   "pointer-events-none absolute -right-0.5 top-0.5 z-10 flex size-3.5 items-center justify-center rounded-full bg-transparent shadow-sm ";
 const NEW_BADGE_CLASS = `${BADGE_BASE_CLASS} text-amber-600  dark:text-amber-300 `;
+
+/** Half of the marker's `h-5`. Keeps the segment centred on the active button. */
+const RAIL_MARKER_HALF_HEIGHT = 10;
+
+/**
+ * Where the rail marker belongs, in px from the top of the scrollable rail
+ * content. Pure so the FLIP measurement can be checked without a layout engine.
+ */
+export function resolveRailMarkerOffset(input: {
+  contentTop: number;
+  contentScrollTop: number;
+  buttonTop: number;
+  buttonHeight: number;
+}): number {
+  return (
+    input.buttonTop -
+    input.contentTop +
+    input.contentScrollTop +
+    input.buttonHeight / 2 -
+    RAIL_MARKER_HALF_HEIGHT
+  );
+}
+
+/**
+ * The moving provider marker.
+ *
+ * Positioned purely by transform so switching providers is a compositor-only
+ * change. It is inert: `aria-hidden` and `pointer-events-none`, so it can never
+ * take focus or intercept a click while it travels.
+ */
+export function ModelPickerRailMarker(props: { offset: number; placed: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      data-model-picker-selected-indicator="true"
+      className={cn(SELECTED_INDICATOR_CLASS, "nav-model-rail-marker")}
+      data-nav-initial={props.placed ? undefined : "true"}
+      style={{ transform: `translate3d(0, ${props.offset}px, 0)` }}
+    />
+  );
+}
 
 /** Opens toward the rail so the list stays readable (not over the model names). */
 const PICKER_TOOLTIP_SIDE = "left" as const;
@@ -65,6 +117,9 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   const [hoveredInstanceId, setHoveredInstanceId] = useState<ProviderInstanceId | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement>(null);
   const [selectedIndicatorTop, setSelectedIndicatorTop] = useState<number | null>(null);
+  // The first measurement places the marker; it must not travel from the top of
+  // the rail on open. Only subsequent provider changes animate.
+  const [markerPlaced, setMarkerPlaced] = useState(false);
   const duplicateDriverCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const entry of props.instanceEntries) {
@@ -88,13 +143,22 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
     const contentRect = content.getBoundingClientRect();
     const selectedButtonRect = selectedButton.getBoundingClientRect();
     setSelectedIndicatorTop(
-      selectedButtonRect.top -
-        contentRect.top +
-        content.scrollTop +
-        selectedButtonRect.height / 2 -
-        10,
+      resolveRailMarkerOffset({
+        contentTop: contentRect.top,
+        contentScrollTop: content.scrollTop,
+        buttonTop: selectedButtonRect.top,
+        buttonHeight: selectedButtonRect.height,
+      }),
     );
   }, [props.instanceEntries, props.selectedInstanceId, showFavorites]);
+
+  useEffect(() => {
+    if (selectedIndicatorTop === null || markerPlaced) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => setMarkerPlaced(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [markerPlaced, selectedIndicatorTop]);
 
   return (
     <div
@@ -107,14 +171,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
           className="relative flex min-h-full flex-col gap-1 px-1 pb-1 pt-0.5"
         >
           {selectedIndicatorTop !== null ? (
-            <div
-              data-model-picker-selected-indicator="true"
-              className={cn(
-                SELECTED_INDICATOR_CLASS,
-                "right-0 translate-y-0 transition-[top] duration-200 ease-out",
-              )}
-              style={{ top: selectedIndicatorTop }}
-            />
+            <ModelPickerRailMarker offset={selectedIndicatorTop} placed={markerPlaced} />
           ) : null}
           {/* Favorites section */}
           {showFavorites ? (
@@ -124,9 +181,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   <TooltipTrigger
                     render={
                       <button
-                        className={cn(
-                          "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:outline-none",
-                        )}
+                        className={RAIL_BUTTON_CLASS}
                         onClick={() => handleSelect("favorites")}
                         type="button"
                         data-model-picker-provider="favorites"
@@ -172,7 +227,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
               <button
                 data-model-picker-provider={entry.instanceId}
                 className={cn(
-                  "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:outline-none",
+                  RAIL_BUTTON_CLASS,
                   isDisabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
                 )}
                 data-provider-accent-color={entry.accentColor}

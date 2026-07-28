@@ -19,11 +19,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import { useAssetUrlState } from "~/assets/assetUrls";
 import ChatMarkdown from "~/components/ChatMarkdown";
+import { StateCrossfade } from "~/components/StateCrossfade";
 import { OpenInPicker } from "~/components/chat/OpenInPicker";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
+import { useDeferredPending } from "~/lib/filesDiffsMotion";
 import { cn } from "~/lib/utils";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { resolvePathLinkTarget } from "~/terminal-links";
@@ -127,17 +129,22 @@ function WorkspaceImagePreview(props: {
     path: props.absolutePath,
   });
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const isResolved = assetUrl._tag === "Success";
+  const spinnerVisible = useDeferredPending(!isResolved);
 
-  if (assetUrl._tag === "Failure" || (assetUrl._tag === "Success" && failedUrl === assetUrl.url)) {
+  if (assetUrl._tag === "Failure" || (isResolved && failedUrl === assetUrl.url)) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
+      <div
+        className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive"
+        role="alert"
+      >
         Unable to load workspace image.
       </div>
     );
   }
 
   return assetUrl._tag === "Success" ? (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+    <div className="files-state-enter flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
       <img
         className="max-h-full max-w-full object-contain"
         src={assetUrl.url}
@@ -146,8 +153,14 @@ function WorkspaceImagePreview(props: {
       />
     </div>
   ) : (
-    <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
-      <LoaderCircle className="size-5 animate-spin" />
+    <div
+      className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground"
+      data-file-preview-spinner={spinnerVisible ? "visible" : "deferred"}
+    >
+      <span className="sr-only" role="status" aria-live="polite">
+        Loading {props.alt}
+      </span>
+      {spinnerVisible ? <LoaderCircle aria-hidden="true" className="size-5 animate-spin" /> : null}
     </div>
   );
 }
@@ -690,6 +703,25 @@ export default function FilePreviewPanel({
     [projectName, relativePath],
   );
   const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
+  // The preview keeps whatever it already has while a background refresh runs;
+  // only a first load for the newly selected path has nothing to show, and that
+  // spinner waits out the skeleton delay so a cached file never flashes one.
+  const isFirstLoad =
+    relativePath !== null && !isImage && file.data === null && file.error === null;
+  const isBackgroundRefresh = relativePath !== null && file.data !== null && file.isPending;
+  const loadingSpinnerVisible = useDeferredPending(isFirstLoad);
+  const previewState =
+    relativePath === null
+      ? "empty"
+      : isImage
+        ? "image"
+        : file.error && file.data === null
+          ? "error"
+          : file.data === null
+            ? "loading"
+            : renderMarkdown
+              ? "markdown"
+              : "content";
 
   useEffect(() => {
     const currentCrumb = breadcrumbRef.current?.querySelector<HTMLElement>(
@@ -860,75 +892,100 @@ export default function FilePreviewPanel({
             "min-w-0 flex-1 flex-col overflow-hidden",
             relativePath ? "flex" : "hidden",
           )}
+          aria-busy={isBackgroundRefresh || undefined}
+          data-file-preview-state={previewState}
         >
-          {relativePath && isImage && absolutePath ? (
-            <WorkspaceImagePreview
-              key={absolutePath}
-              environmentId={environmentId}
-              threadRef={threadRef}
-              absolutePath={absolutePath}
-              alt={relativePath}
-            />
-          ) : relativePath && file.error && file.data === null ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
-              {file.error}
-            </div>
-          ) : relativePath && file.data === null ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
-              <LoaderCircle className="size-5 animate-spin" />
-            </div>
-          ) : relativePath && file.data ? (
-            isMarkdown && renderMarkdown ? (
-              <RenderedMarkdownSurface
+          {/*
+           * Keyed on the state and the selected path so the preview crosses in
+           * as one short handoff from the tree selection, with the outgoing
+           * surface retained through the crossfade so it actually overlaps. A
+           * background refresh of the same file keeps the same key, so settled
+           * content never re-animates underneath the reader.
+           */}
+          <StateCrossfade
+            contentKey={`${previewState}:${relativePath ?? ""}`}
+            className="min-h-0 flex-1"
+          >
+            {relativePath && isImage && absolutePath ? (
+              <WorkspaceImagePreview
+                key={absolutePath}
                 environmentId={environmentId}
-                cwd={cwd}
-                relativePath={relativePath}
                 threadRef={threadRef}
-                contents={file.data.contents}
-                onPendingChange={onPendingChange}
+                absolutePath={absolutePath}
+                alt={relativePath}
               />
-            ) : file.data.truncated ? (
-              <Virtualizer
-                key={`${relativePath}:${resolvedTheme}:${file.data.byteLength}`}
-                className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
-                config={{
-                  overscrollSize: 600,
-                  intersectionObserverMargin: 1200,
-                }}
+            ) : relativePath && file.error && file.data === null ? (
+              <div
+                className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive"
+                role="alert"
               >
-                <File
-                  file={{
-                    name: relativePath,
-                    contents: file.data.contents,
-                    cacheKey: projectFileCacheKey(cwd, relativePath, file.data.contents),
-                  }}
-                  options={{
-                    disableFileHeader: true,
-                    overflow: wordWrap ? "wrap" : "scroll",
-                    theme: resolveDiffThemeName(resolvedTheme),
-                    themeType: resolvedTheme,
-                    unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
-                    onPostRender: onFilePostRender,
-                  }}
-                  className="min-h-full"
+                {file.error}
+              </div>
+            ) : relativePath && file.data === null ? (
+              <div
+                className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground"
+                data-file-preview-spinner={loadingSpinnerVisible ? "visible" : "deferred"}
+              >
+                <span className="sr-only" role="status" aria-live="polite">
+                  Loading {relativePath}
+                </span>
+                {loadingSpinnerVisible ? (
+                  <LoaderCircle aria-hidden="true" className="size-5 animate-spin" />
+                ) : null}
+              </div>
+            ) : relativePath && file.data ? (
+              isMarkdown && renderMarkdown ? (
+                <RenderedMarkdownSurface
+                  environmentId={environmentId}
+                  cwd={cwd}
+                  relativePath={relativePath}
+                  threadRef={threadRef}
+                  contents={file.data.contents}
+                  onPendingChange={onPendingChange}
                 />
-              </Virtualizer>
-            ) : (
-              <EditableFileSurface
-                key={`${relativePath}:${resolvedTheme}`}
-                environmentId={environmentId}
-                cwd={cwd}
-                relativePath={relativePath}
-                composerDraftTarget={composerDraftTarget}
-                contents={file.data.contents}
-                resolvedTheme={resolvedTheme}
-                revealRequestId={revealRequestId}
-                wordWrap={wordWrap}
-                onPostRender={onFilePostRender}
-                onPendingChange={onPendingChange}
-              />
-            )
-          ) : null}
+              ) : file.data.truncated ? (
+                <Virtualizer
+                  key={`${relativePath}:${resolvedTheme}:${file.data.byteLength}`}
+                  className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
+                  config={{
+                    overscrollSize: 600,
+                    intersectionObserverMargin: 1200,
+                  }}
+                >
+                  <File
+                    file={{
+                      name: relativePath,
+                      contents: file.data.contents,
+                      cacheKey: projectFileCacheKey(cwd, relativePath, file.data.contents),
+                    }}
+                    options={{
+                      disableFileHeader: true,
+                      overflow: wordWrap ? "wrap" : "scroll",
+                      theme: resolveDiffThemeName(resolvedTheme),
+                      themeType: resolvedTheme,
+                      unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
+                      onPostRender: onFilePostRender,
+                    }}
+                    className="min-h-full"
+                  />
+                </Virtualizer>
+              ) : (
+                <EditableFileSurface
+                  key={`${relativePath}:${resolvedTheme}`}
+                  environmentId={environmentId}
+                  cwd={cwd}
+                  relativePath={relativePath}
+                  composerDraftTarget={composerDraftTarget}
+                  contents={file.data.contents}
+                  resolvedTheme={resolvedTheme}
+                  revealRequestId={revealRequestId}
+                  wordWrap={wordWrap}
+                  onPostRender={onFilePostRender}
+                  onPendingChange={onPendingChange}
+                />
+              )
+            ) : null}
+          </StateCrossfade>
         </div>
         {explorerOpen || relativePath === null ? (
           <aside

@@ -65,6 +65,17 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     questionId: string;
     optionLabel: string;
   } | null>(null);
+  // Only a selection made during this mount earns the check arrival, so
+  // restored answers and remounts never replay it.
+  const [liveSelectedLabel, setLiveSelectedLabel] = useState<string | null>(null);
+  const previousQuestionIndexRef = useRef(questionIndex);
+  const questionDirection: "forward" | "backward" =
+    questionIndex < previousQuestionIndexRef.current ? "backward" : "forward";
+
+  useEffect(() => {
+    previousQuestionIndexRef.current = questionIndex;
+    setLiveSelectedLabel(null);
+  }, [questionIndex]);
 
   useEffect(() => {
     onAdvanceRef.current = onAdvance;
@@ -101,6 +112,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   }, []);
 
   const handleOptionSelection = useEffectEvent((questionId: string, optionLabel: string) => {
+    setLiveSelectedLabel(optionLabel);
     if (activeQuestion?.multiSelect) {
       onToggleOption(questionId, optionLabel);
       return;
@@ -153,7 +165,11 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const customAnswerActive = progress.customAnswer.trim().length > 0;
 
   return (
-    <div className="px-4 py-3 sm:px-5">
+    <div
+      key={activeQuestion.id}
+      className="composer-question-panel px-4 py-3 sm:px-5"
+      data-question-direction={questionDirection}
+    >
       <div className="mb-2 flex items-center gap-3">
         <span className="text-[11px] font-semibold tracking-widest text-muted-foreground/55 uppercase">
           {activeQuestion.header}
@@ -178,7 +194,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
             (!customAnswerActive && progress.selectedOptionLabels.includes(option.label));
           const shortcutKey = index < 9 ? index + 1 : null;
           const className = cn(
-            "group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-[background-color,border-color,box-shadow] duration-200 ease-out focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25 motion-reduce:transition-none",
+            "composer-answer-option motion-press group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-[background-color,border-color,box-shadow] duration-200 ease-out focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25 motion-reduce:transition-none",
             isSelected
               ? "border-primary/30 bg-primary/8 text-foreground ring-1 ring-primary/15"
               : "border-transparent bg-muted/22 text-foreground/85 hover:border-primary/18 hover:bg-primary/[0.035]",
@@ -194,7 +210,12 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                 ) : null}
               </div>
               {isSelected ? (
-                <CheckIcon className="size-3.5 shrink-0 text-primary" />
+                <CheckIcon
+                  className={cn(
+                    "size-3.5 shrink-0 text-primary",
+                    liveSelectedLabel === option.label && "composer-answer-check--arriving",
+                  )}
+                />
               ) : shortcutKey !== null ? (
                 <kbd
                   className={cn(
@@ -222,6 +243,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           );
         })}
       </div>
+      <span className="sr-only" role="status" aria-live="polite">
+        {isResponding
+          ? "Submitting your answer…"
+          : liveSelectedLabel
+            ? `Selected ${liveSelectedLabel}`
+            : ""}
+      </span>
     </div>
   );
 });

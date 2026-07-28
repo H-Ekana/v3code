@@ -1,1 +1,341 @@
-/* Agent and thread lifecycle — owned by the agents and threads area. */
+/* Agent and thread lifecycle — owned by the agents and threads area.
+ *
+ * Timing tokens, easings, focus rings, and layer order come from motion.css.
+ * Nothing here redefines them; these are the domain-specific recipes for the
+ * agents panel, thread rows, and the sidebar's project identity.
+ *
+ * Intensity ladder (see docs/project/nightly-interaction-motion-polish-plan.md):
+ *   Level 1 — phase-count crossfade.
+ *   Level 2 — agent arrival, running ring, ring→check completion, activity
+ *             reveal, thread running trace, project identity crossfade.
+ *   Level 3 — thread settlement acknowledgment, and ONLY that. It is the single
+ *             earned accent this area spends.
+ */
+
+@property --settle-ack-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/*
+ * Durations used below. No rule body carries a bare millisecond literal: every
+ * value is either a ladder token from motion.css or a named token declared here
+ * with the plan band it satisfies, so an intensity-creep grep across the
+ * stylesheets only ever turns up plan-cited declarations.
+ *
+ * Two durations need no token of their own because the ladder already names
+ * them exactly:
+ *   --motion-layout (240ms) — plan item 4's 220-260ms card-surface settle.
+ *   --motion-state  (200ms) — plan item 4's 180-220ms ring-to-check contraction.
+ */
+:root {
+  /* Plan item 4 asks for a ~180ms agent arrival. */
+  --agents-arrival: 180ms;
+  /* Plan item 4 asks for a 160-180ms activity disclosure reveal. */
+  --agents-activity-reveal: 170ms;
+  /* Plan item 4 asks for a 140-160ms phase-count crossfade. */
+  --agents-phase-count: 150ms;
+  /* Duty-cycle RATE for the running ring, deliberately outside the intensity
+     ladder: the ladder bands one-shot transitions, not the period of an
+     ambient loop that runs only while work is genuinely active. */
+  --agents-running-ring-rate: 2s;
+  /* Rotation RATE for the thread running trace. Outside the ladder for the
+     same reason as the ring above. */
+  --threads-running-trace-rate: 1.8s;
+  /* Plan item 11 asks for a 240-300ms Level 3 settle acknowledgment. Mirrored
+     in Sidebar.logic.ts as THREAD_SETTLE_ACK_DURATION_MS — keep them in step. */
+  --threads-settle-ack: 280ms;
+  /* The row-edge illumination is part of the SAME Level 3 acknowledgment as the
+     ring above (it only ever plays while a row is `acknowledged`), so it spends
+     the accent's own 240-300ms band rather than a quieter Level 2 window — the
+     whole settlement has to read as one loud, deliberate event. Mirrored in
+     Sidebar.logic.ts as THREAD_SETTLE_ROW_EDGE_MS. */
+  --threads-settle-row-edge: 260ms;
+  /* Plan item 12 asks for a ~160ms project identity crossfade. */
+  --sidebar-project-identity: 160ms;
+}
+
+/* ── Agent lifecycle choreography (plan item 4) ─────────────────────── */
+
+/* Level 2. The card border/tint settling into its inactive surface is a plain
+   property transition, not an accent: it is the ONLY thing that moves on the
+   card body during a completion, so the ring→check below stays the single
+   coordinated completion sequence. */
+.agent-card {
+  transition-property: background-color, border-color, box-shadow, opacity;
+  transition-duration: var(--motion-layout);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+/* Level 2. New agents only: `agent-card-arrival` is applied from a one-shot
+   lifecycle registry, never from status, so a remount cannot replay it. */
+.agent-card-arrival {
+  animation: agent-card-arrival var(--agents-arrival) var(--ease-out-expo) both;
+}
+
+/* Level 2. Tight running ring, 3px beyond the status mark — under the 4px cap
+   and duty-cycled rather than continuously glowing. */
+.agent-status-mark {
+  position: relative;
+  display: inline-flex;
+  isolation: isolate;
+}
+
+.agent-status-mark[data-agent-running="true"]::after {
+  position: absolute;
+  inset: -3px;
+  border: 1px solid color-mix(in srgb, var(--primary) 58%, transparent);
+  border-radius: 9999px;
+  box-shadow: 0 0 3px color-mix(in srgb, var(--primary) 26%, transparent);
+  content: "";
+  pointer-events: none;
+  animation: agent-status-ring-duty var(--agents-running-ring-rate) steps(1, end) infinite;
+}
+
+/* Level 2. The running ring contracting into the completion check. One move,
+   on one element: no card glow, no icon flash, no border sweep beside it. */
+.agent-completion-mark {
+  animation: agent-completion-contract var(--motion-state) var(--ease-out-quint) both;
+}
+
+/* Level 2. Activity detail reveal — it eases in rather than mounting abruptly. */
+.agent-activity-reveal {
+  animation: agent-activity-reveal var(--agents-activity-reveal) var(--ease-out-quart) both;
+}
+
+/* Level 1. Phase counts crossfade instead of jumping. */
+.agent-phase-count {
+  animation: agent-phase-count var(--agents-phase-count) var(--ease-out-quart) both;
+}
+
+@keyframes agent-card-arrival {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0;
+  }
+}
+
+@keyframes agent-status-ring-duty {
+  0%,
+  24%,
+  100% {
+    opacity: 0.85;
+  }
+
+  25%,
+  82% {
+    opacity: 0.28;
+  }
+}
+
+@keyframes agent-completion-contract {
+  from {
+    opacity: 0;
+    scale: 0.7;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 26%, transparent);
+  }
+
+  60% {
+    opacity: 1;
+    scale: 1;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--astro-highlight) 18%, transparent);
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes agent-activity-reveal {
+  from {
+    opacity: 0;
+    translate: 0 -2px;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0;
+  }
+}
+
+@keyframes agent-phase-count {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── Thread running treatment (plan item 3) ─────────────────────────── */
+
+/* Level 2. The violet running trace that replaces the old cyan/blue `Working`
+   colour. Colour never carries this alone: the consumer always renders the
+   status label plus a dashed-ring icon beside it. */
+.thread-status-trace {
+  animation: thread-status-trace var(--threads-running-trace-rate) linear infinite;
+}
+
+@keyframes thread-status-trace {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/* ── Thread settlement acknowledgment (plan item 11) ────────────────── */
+
+/* LEVEL 3 — the single earned accent in this area.
+   A bounded ring travels around the settle control, 3px beyond it, and resolves
+   over --threads-settle-ack. Applied only after a user-initiated single-thread
+   settle SUCCEEDS; bulk, automatic, remount, reorder, and failure paths never
+   reach it. */
+.thread-settle-ack {
+  position: relative;
+}
+
+.thread-settle-ack::after {
+  position: absolute;
+  inset: -3px;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--settle-ack-angle),
+    transparent 0deg 200deg,
+    color-mix(in srgb, var(--primary) 80%, transparent) 320deg,
+    var(--astro-highlight) 360deg
+  );
+  content: "";
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
+  /* `linear`, deliberately. On `--ease-out-quint` (cubic-bezier(0.22, 1, 0.36, 1))
+     the curve is ~90% complete by t=0.3, so the whole 360deg sweep was spent in
+     the first ~60ms of 280ms and the remaining 79% of the animation was a
+     stationary arc — which is exactly the reported "the ring barely travels".
+     A travelling highlight needs constant angular velocity to read as travel. */
+  animation: thread-settle-ack-travel var(--threads-settle-ack) linear both;
+}
+
+@keyframes thread-settle-ack-travel {
+  from {
+    --settle-ack-angle: 0deg;
+    opacity: 1;
+  }
+
+  /* The sweep now owns the full duration; the fade is layered over its tail
+     rather than taking a 28% slice of the timeline for itself. */
+  80% {
+    opacity: 1;
+  }
+
+  to {
+    --settle-ack-angle: 360deg;
+    opacity: 0;
+  }
+}
+
+/* LEVEL 3 (part of the settle acknowledgment). The whole row lights from every
+   edge as it settles: a contained 1px all-round ring in the astro-highlight tip
+   over a soft violet inset glow. Inset only — nothing bleeds past the row — and
+   the glow stays inside the Level 3 6px budget. This replaced a single
+   `inset 2px 0 0 0` left-edge bar, which lit only the row's left border. */
+.thread-settle-row-edge {
+  animation: thread-settle-row-edge var(--threads-settle-row-edge) var(--ease-out-quart) both;
+}
+
+@keyframes thread-settle-row-edge {
+  from {
+    box-shadow:
+      inset 0 0 0 1px var(--astro-highlight),
+      inset 0 0 6px color-mix(in srgb, var(--primary) 42%, transparent);
+  }
+
+  55% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--astro-highlight) 85%, transparent),
+      inset 0 0 6px color-mix(in srgb, var(--primary) 32%, transparent);
+  }
+
+  to {
+    box-shadow:
+      inset 0 0 0 1px transparent,
+      inset 0 0 6px transparent;
+  }
+}
+
+/* The relocating row rides above its neighbours on an opaque backdrop while it
+   slides from its active card slot down into the settled shelf, so a normally
+   translucent row never reads as text painted over the rows it crosses. The
+   slide itself is a WAAPI transform driven from SidebarV2 over
+   THREAD_SETTLE_RELOCATE_MS; only the stacking context and backdrop live here.
+   No animation of its own — nothing to freeze under reduced motion. */
+.thread-settle-relocating {
+  position: relative;
+  z-index: 20;
+  border-radius: var(--radius-md);
+  background-color: var(--sidebar-row-lifted);
+}
+
+/* Failed settlement: semantic destructive emphasis, no completion accent. */
+.thread-settle-failed {
+  border-color: color-mix(in srgb, var(--destructive) 55%, transparent);
+  color: var(--destructive);
+}
+
+/* ── Project switching (plan item 12, project-switch half) ──────────── */
+
+/* Level 2. Project identity crossfades rather than hard-swapping. Opacity only:
+   the row list below owns the one transform in flight during a scope change, so
+   the two can never compete. */
+.sidebar-project-identity {
+  animation: sidebar-project-identity var(--sidebar-project-identity) var(--ease-out-quart) both;
+}
+
+@keyframes sidebar-project-identity {
+  from {
+    opacity: 0.2;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-card {
+    /* Not an intensity value: this is motion.css's own instant sentinel, kept
+       byte-identical so the two files collapse transitions the same way. */
+    transition-duration: 0.01ms;
+  }
+
+  .agent-card-arrival,
+  .agent-completion-mark,
+  .agent-activity-reveal,
+  .agent-phase-count,
+  .thread-status-trace,
+  .thread-settle-row-edge,
+  .sidebar-project-identity {
+    animation: none;
+  }
+
+  .agent-status-mark[data-agent-running="true"]::after {
+    animation: none;
+    opacity: 0.55;
+  }
+
+  /* Reduced motion keeps the confirmed check and the settled label — both are
+     real DOM — and drops only the ring travel. */
+  .thread-settle-ack::after {
+    content: none;
+  }
+}

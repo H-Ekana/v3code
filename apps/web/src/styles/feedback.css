@@ -1,1 +1,194 @@
-/* Toast, banner, and outcome feedback — owned by the feedback area. */
+/*
+ * Toast, banner, loading, empty-state, and Git/publishing outcome feedback.
+ *
+ * Durations, easings, focus rings, and z-index roles live in `styles/motion.css`.
+ * This file only names the two feedback-specific durations the shared ladder
+ * does not already cover, and the recipes that are unique to this area.
+ *
+ * Intensity budget for this file:
+ *   - toast arrival, banner arrival, label crossfade, pending swap, route
+ *     progress, empty-state arrival ....... Level 2 (state handoff)
+ *   - semantic toast edge accents .......... Level 0 (static, no animation)
+ *   - publishing acknowledgment ............ Level 3, and only that one.
+ */
+
+:root {
+  /* Plan item 19 asks for ~220-240ms; sits just under `--motion-layout`. */
+  --feedback-toast-arrival: 230ms;
+  /* Plan item 18 asks for 260-320ms for confirmed repository publishing. */
+  --feedback-publish-accent: 280ms;
+}
+
+/* --------------------------------------------------------------- toasts -- */
+
+/*
+ * Contained semantic outcome accent. Recolouring the inline-start border edge
+ * changes no box metrics, so the toast keeps its geometry and Base UI keeps
+ * measuring the same height for the stack.
+ */
+:is([data-slot="toast-root"], [data-slot="toast-popup"])[data-type="success"] {
+  border-inline-start-color: color-mix(in srgb, var(--success) 55%, var(--border));
+}
+
+:is([data-slot="toast-root"], [data-slot="toast-popup"])[data-type="error"] {
+  border-inline-start-color: color-mix(in srgb, var(--destructive) 55%, var(--border));
+}
+
+:is([data-slot="toast-root"], [data-slot="toast-popup"])[data-type="warning"] {
+  border-inline-start-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+}
+
+:is([data-slot="toast-root"], [data-slot="toast-popup"])[data-type="info"] {
+  border-inline-start-color: color-mix(in srgb, var(--info) 48%, var(--border));
+}
+
+/* ------------------------------------------------------- label crossfade -- */
+
+/*
+ * Opacity-only handoff for a label whose underlying value has been *confirmed*
+ * (branch checked out, environment switched). Optimistic text still updates
+ * instantly and without this class, so the crossfade never implies a change
+ * that has not landed yet.
+ */
+.feedback-label-crossfade {
+  animation: feedback-label-crossfade var(--motion-state) var(--ease-out-quart) both;
+}
+
+@keyframes feedback-label-crossfade {
+  from {
+    opacity: 0.32;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* --------------------------------------------------------- route progress -- */
+
+/*
+ * Narrow pending-context treatment: a 1px rail under the control that owns the
+ * pending change. Deliberately not a glow and not a spinner overlay, so the
+ * control's own geometry is untouched.
+ */
+.feedback-route-progress {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 1px;
+  overflow: hidden;
+  border-radius: 1px;
+  background-color: color-mix(in srgb, var(--primary) 16%, transparent);
+  pointer-events: none;
+}
+
+.feedback-route-progress::after {
+  position: absolute;
+  inset-block: 0;
+  width: 40%;
+  border-radius: inherit;
+  background-image: linear-gradient(90deg, transparent, var(--primary) 64%, var(--astro-highlight));
+  content: "";
+  animation: feedback-route-progress-travel 1.1s var(--ease-out-quart) infinite;
+}
+
+@keyframes feedback-route-progress-travel {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/* ----------------------------------------- publishing acknowledgment (L3) -- */
+
+/*
+ * The single earned Level 3 accent in the feedback area. Consumers must gate
+ * this on a confirmed initial push (see `shouldPlayPublishAcknowledgment`);
+ * a created-but-unpushed remote gets the quiet static success mark instead.
+ */
+.feedback-publish-ack {
+  position: relative;
+  animation: feedback-publish-ack-center var(--feedback-publish-accent) var(--ease-out-quint) both;
+}
+
+.feedback-publish-ack::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+  animation: feedback-publish-ack-ring var(--feedback-publish-accent) var(--ease-out-expo) both;
+}
+
+@keyframes feedback-publish-ack-center {
+  from {
+    opacity: 0.55;
+    scale: 0.9;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@keyframes feedback-publish-ack-ring {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 62%, transparent);
+    opacity: 1;
+  }
+
+  58% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--astro-highlight) 34%, transparent);
+    opacity: 1;
+  }
+
+  to {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--astro-highlight) 0%, transparent);
+    opacity: 0;
+  }
+}
+
+/* ------------------------------------------------- reduced-motion fallbacks -- */
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * Toast: keep the crossfade, drop the slide. The doubled attribute selector
+   * plus this file being unlayered outranks the utility that sets `transition`.
+   */
+  [data-slot="toast-root"][data-slot] {
+    transition-property: opacity;
+    transition-duration: var(--motion-press);
+  }
+
+  .feedback-label-crossfade {
+    animation-duration: var(--motion-press);
+  }
+
+  /* Keep the rail visible as a static pending marker; stop the travel. */
+  .feedback-route-progress::after {
+    width: 100%;
+    background-image: none;
+    background-color: color-mix(in srgb, var(--primary) 46%, transparent);
+    animation: none;
+  }
+
+  /* Confirmed publishing still reads as success; the ring simply does not run. */
+  .feedback-publish-ack {
+    animation: none;
+  }
+
+  .feedback-publish-ack::after {
+    animation: none;
+    content: none;
+  }
+
+  /* Loading skeletons settle to a flat muted block rather than a frozen sweep. */
+  [data-slot="skeleton"] {
+    background-image: none;
+    animation: none;
+  }
+}

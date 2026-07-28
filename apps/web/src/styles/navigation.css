@@ -1,1 +1,258 @@
 /* Sidebar, settings, and navigation motion — owned by the navigation area. */
+
+/*
+ * Durations, easings, focus rings, and layer order all come from
+ * styles/motion.css, which index.css imports before this file. Reference those
+ * tokens bare — never as `var(..., fallback)`, because a fallback is a second,
+ * untested copy of the token's value that goes stale the moment the shared
+ * layer is retuned, and it makes an intensity-creep grep read as tokenized
+ * when the literal is sitting right there.
+ *
+ * Timings this area introduces are declared once, below, as named tokens
+ * carrying the plan band they satisfy. Raw millisecond literals inside the
+ * rules themselves are invisible to intensity review.
+ *
+ * Everything in this file is Level 1 (micro feedback) or Level 2 (state
+ * handoff). These are high-frequency navigation controls: the palette is
+ * opened dozens of times an hour and the model picker is on the composer.
+ * Nothing here is allowed to reach Level 3.
+ */
+
+:root {
+  /* Leading-icon nudge for the highlighted palette row. */
+  --nav-icon-shift: 1px;
+  /* Directional offset shared by palette submenus and settings pages. */
+  --nav-view-shift: 4px;
+
+  /* Plan item 14 asks for a 100-120ms palette row response. */
+  --nav-command-row: 110ms;
+  /* Plan item 14 asks for a 140-160ms directional submenu transition. */
+  --nav-view-transition: 150ms;
+  /* Plan item 14 asks for a 150-180ms settings page settle. */
+  --nav-settings-page: 165ms;
+  /* Plan item 15 asks for an 80-120ms selection confirmation. */
+  --nav-model-confirm: 100ms;
+}
+
+/* ------------------------------------------------------------------ */
+/* Command palette — plan item 14                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Palette rows carry transitions only, never animations.
+ *
+ * Filtering re-renders the same rows in place on every keystroke. Any
+ * `animation` on a row would therefore fire once per character typed, which
+ * is the single failure mode this surface must not have. Highlight response
+ * is expressed purely as a transition between two resting states.
+ */
+.nav-command-item {
+  transition-property: background-color, box-shadow, color;
+  transition-duration: var(--nav-command-row);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+/* Level 1. Restrained violet plane: tint plus a 1px inset edge, no aura. */
+.nav-command-item[data-nav-active="true"] {
+  background-color: color-mix(in srgb, var(--primary) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 20%, transparent);
+  color: var(--accent-foreground);
+}
+
+.nav-command-item-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  transition-property: translate, filter;
+  transition-duration: var(--nav-command-row);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+.nav-command-item[data-nav-active="true"] .nav-command-item-icon {
+  translate: var(--nav-icon-shift) 0;
+  filter: brightness(1.18);
+}
+
+/*
+ * Level 2. Directional submenu transition for the results panel.
+ *
+ * Gated by `data-nav-direction`, which CommandPalette.tsx sets only when a
+ * submenu is pushed or popped and clears again once the transition window has
+ * passed. The palette's autocomplete root remounts for unrelated reasons
+ * (entering browse mode, walking into a folder), so a mount-triggered
+ * animation would fire on a keystroke. The resting value is `none`, which is
+ * what a stray remount inherits.
+ */
+.nav-command-view {
+  animation: none;
+}
+
+.nav-command-view[data-nav-direction="forward"] {
+  animation: nav-command-view-forward var(--nav-view-transition) var(--ease-out-quint) both;
+}
+
+.nav-command-view[data-nav-direction="back"] {
+  animation: nav-command-view-back var(--nav-view-transition) var(--ease-out-quint) both;
+}
+
+@keyframes nav-command-view-forward {
+  from {
+    opacity: 0.55;
+    translate: var(--nav-view-shift) 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes nav-command-view-back {
+  from {
+    opacity: 0.55;
+    translate: calc(var(--nav-view-shift) * -1) 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings navigation — plan item 14                                  */
+/* ------------------------------------------------------------------ */
+
+.nav-settings-rail {
+  position: relative;
+}
+
+/*
+ * Level 2. One compact rail segment that travels between active rows with
+ * transform, so no row geometry is touched and nothing reflows. Route focus,
+ * heading announcements, and history all happen before this ever starts.
+ */
+.nav-settings-marker {
+  position: absolute;
+  top: 0;
+  /* Sits in the group's own gutter so it reads as a rail, not as a second
+     accent stacked on the already-tinted active row. */
+  left: -0.375rem;
+  width: 2px;
+  height: 1rem;
+  border-radius: 999px;
+  background: var(--primary);
+  pointer-events: none;
+  transition-property: transform, box-shadow;
+  transition-duration: var(--motion-state);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+/* First placement is a measurement, not a navigation. Never animate it. */
+.nav-settings-marker[data-nav-initial="true"] {
+  transition: none;
+}
+
+/* A very tight glow, and only while the marker is actually travelling. */
+.nav-settings-marker[data-nav-moving="true"] {
+  box-shadow: 0 0 3px color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+/*
+ * Level 2. Incoming settings pages settle by 4px with a crossfade. The page
+ * never starts fully transparent, so no content is withheld from the reader
+ * or from assistive technology while it plays.
+ */
+.nav-settings-page {
+  animation: nav-settings-page-enter var(--nav-settings-page) var(--ease-out-quart) both;
+}
+
+@keyframes nav-settings-page-enter {
+  from {
+    opacity: 0.55;
+    translate: 0 var(--nav-view-shift);
+  }
+
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Model picker — plan item 15                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Level 1. The provider-rail marker moves on the compositor via transform
+ * rather than animating `top`, so the rail never relayouts while the user
+ * is arrowing through providers.
+ */
+.nav-model-rail-marker {
+  transition-property: transform;
+  transition-duration: var(--motion-state);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+.nav-model-rail-marker[data-nav-initial="true"] {
+  transition: none;
+}
+
+/*
+ * Level 1. Selection confirmation: a single short inset edge that resolves to
+ * nothing. Inset only — the selected row's existing outer glow is left exactly
+ * as it was, and no provider accent is overridden.
+ */
+.nav-model-row[data-nav-confirming="true"] {
+  animation: nav-model-row-confirm var(--nav-model-confirm) var(--ease-out-quart) 1;
+}
+
+@keyframes nav-model-row-confirm {
+  from {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--astro-highlight) 55%, transparent);
+  }
+
+  to {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--astro-highlight) 0%, transparent);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion                                                      */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Highlight and selection remain legible; they simply arrive instantly. */
+  .nav-command-item,
+  .nav-command-item-icon,
+  .nav-settings-marker,
+  .nav-model-rail-marker {
+    transition: none;
+  }
+
+  /* The 1px icon nudge is decoration; brightness still marks the row. */
+  .nav-command-item[data-nav-active="true"] .nav-command-item-icon {
+    translate: none;
+  }
+
+  /* Directional travel becomes a short crossfade with no displacement. */
+  .nav-command-view[data-nav-direction="forward"],
+  .nav-command-view[data-nav-direction="back"],
+  .nav-settings-page {
+    animation: nav-reduced-crossfade var(--motion-press) linear both;
+  }
+
+  .nav-model-row[data-nav-confirming="true"] {
+    animation: none;
+  }
+}
+
+@keyframes nav-reduced-crossfade {
+  from {
+    opacity: 0.72;
+  }
+
+  to {
+    opacity: 1;
+  }
+}

@@ -1,1 +1,331 @@
-/* Composer controls and pending input — owned by the composer controls area. */
+/*
+ * Composer controls and pending input — owned by the composer controls area.
+ *
+ * Durations, easings, focus rings, and z-index roles live in `styles/motion.css`.
+ * This file only names the composer-specific durations the shared ladder does
+ * not already cover, and the recipes unique to this area.
+ *
+ * Intensity budget for this file:
+ *   - stop running ring .................... Level 3 (running-turn signal)
+ *   - stop press ring ...................... Level 1 (micro feedback)
+ *   - stop square-to-trace handoff ......... Level 2 (pending ownership)
+ *   - question crossfade, check arrival,
+ *     approval owner label/trace swap ...... Level 2 (state handoff)
+ *   - Auto selected/illuminated resting .... Level 0 (static, no animation)
+ *   - Auto entry glint ..................... Level 3, and only that one.
+ */
+
+:root {
+  /* Plan item 8 asks for a 160-180ms directional question crossfade; the
+     ladder brackets this band (`--motion-hover` 140ms, `--motion-state` 200ms)
+     without landing in it. */
+  --composer-question-crossfade: 170ms;
+  /* Plan item 8 asks for a 160ms check arrival. */
+  --composer-check-arrival: 160ms;
+  /* Plan item 9 asks for a 160-200ms Auto entry glint.
+     NOTE: the plan is internally inconsistent here — its intensity ladder puts
+     Level 3 at 240-340ms, while item 9 specifies 160-200ms. This honours item 9
+     as the more specific instruction, on a single pass within 4px. Please do not
+     "correct" it toward the ladder band in either direction without resolving
+     the plan first. */
+  --composer-auto-glint: 180ms;
+  /* Continuous trace rotation rate; deliberately outside the ladder, which
+     covers one-shot transitions rather than duty-cycle spin. Shared by the stop
+     trace and the approval-owner trace so both read as one pending vocabulary. */
+  --composer-trace-spin: 760ms;
+  /* Running-turn breath rate. The user rejected an orbiting ring around the red
+     button ("very jarring and overwhelming") in favour of the inner square
+     gently growing and shrinking. Slow duty-cycle, outside the one-shot ladder;
+     deliberately far from the 760ms pending spinner so the two states read as
+     different tempos. */
+  --composer-running-breath: 1600ms;
+}
+
+/* ------------------------------------------------------------------ *
+ * Stop / interruption feedback (plan item 7)
+ *
+ * Level 1: the press ring. Level 2: the square-to-trace handoff.
+ * The button geometry never changes; every layer is inside the circle.
+ * ------------------------------------------------------------------ */
+
+/* Running-turn signal: the inner white square breathes — grows and shrinks
+ * gently for the entire time a response is generating. User-directed, replacing
+ * an orbiting ring they found jarring. Keyed off the pending state so the
+ * "Stopping…" square-compress choreography owns the glyph alone once a stop is
+ * in flight. */
+.composer-stop-button:not([data-stop-state="pending"]) .composer-stop-button__glyph {
+  animation: composer-stop-running-breath var(--composer-running-breath) ease-in-out infinite;
+}
+
+.composer-stop-button__press-ring {
+  position: absolute;
+  inset: -2px;
+  border: 1.5px solid color-mix(in srgb, var(--destructive) 0%, transparent);
+  border-radius: 9999px;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--motion-press) var(--ease-out-quart),
+    border-color var(--motion-press) var(--ease-out-quart);
+}
+
+/* Acknowledged from the pointerdown latch (`data-stop-pressed`), not `:active`,
+ * so pointerup cannot cancel it. It fires immediately (well under 100ms) and,
+ * because the latch is held by React state through the whole pending phase, the
+ * ring persists into "Stopping…" instead of vanishing at release. */
+.composer-stop-button[data-stop-pressed="true"] .composer-stop-button__press-ring {
+  opacity: 1;
+  animation: composer-stop-press-ring var(--motion-state) var(--ease-out-quart) forwards;
+}
+
+.composer-stop-button__glyph {
+  transition:
+    opacity var(--motion-state) var(--ease-out-quart),
+    scale var(--motion-state) var(--ease-out-quint);
+}
+
+.composer-stop-button[data-stop-state="pending"] .composer-stop-button__glyph {
+  opacity: 0;
+  scale: 0.5;
+}
+
+.composer-stop-button[data-stop-state="pending"] {
+  cursor: default;
+  opacity: 0.9;
+}
+
+/* Compact progress trace, inside the same circle. */
+.composer-stop-button__trace {
+  position: absolute;
+  inset: 6px;
+  border: 1.5px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-top-color: currentColor;
+  border-radius: 9999px;
+  content: "";
+  pointer-events: none;
+  animation: composer-stop-trace-spin var(--composer-trace-spin) linear infinite;
+}
+
+/* Restored after a failed or unconfirmed stop: static, semantic, no motion. */
+.composer-stop-button[data-stop-state="failed"],
+.composer-stop-button[data-stop-state="unconfirmed"] {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--destructive) 55%, transparent);
+}
+
+@keyframes composer-stop-press-ring {
+  from {
+    border-color: color-mix(in srgb, var(--destructive) 80%, transparent);
+    scale: 0.94;
+  }
+
+  to {
+    border-color: color-mix(in srgb, var(--border) 70%, transparent);
+    scale: 1;
+  }
+}
+
+@keyframes composer-stop-trace-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@keyframes composer-stop-running-breath {
+  0%,
+  100% {
+    scale: 1;
+  }
+
+  50% {
+    scale: 1.18;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Questions and approvals (plan item 8)
+ * ------------------------------------------------------------------ */
+
+/* Directional crossfade between questions — Level 2, 4px. */
+.composer-question-panel {
+  animation: composer-question-in-forward var(--composer-question-crossfade) var(--ease-out-quart)
+    both;
+}
+
+.composer-question-panel[data-question-direction="backward"] {
+  animation-name: composer-question-in-backward;
+}
+
+.composer-answer-check--arriving {
+  animation: composer-answer-check-arrive var(--composer-check-arrival) var(--ease-out-quint) both;
+}
+
+/* The chosen approval action owns the progress. Its outer geometry is fixed:
+ * the label keeps occupying the grid cell while the trace fades in over it. */
+.composer-approval-action__stack {
+  display: grid;
+  align-items: center;
+  justify-items: center;
+  grid-template-areas: "composer-approval-action";
+}
+
+.composer-approval-action__label,
+.composer-approval-action__trace {
+  grid-area: composer-approval-action;
+}
+
+.composer-approval-action__label {
+  transition: opacity var(--motion-state) var(--ease-out-quart);
+}
+
+.composer-approval-action__trace {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 1.5px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-top-color: currentColor;
+  border-radius: 9999px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-state) var(--ease-out-quart);
+}
+
+.composer-approval-action--owner .composer-approval-action__label {
+  opacity: 0;
+}
+
+.composer-approval-action--owner .composer-approval-action__trace {
+  opacity: 1;
+  animation: composer-stop-trace-spin var(--composer-trace-spin) linear infinite;
+}
+
+/* Alternatives dim but stay legible; approval semantics stay amber elsewhere,
+ * so nothing here recolors the decision. */
+.composer-approval-action--dimmed {
+  opacity: 0.42;
+}
+
+@keyframes composer-question-in-forward {
+  from {
+    opacity: 0;
+    translate: 4px 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0;
+  }
+}
+
+@keyframes composer-question-in-backward {
+  from {
+    opacity: 0;
+    translate: -4px 0;
+  }
+
+  to {
+    opacity: 1;
+    translate: 0;
+  }
+}
+
+@keyframes composer-answer-check-arrive {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Auto mode distinction (plan item 9)
+ *
+ * drop-shadow follows the glyph alpha, so the afterglow is anchored to the
+ * star shapes and never lights the whole trigger. Capped at 3px.
+ * ------------------------------------------------------------------ */
+
+.composer-auto-glyph {
+  transition:
+    color var(--motion-state) var(--ease-out-quart),
+    filter var(--motion-state) var(--ease-out-quart);
+}
+
+.composer-auto-glyph--illuminated {
+  color: var(--primary);
+  stroke-width: 2.25;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--primary) 52%, transparent));
+}
+
+/* One bounded violet-to-pink pass on entry, then quiet. Level 3. */
+.composer-auto-glyph--glint {
+  animation: composer-auto-glint var(--composer-auto-glint) var(--ease-out-quint) both;
+}
+
+@keyframes composer-auto-glint {
+  from {
+    filter: drop-shadow(0 0 1px color-mix(in srgb, var(--primary) 40%, transparent));
+  }
+
+  55% {
+    filter: drop-shadow(0 0 4px color-mix(in srgb, var(--astro-highlight) 78%, transparent));
+  }
+
+  to {
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--primary) 52%, transparent));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Stop: the trace stops rotating but stays visible; the state is carried by
+   * aria-busy, the disabled control, and the polite "Stopping…" status. */
+  .composer-stop-button__trace {
+    animation: none;
+    border-color: color-mix(in srgb, currentColor 55%, transparent);
+    opacity: 0.85;
+  }
+
+  .composer-stop-button:active:not(:disabled) .composer-stop-button__press-ring {
+    animation: none;
+    border-color: color-mix(in srgb, var(--destructive) 80%, transparent);
+  }
+
+  .composer-stop-button__glyph,
+  .composer-stop-button__press-ring,
+  .composer-approval-action__label,
+  .composer-approval-action__trace,
+  .composer-auto-glyph {
+    transition-duration: 0.01ms;
+  }
+
+  /* Questions crossfade without translation. */
+  .composer-question-panel,
+  .composer-question-panel[data-question-direction="backward"] {
+    animation: composer-controls-fade-in var(--motion-press) linear both;
+  }
+
+  .composer-answer-check--arriving {
+    animation: composer-controls-fade-in var(--motion-press) linear both;
+  }
+
+  .composer-approval-action--owner .composer-approval-action__trace {
+    animation: none;
+  }
+
+  /* Auto keeps the outlined, illuminated icon; only the entry glint is gone. */
+  .composer-auto-glyph--glint {
+    animation: none;
+  }
+}
+
+@keyframes composer-controls-fade-in {
+  from {
+    opacity: 0.72;
+  }
+
+  to {
+    opacity: 1;
+  }
+}

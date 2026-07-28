@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   getAnchoredTurnMetrics,
   getRowBottom,
+  resolveTimelineSendScroll,
   shouldPositionTimelineAnchor,
 } from "./timelineScrollAnchoring";
 
@@ -135,6 +136,28 @@ describe("timeline scroll anchoring", () => {
     expect(metrics?.lastBottom).toBe(1540);
     expect(metrics?.visibleUsableBottom).toBe(1464);
     expect(metrics?.scrollDeltaToRevealEnd).toBe(76);
+  });
+
+  it("follows the live edge on send when the reader was at the end", () => {
+    const decision = resolveTimelineSendScroll({ userWasAtEnd: true });
+    expect(decision.mode).toBe("following-end");
+    expect(decision.followOutput).toBe(true);
+    expect(decision.isAtEnd).toBe(true);
+  });
+
+  it("holds the reader's place on send when they had scrolled up", () => {
+    const decision = resolveTimelineSendScroll({ userWasAtEnd: false });
+    expect(decision.mode).toBe("free-scrolling");
+    expect(decision.followOutput).toBe(false);
+    expect(decision.isAtEnd).toBe(false);
+  });
+
+  it("never anchors the new turn to the top of the viewport on send", () => {
+    for (const userWasAtEnd of [true, false]) {
+      const decision = resolveTimelineSendScroll({ userWasAtEnd });
+      // The old ChatGPT-style jump-to-top mode must never be chosen on send.
+      expect(decision.mode).not.toBe("anchoring-new-turn");
+    }
   });
 
   it("subtracts composer height from usable viewport height", () => {

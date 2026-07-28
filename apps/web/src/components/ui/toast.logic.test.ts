@@ -3,8 +3,27 @@ import { assert, describe, it } from "vite-plus/test";
 import {
   buildVisibleToastLayout,
   shouldHideCollapsedToastContent,
+  shouldPlayToastCompletionTrace,
   shouldRenderThreadScopedToast,
 } from "./toast.logic";
+
+describe("shouldPlayToastCompletionTrace", () => {
+  it("stays quiet for routine success toasts that did not opt in", () => {
+    assert.equal(shouldPlayToastCompletionTrace("success", undefined), false);
+    assert.equal(shouldPlayToastCompletionTrace("success", {}), false);
+    assert.equal(shouldPlayToastCompletionTrace("success", { completionTrace: false }), false);
+  });
+
+  it("plays one trace only for an important success toast", () => {
+    assert.equal(shouldPlayToastCompletionTrace("success", { completionTrace: true }), true);
+  });
+
+  it("never traces non-success outcomes even when opted in", () => {
+    for (const type of ["error", "warning", "info", "loading", undefined, null]) {
+      assert.equal(shouldPlayToastCompletionTrace(type, { completionTrace: true }), false);
+    }
+  });
+});
 
 describe("shouldHideCollapsedToastContent", () => {
   it("keeps a single visible toast readable", () => {

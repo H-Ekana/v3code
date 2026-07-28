@@ -24,13 +24,7 @@ import {
 import { flushSync } from "react-dom";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { FileDiff } from "@pierre/diffs/react";
-import {
-  deriveTimelineEntries,
-  workEntryIndicatesToolFailure,
-  workEntryIndicatesToolNeutralStatus,
-  workEntryIndicatesToolSuccess,
-  workLogEntryIsToolLike,
-} from "../../session-logic";
+import { deriveTimelineEntries, workLogEntryIsToolLike } from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
 import {
   getRenderablePatch,
@@ -44,6 +38,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  CircleStopIcon,
   EyeIcon,
   GlobeIcon,
   HammerIcon,
@@ -66,8 +61,12 @@ import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
 import {
+  advanceTimelineLifecycle,
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
+  deriveUnsettledTurnId,
+  EMPTY_TIMELINE_LIFECYCLE_LEDGER,
+  expireTimelineLifecycleOneShots,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -77,11 +76,18 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  resolveWorkEntryToolStatus,
+  toolLifecycleFlashKey,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
+  TIMELINE_ONE_SHOT_TTL_MS,
   type TimelineLatestTurn,
+  type TimelineLifecycleLedger,
+  timelineLifecycleHasOneShots,
 } from "./MessagesTimeline.logic";
+import { type ComposerInterruptState } from "./ComposerPrimaryActions";
+import { getStatusPresentation, type StatusAxes } from "~/lib/statusPresentation";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -100,6 +106,12 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatShortTimestamp } from "../../timestampFormat";
+import {
+  extractTrailingConversationReferences,
+  type ConversationReference,
+  type ConversationReferenceSelection,
+} from "../../conversationReference";
+import { ConversationSelectionAction } from "./ConversationSelectionAction";
 
 import {
   buildInlineTerminalContextText,
@@ -143,6 +155,20 @@ interface TimelineRowActivityState {
   isRevertingCheckpoint: boolean;
   activeTurnInProgress: boolean;
   latestTurnId: TurnId | null;
+  /** Stop request ownership, owned by the composer, mirrored into the active
+   *  response state so `Stopping…` is visible and not only announced. */
+  interruptState: ComposerInterruptState;
+  /**
+   * Lifecycle identity, resolved once by the list owner from the full row
+   * array. Rows read booleans out of these sets instead of owning any
+   * mount-scoped animation state, which is what keeps virtualized remounts,
+   * scroll restoration, and fold expansion from replaying a one-shot.
+   */
+  unsettledTurnId: TurnId | null;
+  liveEdgeMessageId: string | null;
+  arrivingUserMessageIds: ReadonlySet<string>;
+  resolvingStreamMessageIds: ReadonlySet<string>;
+  completingToolIds: ReadonlySet<string>;
 }
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
@@ -194,8 +220,12 @@ interface MessagesTimelineProps {
   followOutput: boolean;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
+  onAddConversationReference: (selection: ConversationReferenceSelection) => boolean;
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
+  /** Composer-owned stop lifecycle. Optional so the timeline stays renderable
+   *  standalone; `idle` reads exactly as it did before stop feedback existed. */
+  interruptState?: ComposerInterruptState;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,8 +260,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   followOutput,
   onIsAtEndChange,
   onManualNavigation,
+  onAddConversationReference,
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
+  interruptState = "idle",
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -337,6 +369,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+  const unsettledTurnId = useMemo(
+    () => deriveUnsettledTurnId(latestTurn ?? null, runningTurnId ?? null),
+    [latestTurn, runningTurnId],
+  );
+  const interruptedTurnId =
+    latestTurn?.state === "interrupted" ? (latestTurn.turnId ?? null) : null;
+  const lifecycle = useTimelineLifecycle(rows, routeThreadKey, unsettledTurnId, interruptedTurnId);
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -475,8 +514,25 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isRevertingCheckpoint,
       activeTurnInProgress,
       latestTurnId: latestTurn?.turnId ?? null,
+      interruptState,
+      unsettledTurnId,
+      liveEdgeMessageId: lifecycle.liveEdgeMessageId,
+      arrivingUserMessageIds: lifecycle.arrivingUserMessageIds,
+      resolvingStreamMessageIds: lifecycle.resolvingStreamMessageIds,
+      completingToolIds: lifecycle.completingToolIds,
     }),
-    [activeTurnInProgress, isRevertingCheckpoint, isWorking, latestTurn?.turnId],
+    [
+      activeTurnInProgress,
+      isRevertingCheckpoint,
+      isWorking,
+      latestTurn?.turnId,
+      interruptState,
+      unsettledTurnId,
+      lifecycle.liveEdgeMessageId,
+      lifecycle.arrivingUserMessageIds,
+      lifecycle.resolvingStreamMessageIds,
+      lifecycle.completingToolIds,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -514,6 +570,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           onTouchMoveCapture={onManualNavigation}
           onWheelCapture={onManualNavigation}
         >
+          <ConversationSelectionAction
+            rootElement={timelineViewportElement}
+            onAddReference={onAddConversationReference}
+          />
           <LegendList<MessagesTimelineRow>
             ref={listRef}
             data={rows}
@@ -607,7 +667,10 @@ function deriveTimelineMinimapItems(
     items.push({
       id: row.id,
       rowIndex: index,
-      userText: compactMinimapPreview(row, row.message.text),
+      userText: compactMinimapPreview(
+        row,
+        extractTrailingConversationReferences(row.message.text).promptText,
+      ),
       assistantText: finalAssistantRow
         ? compactMinimapPreview(finalAssistantRow, finalAssistantRow.message.text)
         : null,
@@ -906,14 +969,34 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
+      {row.kind === "interrupted" ? <InterruptedTimelineRow /> : null}
     </div>
   );
 });
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  // Level 2 landing point for the send sequence. Never true for history, for a
+  // virtualized remount, or for anything but the newest user turn — see
+  // `advanceTimelineLifecycle`.
+  const isArriving = activity.arrivingUserMessageIds.has(row.message.id);
+  // The send-morph itself lives in the send handler (`runSendMorphTransition`):
+  // it flies a `position: fixed` flyer — a single div BUILT from the sent text,
+  // not a clone of the composer subtree — into this bubble, live-retargeting on
+  // `data-user-turn-arrival` (set below) as the deterministic landing hook.
+  // `isArriving` guarantees that hook only ever lands on the genuinely-just-sent
+  // turn — never on history, a virtualized remount, or a scroll restoration.
+  // When the flight cannot run (headless / tests, reduced motion, no composer
+  // surface, no `requestAnimationFrame`) the plain `.conversation-user-arrival`
+  // rise below is the observable handoff. The row owns no `view-transition-name`;
+  // the flyer flight replaced that mechanism.
+
   const userImages = row.message.attachments ?? [];
-  const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
+  const conversationReferenceState = extractTrailingConversationReferences(row.message.text);
+  const displayedUserMessage = deriveDisplayedUserMessageState(
+    conversationReferenceState.promptText,
+  );
   const terminalContexts = displayedUserMessage.contexts;
   const previewAnnotations: ParsedPreviewAnnotation[] = [];
   let visibleText = displayedUserMessage.visibleText;
@@ -934,7 +1017,16 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div className="group flex flex-col items-end gap-1">
-      <div className="relative max-w-[80%] rounded-2xl bg-accent p-3 border border-primary/12">
+      <div
+        className={cn(
+          "relative max-w-[80%] rounded-2xl bg-accent p-3 border border-primary/12",
+          isArriving && "conversation-user-arrival",
+        )}
+        // The clone flight's landing hook. Scoped to the arriving turn (never on
+        // history or a virtualized remount) and left to the flight to hide +
+        // crossfade in; the flight owns all inline styles it applies here.
+        data-user-turn-arrival={isArriving ? "true" : undefined}
+      >
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
@@ -968,6 +1060,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         )}
+        <UserMessageConversationReferences references={conversationReferenceState.references} />
         {previewAnnotations.map((annotation, index) => (
           <UserMessagePreviewAnnotationCard
             key={annotation.id}
@@ -985,12 +1078,18 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         ) : null}
-        <CollapsibleUserMessageBody
-          text={elementContextState.promptText}
-          terminalContexts={terminalContexts}
-          skills={ctx.skills}
-          markdownCwd={ctx.markdownCwd}
-        />
+        <div
+          data-conversation-selectable-text
+          data-message-id={row.message.id}
+          data-message-role="user"
+        >
+          <CollapsibleUserMessageBody
+            text={elementContextState.promptText}
+            terminalContexts={terminalContexts}
+            skills={ctx.skills}
+            markdownCwd={ctx.markdownCwd}
+          />
+        </div>
       </div>
       <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
         <div className="flex shrink-0 items-center gap-2">
@@ -1061,18 +1160,33 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  // Exactly one message can carry the live edge: the newest actively streaming
+  // one. It disappears the instant that stops being true.
+  const hasLiveEdge = activity.liveEdgeMessageId === row.message.id;
+  const isResolving = activity.resolvingStreamMessageIds.has(row.message.id);
 
   return (
     <>
-      <div className="relative min-w-0 px-1 py-0.5">
-        <ChatMarkdown
-          text={messageText}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          isStreaming={Boolean(row.message.streaming)}
-          skills={ctx.skills}
-        />
+      <div
+        className="relative min-w-0 px-1 py-0.5"
+        data-live-response-edge={hasLiveEdge ? "streaming" : isResolving ? "resolved" : undefined}
+      >
+        <div
+          data-conversation-selectable-text
+          data-message-id={row.message.id}
+          data-message-role="assistant"
+        >
+          <ChatMarkdown
+            text={messageText}
+            cwd={ctx.markdownCwd}
+            threadRef={ctx.threadRef ?? undefined}
+            isStreaming={Boolean(row.message.streaming)}
+            skills={ctx.skills}
+            streamingCaret={hasLiveEdge || isResolving}
+          />
+        </div>
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
           routeThreadKey={ctx.routeThreadKey}
@@ -1136,16 +1250,28 @@ function ProposedPlanTimelineRow({
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
+  const activity = use(TimelineRowActivityCtx);
+  // The composer owns the stop request and its polite announcement; the active
+  // response state owns showing it. Geometry is unchanged — only the label
+  // swaps — so the row does not jump when a stop is requested.
+  const isStopping = activity.interruptState === "pending";
+
   return (
     <div className="py-0.5 pl-1.5">
-      <div className="flex items-center gap-2 pt-1 text-[11px] text-muted-foreground/70 tabular-nums">
+      <div
+        aria-busy={isStopping || undefined}
+        className="flex items-center gap-2 pt-1 text-[11px] text-muted-foreground/70 tabular-nums"
+        data-response-state={isStopping ? "stopping" : "working"}
+      >
         <span className="inline-flex items-center gap-[3px]">
           <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse" />
           <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:200ms]" />
           <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:400ms]" />
         </span>
         <span>
-          {row.createdAt ? (
+          {isStopping ? (
+            "Stopping…"
+          ) : row.createdAt ? (
             <>
               Working for <WorkingTimer createdAt={row.createdAt} />
             </>
@@ -1153,6 +1279,37 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
             "Working..."
           )}
         </span>
+      </div>
+    </div>
+  );
+}
+
+const INTERRUPTED_STATUS_AXES: StatusAxes = {
+  activity: "interrupted",
+  attention: "none",
+  outcome: "neutral",
+  persistence: "settled",
+};
+
+/**
+ * The settled counterpart to `Stopping…`. Uses the shared status recipe rather
+ * than a parallel local treatment, and carries an icon plus a label so the
+ * state is never communicated by color alone.
+ */
+function InterruptedTimelineRow() {
+  const presentation = getStatusPresentation(INTERRUPTED_STATUS_AXES);
+
+  return (
+    <div className="py-0.5 pl-1.5">
+      <div
+        className={cn(
+          "flex items-center gap-2 pt-1 text-[11px] text-muted-foreground tabular-nums",
+          presentation.motionClass,
+        )}
+        data-response-state="interrupted"
+      >
+        <CircleStopIcon className="size-3 shrink-0" aria-hidden />
+        <span>{presentation.label}</span>
       </div>
     </div>
   );
@@ -1198,18 +1355,17 @@ const WorkGroupSection = memo(function WorkGroupSection({
   groupedEntries: Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"];
 }) {
   const { workspaceRoot } = use(TimelineRowCtx);
-  const nonEmptyEntries = useMemo(
-    () => groupedEntries.filter((entry) => !workEntryIndicatesToolNeutralStatus(entry)),
-    [groupedEntries],
-  );
-  const onlyToolEntries = nonEmptyEntries.every((entry) => workLogEntryIsToolLike(entry));
+  // Row derivation already dropped hidden-neutral entries (and deliberately
+  // kept live in-progress tool calls); re-filtering here would drop the running
+  // row that item 6's running trace attaches to.
+  const onlyToolEntries = groupedEntries.every((entry) => workLogEntryIsToolLike(entry));
   const groupLabel = onlyToolEntries
-    ? nonEmptyEntries.length === 1
+    ? groupedEntries.length === 1
       ? "1 tool call"
-      : `${nonEmptyEntries.length} tool calls`
+      : `${groupedEntries.length} tool calls`
     : "Work Log";
 
-  if (nonEmptyEntries.length === 0) return null;
+  if (groupedEntries.length === 0) return null;
 
   return (
     <section className="-mx-1 space-y-0.5 px-1 py-0.5" aria-label={groupLabel}>
@@ -1219,7 +1375,7 @@ const WorkGroupSection = memo(function WorkGroupSection({
         </p>
       )}
       <div className="space-y-px">
-        {nonEmptyEntries.map((workEntry) => (
+        {groupedEntries.map((workEntry) => (
           <SimpleWorkEntryRow
             key={workEntry.id}
             workEntry={workEntry}
@@ -1386,6 +1542,40 @@ const UserMessageElementContextChip = memo(function UserMessageElementContextChi
     </Tooltip>
   );
 });
+
+function UserMessageConversationReferences({
+  references,
+}: {
+  references: ReadonlyArray<ConversationReference>;
+}) {
+  if (references.length === 0) return null;
+  const label = `${references.length} ${references.length === 1 ? "reference" : "references"} attached`;
+
+  return (
+    <details className="group/user-references mb-2 overflow-hidden rounded-lg border border-primary/14 bg-background/72">
+      <summary className="motion-focus motion-press flex min-h-8 cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-foreground/82 outline-none transition-colors duration-150 hover:bg-primary/[0.055] focus-visible:bg-primary/[0.055] [&::-webkit-details-marker]:hidden">
+        <MessageCircleIcon className="size-3.5 text-primary" aria-hidden />
+        <span>{label}</span>
+        <ChevronDownIcon
+          className="ms-auto size-3 text-muted-foreground transition-transform duration-150 group-open/user-references:rotate-180 motion-reduce:transition-none"
+          aria-hidden
+        />
+      </summary>
+      <ol className="max-h-64 divide-y divide-border/55 overflow-y-auto overscroll-contain border-t border-border/60">
+        {references.map((reference, index) => (
+          <li key={reference.id} className="flex min-w-0 items-start gap-2 px-2.5 py-2">
+            <span className="flex size-4 shrink-0 items-center justify-center rounded bg-primary/10 text-[10px] font-semibold tabular-nums text-primary">
+              {index + 1}
+            </span>
+            <p className="min-w-0 whitespace-pre-wrap wrap-break-word font-mono text-[11px] leading-relaxed text-foreground/78">
+              {reference.text}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
 
 function UserMessagePreviewAnnotationCard(props: {
   annotation: ParsedPreviewAnnotation;
@@ -1762,6 +1952,49 @@ function useStableRows(rows: MessagesTimelineRow[]): MessagesTimelineRow[] {
   }, [rows]);
 }
 
+/**
+ * Advances the one-shot lifecycle ledger from the full row array.
+ *
+ * Deliberately owned here rather than in the row components: LegendList
+ * unmounts and remounts rows as the user scrolls, so per-row mount state would
+ * replay every arrival, glint, and completion flash on scroll-back. The ledger
+ * is keyed on lifecycle identity, is inert when re-advanced over the same
+ * snapshot, and self-expires so a remount a moment later still finds nothing to
+ * play.
+ */
+function useTimelineLifecycle(
+  rows: MessagesTimelineRow[],
+  threadKey: string,
+  unsettledTurnId: TurnId | null,
+  interruptedTurnId: TurnId | null,
+): TimelineLifecycleLedger {
+  const ledgerRef = useRef<TimelineLifecycleLedger>(EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+  const [expiryEpoch, setExpiryEpoch] = useState(0);
+
+  const ledger = useMemo(() => {
+    void expiryEpoch;
+    const next = advanceTimelineLifecycle(
+      { rows, threadKey, unsettledTurnId, interruptedTurnId, now: Date.now() },
+      ledgerRef.current,
+    );
+    ledgerRef.current = next;
+    return next;
+  }, [rows, threadKey, unsettledTurnId, interruptedTurnId, expiryEpoch]);
+
+  useEffect(() => {
+    if (!timelineLifecycleHasOneShots(ledger)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      ledgerRef.current = expireTimelineLifecycleOneShots(ledgerRef.current);
+      setExpiryEpoch((epoch) => epoch + 1);
+    }, TIMELINE_ONE_SHOT_TTL_MS);
+    return () => clearTimeout(timer);
+  }, [ledger]);
+
+  return ledger;
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
@@ -1999,30 +2232,44 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const displayText = preview ? `${heading} - ${preview}` : heading;
   const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
   const canExpand = expandedBody !== null;
-  const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
+  const toolStatus = resolveWorkEntryToolStatus(workEntry, activity.unsettledTurnId);
+  const showFailedIndicator = toolStatus === "failure";
   const showDestructiveRowStyle =
     showFailedIndicator &&
     (workEntry.sourceActivityKind === "runtime.error" || !workLogEntryIsToolLike(workEntry));
+  const isRunning = toolStatus === "running";
   const iconWrapperClass = cn(
-    "flex size-5 shrink-0 items-center justify-center",
+    // Stable hook: `data-tool-status` on the row drives the failure ring and
+    // running tint off this box, so the attribute is load-bearing rather than
+    // inert. Present in every state so the icon box never changes identity.
+    "conversation-tool-icon flex size-5 shrink-0 items-center justify-center",
+    // The running trace is a contained ring on the icon box itself, so the row
+    // never changes height or reflows as a tool starts and finishes.
+    isRunning && "conversation-tool-running text-primary",
     showWarningIndicator
       ? "text-destructive"
       : showDestructiveRowStyle
         ? "text-destructive"
-        : workEntry.tone === "tool" || showFailedIndicator
-          ? "text-muted-foreground/65"
-          : iconConfig.className,
+        : isRunning
+          ? null
+          : workEntry.tone === "tool" || showFailedIndicator
+            ? "text-muted-foreground/65"
+            : iconConfig.className,
   );
   const headingClass = showWarningIndicator
     ? "font-medium text-warning"
     : showDestructiveRowStyle
       ? "font-medium text-destructive"
       : "font-medium text-foreground/82";
-  const turnSettled = !activity.activeTurnInProgress;
-  const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
-  const showSuccessIndicator =
-    workEntryIndicatesToolSuccess(workEntry) ||
-    (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
+  // Neutral/empty completions keep an explicit neutral mark. They must never
+  // borrow the success check just because the turn ended.
+  const showNeutralIndicator = toolStatus === "neutral";
+  const showSuccessIndicator = toolStatus === "success";
+  // Key on the stable tool-call identity — `workEntry.id` is swapped out the
+  // instant the tool completes, so `completingToolIds` (keyed the same way in
+  // the ledger) would never contain it and the flash would never arm.
+  const isCompleting =
+    showSuccessIndicator && activity.completingToolIds.has(toolLifecycleFlashKey(workEntry));
   const rowToggleProps = canExpand
     ? {
         role: "button" as const,
@@ -2044,7 +2291,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
         "flex flex-col rounded-md px-0.5 py-0.5 transition-colors duration-200 motion-reduce:transition-none",
         canExpand &&
           "cursor-pointer hover:bg-primary/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+        showDestructiveRowStyle && "motion-destructive",
       )}
+      data-tool-status={toolStatus === "none" ? undefined : toolStatus}
       {...rowToggleProps}
     >
       <div className="flex select-none items-center gap-1.5 transition-[opacity,translate] duration-200">
@@ -2098,7 +2347,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   <TooltipTrigger
                     render={<span className="flex size-4 items-center justify-center" />}
                   >
-                    <span className="inline-flex size-4 items-center justify-center">
+                    <span
+                      className={cn(
+                        "inline-flex size-4 items-center justify-center",
+                        isCompleting && "conversation-tool-flash",
+                      )}
+                    >
                       <CheckIcon
                         className="block size-3 shrink-0 stroke-current"
                         stroke="currentColor"
@@ -2122,15 +2376,28 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           </div>
         </div>
       </div>
-      {expanded && canExpand && expandedBody ? (
+      {canExpand && expandedBody ? (
+        // Grid-row disclosure: the collapsed track is 0fr, so opening and
+        // closing animate height without the row ever measuring differently at
+        // rest. Kept mounted (and inert while closed) so the transition has two
+        // states to travel between instead of a hard mount.
         <div
-          className="mt-1 ms-7 cursor-default rounded-md border border-primary/12 bg-primary/[0.02] px-3 py-1"
-          onClick={stopRowToggle}
-          onPointerDown={stopRowToggle}
+          className="conversation-disclosure"
+          data-expanded={expanded ? "true" : "false"}
+          inert={!expanded}
+          aria-hidden={!expanded}
         >
-          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
-            {expandedBody}
-          </pre>
+          <div className="conversation-disclosure-track">
+            <div
+              className="mt-1 ms-7 cursor-default rounded-md border border-primary/12 bg-primary/[0.02] px-3 py-1"
+              onClick={stopRowToggle}
+              onPointerDown={stopRowToggle}
+            >
+              <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+                {expandedBody}
+              </pre>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

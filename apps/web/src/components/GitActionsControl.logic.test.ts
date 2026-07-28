@@ -10,7 +10,25 @@ import {
   resolveQuickAction,
   resolveThreadBranchUpdate,
   resolveThreadBranchMetadataPatch,
+  shouldPlayPublishAcknowledgment,
 } from "./GitActionsControl.logic";
+
+describe("shouldPlayPublishAcknowledgment", () => {
+  it("withholds the accent until the initial push is confirmed", () => {
+    // Remote created, nothing pushed yet: quiet static success mark only.
+    assert.equal(shouldPlayPublishAcknowledgment({ status: "created" }), false);
+  });
+
+  it("plays once the remote exists and the push landed", () => {
+    assert.equal(shouldPlayPublishAcknowledgment({ status: "pushed" }), true);
+  });
+
+  it("stays quiet when there is no publish result at all", () => {
+    assert.equal(shouldPlayPublishAcknowledgment(null), false);
+    assert.equal(shouldPlayPublishAcknowledgment(undefined), false);
+    assert.equal(shouldPlayPublishAcknowledgment({}), false);
+  });
+});
 
 function status(overrides: Partial<VcsStatusResult> = {}): VcsStatusResult {
   return {

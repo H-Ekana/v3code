@@ -97,6 +97,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     onInstanceModelChange,
   } = props;
   const [searchQuery, setSearchQuery] = useState("");
+  const [confirmedModelKey, setConfirmedModelKey] = useState<string | null>(null);
   const [showTopScrollFade, setShowTopScrollFade] = useState(false);
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -367,6 +368,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       if (getModelDisabledReason?.(instanceId, modelSlug)) {
         return;
       }
+      // Mark the chosen row in the same commit that closes the popup. The
+      // popover already keeps its popup mounted through a 200ms exit, so the
+      // confirmation rides that exit instead of delaying the close: this adds
+      // 0ms of perceived close latency.
+      setConfirmedModelKey(`${instanceId}:${modelSlug}`);
       const options = modelOptionsByInstance.get(instanceId);
       if (!options) {
         return;
@@ -435,6 +441,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     (): ReadonlyMap<string, ModelPickerItem> =>
       new Map(filteredModels.map((model) => [`${model.instanceId}:${model.slug}`, model] as const)),
     [filteredModels],
+  );
+  // The virtualized list only re-renders rows when `extraData` changes
+  // identity, so the confirmation flag has to travel with the favorites set.
+  const listExtraData = useMemo(
+    () => ({ favoritesSet, confirmedModelKey }),
+    [confirmedModelKey, favoritesSet],
   );
   const updateModelListScrollFades = useCallback(() => {
     const scrollElement = modelListRef.current?.getScrollableNode();
@@ -623,7 +635,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 <LegendList<string>
                   ref={modelListRef}
                   data={filteredModelKeys}
-                  extraData={favoritesSet}
+                  extraData={listExtraData}
                   keyExtractor={(modelKey) => modelKey}
                   renderItem={({ item: modelKey, index }) => {
                     const model = filteredModelByKey.get(modelKey);
@@ -647,6 +659,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                         preferShortName={!isLocked}
                         useTriggerLabel={false}
                         showNewBadge={isModelPickerNewModel(model.driverKind, model.slug)}
+                        isConfirming={modelKey === confirmedModelKey}
                         jumpLabel={modelJumpLabelByKey.get(modelKey) ?? null}
                         disabledReason={disabledReason}
                         onToggleFavorite={() => toggleFavorite(model.instanceId, model.slug)}

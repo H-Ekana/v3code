@@ -1,1 +1,375 @@
-/* Timeline and conversation states — owned by the conversation area. */
+/* Timeline and conversation states — owned by the conversation area.
+ *
+ * Everything here is Level 2 on the plan's intensity ladder: short state
+ * handoffs that explain causality (a turn landed, a stream is live, a tool
+ * finished). Timing and easing come from `styles/motion.css`; nothing below
+ * redefines a duration token, an easing curve, a focus ring, or a layer index.
+ *
+ * Replay prevention is not a CSS concern — the classes below are only ever
+ * applied while `advanceTimelineLifecycle` says a transition is happening. See
+ * `components/chat/MessagesTimeline.logic.ts`.
+ */
+
+:root {
+  /* One-shot acknowledgment window. The plan asks for 120–160ms for the user
+   * turn edge, the streaming completion glint, and the tool completion flash;
+   * --motion-hover already sits inside that band, so reuse it rather than
+   * inventing a fourth duration. */
+  --conversation-glint: var(--motion-hover);
+  /* The user-turn landing is a Level 2 state handoff, not the 120-160ms edge
+   * glint: it needs long enough for a 6px rise + top-clip to actually read
+   * instead of collapsing into two frames. --motion-state (200ms) is the
+   * ladder's Level 2 token. */
+  --conversation-arrival: var(--motion-state);
+  /* Disclosure sits in the plan's 160–180ms band, which has no ladder token
+   * (--motion-hover is 140ms, --motion-state is 200ms). */
+  --conversation-disclosure: 170ms;
+  /* Continuous orbit rate for a running tool. Deliberately outside the ladder,
+   * which covers one-shot transitions rather than duty-cycle spin. */
+  --conversation-tool-orbit: 900ms;
+  /* Duty-cycle period for the live streaming caret. Also outside the ladder,
+   * and slow on purpose: the plan forbids per-token motion, so this reads as a
+   * steady "still live" pulse rather than progress. */
+  --conversation-live-caret-duty: 1.6s;
+}
+
+/* --------------------------------------------------------------------------
+ * Item 10 — composer-to-timeline handoff.
+ * The landing point of the send sequence, not a second celebration: a generous
+ * (top-of-Level-2) 6px clipped rise plus a violet edge that brightens once.
+ * Content starts legible, so nothing is hidden waiting for the animation. The
+ * curve is --ease-out-quint (a long, visible settling tail) rather than
+ * --ease-out-expo, which front-loaded ~90% of the travel into the first ~2
+ * frames and read as a pop. The ledger in MessagesTimeline.logic.ts guarantees
+ * this arms exactly once per newly created user turn and never for history, a
+ * scroll restoration, or a virtualized remount.
+ * ------------------------------------------------------------------------ */
+
+.conversation-user-arrival {
+  animation: conversation-user-arrival var(--conversation-arrival) var(--ease-out-quint) both;
+}
+
+.conversation-user-arrival::after {
+  position: absolute;
+  inset: -1px;
+  border: 1px solid transparent;
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+  animation: conversation-user-arrival-edge var(--conversation-glint) var(--ease-out-expo) both;
+}
+
+@keyframes conversation-user-arrival {
+  from {
+    clip-path: inset(6px 0 0 0 round 1rem);
+    opacity: 0.55;
+    translate: 0 6px;
+  }
+
+  to {
+    clip-path: inset(0 0 0 0 round 1rem);
+    opacity: 1;
+    translate: 0;
+  }
+}
+
+@keyframes conversation-user-arrival-edge {
+  from {
+    border-color: color-mix(in srgb, var(--primary) 8%, transparent);
+  }
+
+  40% {
+    border-color: color-mix(in srgb, var(--primary) 68%, transparent);
+  }
+
+  to {
+    border-color: transparent;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Send-morph — the just-sent message lifts out of the composer into the bubble.
+ * The motion is a hand-built flyer driven entirely from
+ * `components/chat/sendMorphTransition.ts`: a single `position: fixed` div
+ * carrying only the sent text is flown (rAF-driven, live-retargeted) into the
+ * arriving bubble and crossfaded with it. Geometry, font, and the transform +
+ * opacity motion are inline; only the static "glass" look lives here. Timing is
+ * owned by JS constants, so this class carries no duration or easing token. The
+ * `.conversation-user-arrival` rise above remains the fallback whenever the
+ * flight cannot run (headless, reduced motion, no `requestAnimationFrame`).
+ * ------------------------------------------------------------------------ */
+
+.conversation-send-flyer {
+  box-sizing: border-box;
+  overflow: hidden;
+  border-radius: 1rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 12%, transparent);
+  /* No backdrop-filter: a MOVING backdrop-blur re-samples and re-blurs the
+     backdrop on every frame of the flight — it was the flyer's lag. A more
+     opaque wash keeps the text readable without it; the per-frame work is now
+     transform/opacity only, fully compositable. */
+  background: color-mix(in srgb, var(--accent) 94%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  box-shadow: 0 4px 6px color-mix(in srgb, var(--primary) 6%, transparent);
+  contain: layout paint style;
+  will-change: transform, opacity;
+}
+
+/* --------------------------------------------------------------------------
+ * Item 5 — live-response caret.
+ * A compact violet caret that sits at the *growth point* — the end of the last
+ * streamed text block — and follows it as tokens append, rather than a static
+ * bar at the block start (the user read the old edge as "at the very start of
+ * the message, not where the text is generating").
+ *
+ * ChatMarkdown renders a trailing hook element (`.conversation-live-caret`) as
+ * the final child of the streaming message; the visible caret is an `::after`
+ * on the last text block, so it flows inline at the end of the text instead of
+ * dropping onto its own line. A negative trailing margin cancels the caret's
+ * own advance width, so it adds no layout and never nudges surrounding text or
+ * forces a wrap. Gated on `data-live-response-edge` on the row, which the
+ * lifecycle ledger already drives — no duplicated state. A slow duty-cycle
+ * pulse signals liveness (the plan forbids per-token motion); on resolve the
+ * caret glints once and is gone.
+ * ------------------------------------------------------------------------ */
+
+/* The hook element is invisible itself: it exists so the `::after` caret can be
+ * gated on its presence via `:has()` and so the lifecycle stays assertable in
+ * client-render tests without depending on painted pixels. */
+.conversation-live-caret {
+  display: none;
+}
+
+[data-live-response-edge="streaming"]
+  .chat-markdown:has(> .conversation-live-caret)
+  > :nth-last-child(2)::after,
+[data-live-response-edge="resolved"]
+  .chat-markdown:has(> .conversation-live-caret)
+  > :nth-last-child(2)::after {
+  content: "";
+  display: inline-block;
+  width: 0.4ch;
+  height: 1.05em;
+  /* Sit just past the last glyph, then reclaim the advance so the caret is a
+   * zero-width overlay on the trailing whitespace and shifts nothing. */
+  margin-inline-start: 0.12em;
+  margin-inline-end: calc(-0.4ch - 0.12em);
+  vertical-align: text-bottom;
+  border-radius: 999px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--astro-highlight) 92%, transparent) 0%,
+    color-mix(in srgb, var(--primary) 82%, transparent) 52%,
+    color-mix(in srgb, var(--primary) 58%, transparent) 100%
+  );
+  box-shadow: 0 0 5px color-mix(in srgb, var(--astro-highlight) 42%, transparent);
+  pointer-events: none;
+}
+
+/* Live: a slow, steady liveness pulse — not progress, and not per token. */
+[data-live-response-edge="streaming"]
+  .chat-markdown:has(> .conversation-live-caret)
+  > :nth-last-child(2)::after {
+  animation: conversation-live-caret-pulse var(--conversation-live-caret-duty) ease-in-out infinite;
+}
+
+/* Resolve: one brief glint at the growth point, then gone. */
+[data-live-response-edge="resolved"]
+  .chat-markdown:has(> .conversation-live-caret)
+  > :nth-last-child(2)::after {
+  animation: conversation-live-caret-glint var(--conversation-glint) var(--ease-out-quint) both;
+}
+
+@keyframes conversation-live-caret-pulse {
+  0%,
+  100% {
+    opacity: 0.95;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@keyframes conversation-live-caret-glint {
+  from {
+    opacity: 0.95;
+    scale: 1 1;
+  }
+
+  45% {
+    opacity: 1;
+    scale: 1 1.15;
+  }
+
+  to {
+    opacity: 0;
+    scale: 1 0.85;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Item 6 — tool-call lifecycle.
+ * Running is a contained partial orbit inside the existing 20px icon box, so
+ * row geometry never moves between running, completed, failed, and neutral.
+ *
+ * `data-tool-status` on the row is the lifecycle axis (previously nothing in
+ * CSS selected on it — it was inert while the tests asserted it). It is now
+ * load-bearing: the failure ring below keys on it, and both the orbit and the
+ * one-shot flash mount off it via the icon box. The orbit's animation itself
+ * stays on `.conversation-tool-running` so its reduced-motion fallback keeps
+ * applying; what was actually broken was upstream — `session-logic.ts` dropped
+ * `tool.started`, so on Codex no entry ever carried `inProgress` and the row's
+ * status was never `running` in the first place.
+ * ------------------------------------------------------------------------ */
+
+/* Stable positioning context for the icon box in every state, so the failure
+ * ring and running orbit are contained to the 20px box and the row never
+ * reflows across the lifecycle. */
+.conversation-tool-icon {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Failure reads as a restrained, static destructive ring on the icon box — no
+ * celebratory motion, matching the row's `motion-destructive` semantics. */
+[data-tool-status="failure"] .conversation-tool-icon::after {
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--destructive) 42%, transparent);
+}
+
+.conversation-tool-running {
+  position: relative;
+  isolation: isolate;
+}
+
+.conversation-tool-running::after {
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    color-mix(in srgb, var(--astro-highlight) 82%, transparent) 0deg,
+    color-mix(in srgb, var(--primary) 72%, transparent) 64deg,
+    color-mix(in srgb, var(--primary) 0%, transparent) 148deg,
+    color-mix(in srgb, var(--primary) 0%, transparent) 360deg
+  );
+  -webkit-mask: radial-gradient(
+    closest-side,
+    transparent calc(100% - 1.5px),
+    black calc(100% - 1.5px)
+  );
+  mask: radial-gradient(closest-side, transparent calc(100% - 1.5px), black calc(100% - 1.5px));
+  animation: conversation-tool-orbit var(--conversation-tool-orbit) linear infinite;
+}
+
+@keyframes conversation-tool-orbit {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/* Completion: the check arrives and gets one icon-sized flash. Failure gets
+ * semantic destructive emphasis from `motion-destructive` and no accent here,
+ * by design. */
+.conversation-tool-flash {
+  border-radius: 999px;
+  animation: conversation-tool-flash var(--conversation-glint) var(--ease-out-quint) both;
+}
+
+@keyframes conversation-tool-flash {
+  from {
+    box-shadow: 0 0 0 color-mix(in srgb, var(--primary) 0%, transparent);
+    scale: 0.92;
+  }
+
+  40% {
+    box-shadow: 0 0 4px color-mix(in srgb, var(--primary) 32%, transparent);
+    scale: 1;
+  }
+
+  72% {
+    box-shadow: 0 0 3px color-mix(in srgb, var(--astro-highlight) 24%, transparent);
+    scale: 1;
+  }
+
+  to {
+    box-shadow: 0 0 0 color-mix(in srgb, var(--astro-highlight) 0%, transparent);
+    scale: 1;
+  }
+}
+
+/* Tool detail disclosure. Both directions animate because the panel stays
+ * mounted; a collapsed panel is inert so it never takes focus or selection. */
+.conversation-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--conversation-disclosure) var(--ease-out-quart),
+    opacity var(--conversation-disclosure) var(--ease-out-quart);
+}
+
+.conversation-disclosure[data-expanded="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.conversation-disclosure-track {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Meaning survives, motion does not: the turn still lands, the edge still
+   * marks the live stream, the ring still reads as running. */
+  .conversation-user-arrival {
+    animation: conversation-reduced-settle var(--motion-press) linear both;
+  }
+
+  .conversation-user-arrival::after {
+    animation: none;
+    border-color: color-mix(in srgb, var(--primary) 42%, transparent);
+  }
+
+  .conversation-live-edge {
+    animation: none;
+    opacity: 0.92;
+  }
+
+  .conversation-live-edge-resolved {
+    animation: none;
+    opacity: 0;
+  }
+
+  .conversation-tool-running::after {
+    animation: none;
+    background: color-mix(in srgb, var(--primary) 52%, transparent);
+  }
+
+  .conversation-tool-flash {
+    animation: none;
+  }
+
+  .conversation-disclosure {
+    transition-duration: 0.01ms;
+  }
+}
+
+@keyframes conversation-reduced-settle {
+  from {
+    opacity: 0.78;
+  }
+
+  to {
+    opacity: 1;
+  }
+}

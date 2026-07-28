@@ -5,6 +5,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import {
+  Check,
   Plus,
   SquareSplitHorizontal,
   SquareSplitVertical,
@@ -20,6 +21,7 @@ import {
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type SetStateAction,
@@ -66,6 +68,16 @@ import { previewEnvironment } from "../state/preview";
 import { terminalEnvironment } from "../state/terminal";
 import { openTerminalLinkInPreview } from "./preview/openTerminalLinkInPreview";
 import { useAtomCommand } from "../state/use-atom-command";
+import {
+  WORKBENCH_CLOSE_ACKNOWLEDGMENT_MS,
+  getKeyboardResizedHeight,
+  shouldAcknowledgeTerminalClose,
+  shouldRefitTerminal,
+  terminalDrawerSeparatorProps,
+  withClosingTerminalGhost,
+  type TerminalCloseSessionState,
+  type TerminalRefitReason,
+} from "./workbenchChoreography";
 
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
@@ -76,7 +88,7 @@ function maxDrawerHeight(): number {
   return Math.max(MIN_DRAWER_HEIGHT, Math.floor(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO));
 }
 
-function clampDrawerHeight(height: number): number {
+export function clampDrawerHeight(height: number): number {
   const safeHeight = Number.isFinite(height) ? height : DEFAULT_THREAD_TERMINAL_HEIGHT;
   const maxHeight = maxDrawerHeight();
   return Math.min(Math.max(Math.round(safeHeight), MIN_DRAWER_HEIGHT), maxHeight);
@@ -281,8 +293,13 @@ interface TerminalViewportProps {
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   focusRequestId: number;
   autoFocus: boolean;
+  /**
+   * Bumped by the drawer at transition boundaries and resize checkpoints only.
+   * The viewport deliberately does *not* take the drawer height as an input:
+   * height changes arrive once per pointer move during a drag, and refitting
+   * xterm on each of those is the per-animation-frame refit the plan forbids.
+   */
   resizeEpoch: number;
-  drawerHeight: number;
   keybindings: ResolvedKeybindingsConfig;
 }
 
@@ -305,7 +322,6 @@ export function TerminalViewport({
   focusRequestId,
   autoFocus,
   resizeEpoch,
-  drawerHeight,
   keybindings,
 }: TerminalViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -822,7 +838,7 @@ export function TerminalViewport({
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [drawerHeight, environmentId, resizeEpoch, terminalId, threadId]);
+  }, [environmentId, resizeEpoch, terminalId, threadId]);
   return (
     <div
       ref={containerRef}
@@ -861,6 +877,12 @@ interface ThreadTerminalDrawerProps {
   terminalLabelsById?: ReadonlyMap<string, string>;
   /** Prefer per-session launch locations when the server already knows a terminal. */
   terminalLaunchLocationsById?: ReadonlyMap<string, TerminalLaunchLocation>;
+  /**
+   * Exit status per terminal, used only to decide whether a *user-initiated*
+   * close earns the clean-close acknowledgment. Absent entries are treated as
+   * unknown and never acknowledged.
+   */
+  terminalCloseStatesById?: ReadonlyMap<string, TerminalCloseSessionState>;
 }
 
 interface TerminalActionButtonProps {
@@ -920,6 +942,7 @@ export default function ThreadTerminalDrawer({
   keybindings,
   terminalLabelsById,
   terminalLaunchLocationsById,
+  terminalCloseStatesById,
 }: ThreadTerminalDrawerProps) {
   const isPanel = mode === "panel";
   const controlledDrawerHeight = clampDrawerHeight(height);
@@ -946,6 +969,13 @@ export default function ThreadTerminalDrawer({
     setDrawerHeight(nextHeight);
   });
   const [resizeEpoch, setResizeEpoch] = useState(0);
+  const [isResizingHeight, setIsResizingHeight] = useState(false);
+  const [closeAcknowledgment, setCloseAcknowledgment] = useState<{
+    readonly terminalId: string;
+    readonly groupId: string;
+    readonly index: number;
+    readonly label: string;
+  } | null>(null);
   const drawerHeightRef = useRef(drawerHeight);
   const lastSyncedHeightRef = useRef(controlledDrawerHeight);
   const onHeightChangeRef = useRef(onHeightChange);
@@ -955,6 +985,17 @@ export default function ThreadTerminalDrawer({
     startHeight: number;
   } | null>(null);
   const didResizeDuringDragRef = useRef(false);
+
+  /**
+   * The single funnel for xterm refits. Every caller names the checkpoint it is
+   * at, and `shouldRefitTerminal` rejects the one case that is not a checkpoint
+   * — a height change that arrives mid-drag. There is no code path that can
+   * schedule a refit per animation frame.
+   */
+  const requestTerminalRefit = useCallback((reason: TerminalRefitReason) => {
+    if (!shouldRefitTerminal({ reason, dragging: resizeStateRef.current !== null })) return;
+    setResizeEpoch((value) => value + 1);
+  }, []);
 
   const normalizedTerminalIds = useMemo(() => {
     const normalizedIds: string[] = [];
@@ -1147,6 +1188,7 @@ export default function ThreadTerminalDrawer({
       startY: event.clientY,
       startHeight: drawerHeightRef.current,
     };
+    setIsResizingHeight(true);
   }, []);
 
   const handleResizePointerMove = useCallback(
@@ -1172,6 +1214,7 @@ export default function ThreadTerminalDrawer({
       const resizeState = resizeStateRef.current;
       if (!resizeState || resizeState.pointerId !== event.pointerId) return;
       resizeStateRef.current = null;
+      setIsResizingHeight(false);
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
@@ -1179,9 +1222,34 @@ export default function ThreadTerminalDrawer({
         return;
       }
       syncHeight(drawerHeightRef.current);
-      setResizeEpoch((value) => value + 1);
+      // Resize checkpoint: the single refit for the whole drag.
+      requestTerminalRefit("drag-end");
     },
-    [syncHeight],
+    [requestTerminalRefit, syncHeight],
+  );
+
+  /**
+   * Keyboard resizing for the drawer height. Delegates step/large-step/clamping
+   * to the shared resize hook's rules via `getKeyboardResizedHeight`.
+   */
+  const handleResizeKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      const nextHeight = getKeyboardResizedHeight({
+        currentHeight: drawerHeightRef.current,
+        key: event.key,
+        minHeight: MIN_DRAWER_HEIGHT,
+        maxHeight: maxDrawerHeight(),
+        useLargeStep: event.shiftKey,
+      });
+      if (nextHeight === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      drawerHeightRef.current = nextHeight;
+      setDrawerHeight(nextHeight);
+      syncHeight(nextHeight);
+      requestTerminalRefit("keyboard-resize");
+    },
+    [requestTerminalRefit, setDrawerHeight, syncHeight],
   );
 
   useEffect(() => {
@@ -1199,26 +1267,114 @@ export default function ThreadTerminalDrawer({
       if (!resizeStateRef.current) {
         syncHeight(clampedHeight);
       }
-      setResizeEpoch((value) => value + 1);
+      requestTerminalRefit("window-resize");
     };
     window.addEventListener("resize", onWindowResize);
     return () => {
       window.removeEventListener("resize", onWindowResize);
     };
-  }, [syncHeight, visible]);
+  }, [requestTerminalRefit, syncHeight, visible]);
 
   useEffect(() => {
     if (!visible) {
       return;
     }
-    setResizeEpoch((value) => value + 1);
-  }, [visible]);
+    // Transition boundary: the surface just finished launching, so the viewport
+    // has a real box for the first time since it was hidden.
+    requestTerminalRefit("visibility-enter");
+  }, [requestTerminalRefit, visible]);
+
+  /**
+   * A height that settles from outside a drag — a restored store value, another
+   * window resizing the shared state — still needs one refit. Mid-drag changes
+   * are rejected by the gate, so this cannot become a per-frame refit.
+   */
+  useEffect(() => {
+    requestTerminalRefit("height-settled");
+  }, [drawerHeight, requestTerminalRefit]);
 
   useEffect(() => {
     return () => {
       syncHeight(drawerHeightRef.current);
     };
   }, [syncHeight]);
+
+  /**
+   * Close a terminal *because the user asked to*, and only then consider the
+   * acknowledgment. The close itself is dispatched first and unconditionally:
+   * nothing is delayed so a flourish can finish.
+   *
+   * The other two ways a tab disappears never come through here — the viewport's
+   * `onSessionExited` auto-close and background reconciliation both call
+   * `onCloseTerminal` directly — so they cannot reach the accent at all.
+   */
+  const closeTerminalFromUser = useCallback(
+    (terminalId: string) => {
+      let groupId: string | null = null;
+      let index = -1;
+      for (const terminalGroup of resolvedTerminalGroups) {
+        const found = terminalGroup.terminalIds.indexOf(terminalId);
+        if (found >= 0) {
+          groupId = terminalGroup.id;
+          index = found;
+          break;
+        }
+      }
+      const session = terminalCloseStatesById?.get(terminalId);
+      const acknowledge =
+        groupId !== null &&
+        shouldAcknowledgeTerminalClose({
+          cause: "user",
+          status: session?.status ?? "closed",
+          exitCode: session?.exitCode ?? null,
+          exitSignal: session?.exitSignal ?? null,
+          hasRunningSubprocess: session?.hasRunningSubprocess ?? false,
+        });
+
+      onCloseTerminal(terminalId);
+
+      if (acknowledge && groupId !== null) {
+        setCloseAcknowledgment({
+          terminalId,
+          groupId,
+          index,
+          label: terminalLabelById.get(terminalId) ?? "Terminal",
+        });
+      }
+    },
+    [onCloseTerminal, resolvedTerminalGroups, terminalCloseStatesById, terminalLabelById],
+  );
+
+  useEffect(() => {
+    if (closeAcknowledgment === null) return;
+    const timer = window.setTimeout(
+      () => setCloseAcknowledgment(null),
+      WORKBENCH_CLOSE_ACKNOWLEDGMENT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [closeAcknowledgment]);
+
+  const resizeHandle = isPanel ? null : (
+    <div
+      className="workbench-terminal-resize-handle group absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize select-none outline-none"
+      data-resizing={isResizingHeight ? "true" : "false"}
+      {...terminalDrawerSeparatorProps({
+        height: drawerHeight,
+        minHeight: MIN_DRAWER_HEIGHT,
+        maxHeight: maxDrawerHeight(),
+      })}
+      onKeyDown={handleResizeKeyDown}
+      onPointerDown={handleResizePointerDown}
+      onPointerMove={handleResizePointerMove}
+      onPointerUp={handleResizePointerEnd}
+      onPointerCancel={handleResizePointerEnd}
+    >
+      <span
+        aria-hidden
+        className="workbench-terminal-resize-rail pointer-events-none absolute inset-x-0 top-0 h-px"
+      />
+    </div>
+  );
 
   if (normalizedTerminalIds.length === 0) {
     return (
@@ -1230,15 +1386,7 @@ export default function ThreadTerminalDrawer({
         )}
         style={isPanel ? undefined : { height: `${drawerHeight}px` }}
       >
-        {!isPanel ? (
-          <div
-            className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
-            onPointerDown={handleResizePointerDown}
-            onPointerMove={handleResizePointerMove}
-            onPointerUp={handleResizePointerEnd}
-            onPointerCancel={handleResizePointerEnd}
-          />
-        ) : null}
+        {resizeHandle}
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 py-6 text-center text-sm text-muted-foreground">
           <p>No terminal sessions for this thread yet.</p>
           <button
@@ -1264,15 +1412,7 @@ export default function ThreadTerminalDrawer({
       )}
       style={isPanel ? undefined : { height: `${drawerHeight}px` }}
     >
-      {!isPanel ? (
-        <div
-          className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
-          onPointerDown={handleResizePointerDown}
-          onPointerMove={handleResizePointerMove}
-          onPointerUp={handleResizePointerEnd}
-          onPointerCancel={handleResizePointerEnd}
-        />
-      ) : null}
+      {resizeHandle}
 
       {!hasTerminalSidebar && (
         <div className="pointer-events-none absolute right-2 top-2 z-20">
@@ -1374,7 +1514,6 @@ export default function ThreadTerminalDrawer({
                           focusRequestId={focusRequestId}
                           autoFocus={terminalId === resolvedActiveTerminalId}
                           resizeEpoch={resizeEpoch}
-                          drawerHeight={drawerHeight}
                           keybindings={keybindings}
                         />
                       </div>
@@ -1402,7 +1541,6 @@ export default function ThreadTerminalDrawer({
                   focusRequestId={focusRequestId}
                   autoFocus
                   resizeEpoch={resizeEpoch}
-                  drawerHeight={drawerHeight}
                   keybindings={keybindings}
                 />
               </div>
@@ -1444,7 +1582,7 @@ export default function ThreadTerminalDrawer({
                   </TerminalActionButton>
                   <TerminalActionButton
                     className="inline-flex h-full items-center border-l border-primary/10 px-1 text-foreground/90 transition-[background-color,color] duration-200 hover:bg-destructive/10 hover:text-destructive-foreground motion-reduce:transition-none"
-                    onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
+                    onClick={() => closeTerminalFromUser(resolvedActiveTerminalId)}
                     label={closeTerminalActionLabel}
                   >
                     <Trash2 className="size-3.25" />
@@ -1479,7 +1617,39 @@ export default function ThreadTerminalDrawer({
                       <div
                         className={showGroupHeaders ? "ml-1 border-l border-border/60 pl-1.5" : ""}
                       >
-                        {terminalGroup.terminalIds.map((terminalId) => {
+                        {withClosingTerminalGhost(
+                          terminalGroup.terminalIds,
+                          closeAcknowledgment !== null &&
+                            closeAcknowledgment.groupId === terminalGroup.id
+                            ? {
+                                terminalId: closeAcknowledgment.terminalId,
+                                index: closeAcknowledgment.index,
+                              }
+                            : null,
+                        ).map((terminalId) => {
+                          const settling = closeAcknowledgment?.terminalId === terminalId;
+                          if (settling) {
+                            // Bounded ghost of the row the store already
+                            // dropped: inert, unlabelled for AT, and removed by
+                            // the acknowledgment timer.
+                            return (
+                              <div
+                                key={terminalId}
+                                inert
+                                aria-hidden
+                                data-terminal-close-acknowledged="true"
+                                className="workbench-terminal-tab-settled flex items-center gap-1 rounded bg-primary/10 px-1 py-0.5 text-[11px] text-foreground ring-1 ring-inset ring-primary/15"
+                              >
+                                {showGroupHeaders && (
+                                  <span className="text-[10px] text-muted-foreground/80">└</span>
+                                )}
+                                <span className="flex min-w-0 flex-1 items-center gap-1 text-left">
+                                  <Check className="workbench-terminal-tab-settled-glyph size-3 shrink-0 text-success" />
+                                  <span className="truncate">{closeAcknowledgment.label}</span>
+                                </span>
+                              </div>
+                            );
+                          }
                           const isActive = terminalId === resolvedActiveTerminalId;
                           const closeTerminalLabel = `Close ${
                             terminalLabelById.get(terminalId) ?? "terminal"
@@ -1487,10 +1657,10 @@ export default function ThreadTerminalDrawer({
                           return (
                             <div
                               key={terminalId}
-                              className={`group flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${
+                              className={`workbench-terminal-tab group flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${
                                 isActive
                                   ? "bg-primary/10 text-foreground ring-1 ring-inset ring-primary/15"
-                                  : "text-muted-foreground transition-colors duration-200 hover:bg-primary/6 hover:text-foreground motion-reduce:transition-none"
+                                  : "text-muted-foreground hover:bg-primary/6 hover:text-foreground"
                               }`}
                             >
                               {showGroupHeaders && (
@@ -1514,7 +1684,7 @@ export default function ThreadTerminalDrawer({
                                       <button
                                         type="button"
                                         className="inline-flex size-3.5 items-center justify-center rounded text-xs font-medium leading-none text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                                        onClick={() => onCloseTerminal(terminalId)}
+                                        onClick={() => closeTerminalFromUser(terminalId)}
                                         aria-label={closeTerminalLabel}
                                       />
                                     }

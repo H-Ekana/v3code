@@ -8,10 +8,13 @@ import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
+import { StateCrossfade } from "~/components/StateCrossfade";
+import { Skeleton } from "~/components/ui/skeleton";
 import { toastManager } from "~/components/ui/toast";
 import { useComposerHandleContext } from "~/composerHandleContext";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { useTheme } from "~/hooks/useTheme";
+import { useDeferredPending } from "~/lib/filesDiffsMotion";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
 import { T3_PIERRE_ICONS } from "~/pierre-icons";
@@ -191,6 +194,19 @@ export default function FileBrowserPanel({
     () => entries.reduce((count, entry) => count + (entry.kind === "file" ? 1 : 0), 0),
     [entries],
   );
+  // A refresh keeps the indexed tree on screen; only a failed first index has
+  // nothing usable left to show. The first index (no data, no error yet) is a
+  // real loading state so the arrival of the index crosses tree into place
+  // instead of the tree silently populating in an already-mounted container.
+  const browserState =
+    entriesQuery.error && entriesQuery.data === null
+      ? "error"
+      : entriesQuery.data === null
+        ? "loading"
+        : "tree";
+  const isFirstIndex = browserState === "loading";
+  const indexingSkeletonVisible = useDeferredPending(isFirstIndex);
+  const isBackgroundRefresh = entriesQuery.data !== null && entriesQuery.isPending;
 
   // Tag tree drags with the composer mention payload. The row is read from
   // the composed event path (the tree's shadow root is open), so this does
@@ -221,7 +237,9 @@ export default function FileBrowserPanel({
     <div
       ref={panelRef}
       className="flex min-h-0 flex-1 flex-col bg-background"
+      aria-busy={isBackgroundRefresh || undefined}
       data-file-browser-panel={`${environmentId}:${cwd}`}
+      data-file-browser-state={browserState}
     >
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-primary/10 bg-background px-3">
         <div className="min-w-0 flex-1">
@@ -250,19 +268,49 @@ export default function FileBrowserPanel({
           <RefreshCw className={cn("size-3.5", entriesQuery.isPending && "animate-spin")} />
         </button>
       </div>
-      {entriesQuery.error && entriesQuery.data === null ? (
-        <div className="p-4 text-xs leading-relaxed text-destructive">{entriesQuery.error}</div>
-      ) : (
-        <FileTree
-          model={model}
-          aria-label={`${projectName} files`}
-          className="min-h-0 flex-1 overflow-hidden"
-          style={{
-            colorScheme: resolvedTheme,
-            ["--trees-fg-override" as string]: "var(--foreground)",
-          }}
-        />
-      )}
+      {/*
+       * Loading, error, and tree cross into place as one retained-content
+       * handoff. Only this container animates: the tree's own rows are rendered
+       * inside its shadow root and are never touched, so a huge workspace costs
+       * one opacity pass.
+       */}
+      <StateCrossfade contentKey={browserState} className="min-h-0 flex-1">
+        {browserState === "error" ? (
+          <div className="p-4 text-xs leading-relaxed text-destructive" role="alert">
+            {entriesQuery.error}
+          </div>
+        ) : browserState === "loading" ? (
+          <div
+            className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 py-2"
+            data-file-browser-skeleton={indexingSkeletonVisible ? "visible" : "deferred"}
+          >
+            <span className="sr-only" role="status" aria-live="polite">
+              Indexing {projectName} files
+            </span>
+            {indexingSkeletonVisible
+              ? Array.from({ length: 7 }, (_unused, index) => (
+                  <div key={index} className="flex items-center gap-2 px-1">
+                    <Skeleton className="size-3.5 shrink-0 rounded-sm" />
+                    <Skeleton
+                      className="h-3 rounded-full"
+                      style={{ width: `${72 - (index % 4) * 12}%` }}
+                    />
+                  </div>
+                ))
+              : null}
+          </div>
+        ) : (
+          <FileTree
+            model={model}
+            aria-label={`${projectName} files`}
+            className="min-h-0 flex-1 overflow-hidden"
+            style={{
+              colorScheme: resolvedTheme,
+              ["--trees-fg-override" as string]: "var(--foreground)",
+            }}
+          />
+        )}
+      </StateCrossfade>
     </div>
   );
 }

@@ -35,7 +35,9 @@ export function RightPanelResizeHandle({ handlers, separatorProps, isResizing, c
         aria-hidden
         className={cn(
           "pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent",
-          "transition-colors [transition-duration:var(--motion-hover,140ms)]",
+          // No `var()` fallback: motion.css is imported first, so the token
+          // always exists and a fallback would only ever be a stale copy.
+          "transition-colors [transition-duration:var(--motion-hover)]",
           "group-hover:bg-primary/65 group-focus-visible:bg-primary/65 group-data-[resizing=true]:bg-primary",
           "motion-reduce:transition-none",
         )}

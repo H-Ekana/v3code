@@ -46,7 +46,11 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
     <div className="pointer-events-auto mx-auto w-fit max-w-[calc(100%-2rem)] pt-3">
       <div
         className={cn(
-          "relative inline-flex items-center gap-3 rounded-xl border py-3 ps-3.5 pe-10 text-card-foreground text-sm",
+          // Level 2 entrance. Purely opacity + 4px translate on an element that
+          // is already mounted with its full text content, so the live region
+          // announces at mount and nothing is hidden until motion finishes.
+          // `motion-arrival` degrades to an opacity settle under reduced motion.
+          "motion-arrival relative inline-flex items-center gap-3 rounded-xl border py-3 ps-3.5 pe-10 text-card-foreground text-sm",
           status.status === "warning"
             ? "border-warning/32 bg-warning/4 [&_svg]:text-warning"
             : "border-destructive/32 bg-destructive/4 text-destructive-foreground [&_svg]:text-destructive",
@@ -68,7 +72,7 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
         <button
           type="button"
           aria-label={`Dismiss ${providerName} provider ${status.status}`}
-          className="absolute top-2 right-2 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-foreground/8 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          className="motion-focus motion-hover motion-press absolute top-2 right-2 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-foreground/8 hover:text-foreground"
           onClick={onDismiss}
         >
           <XIcon aria-hidden className="size-3.5" />

@@ -1,6 +1,15 @@
 import { ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
-import { memo, type ReactNode } from "react";
-import { EllipsisIcon, ListTodoIcon } from "lucide-react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  EllipsisIcon,
+  ListTodoIcon,
+  LockIcon,
+  LockOpenIcon,
+  PenLineIcon,
+  SparklesIcon,
+  type LucideIcon,
+} from "lucide-react";
+import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import {
   Menu,
@@ -11,6 +20,105 @@ import {
   MenuSeparator as MenuDivider,
   MenuTrigger,
 } from "../ui/menu";
+
+/*
+ * Runtime-mode presentation lives here rather than in ChatComposer because both
+ * the full footer control and this compact menu need it, and ChatComposer
+ * already imports this module (importing the other direction would cycle).
+ */
+
+export const runtimeModeConfig: Record<
+  RuntimeMode,
+  { label: string; description: string; compactDescription: string; icon: LucideIcon }
+> = {
+  "approval-required": {
+    label: "Supervised",
+    description: "Ask before commands and file changes.",
+    compactDescription: "Asks first",
+    icon: LockIcon,
+  },
+  "auto-accept-edits": {
+    label: "Auto-accept edits",
+    description: "Auto-approve edits, ask before other actions.",
+    compactDescription: "Edits run, rest asks",
+    icon: PenLineIcon,
+  },
+  auto: {
+    label: "Auto",
+    description:
+      "Reviewed automation: an AI reviewer checks every action first and still stops to ask you before anything risky or destructive.",
+    compactDescription: "AI-reviewed; still asks before risky actions",
+    icon: SparklesIcon,
+  },
+  "full-access": {
+    label: "Full access",
+    description:
+      "No review and no prompts: every command and edit runs immediately, including destructive ones. Nothing stops to ask you.",
+    compactDescription: "No review, no prompts",
+    icon: LockOpenIcon,
+  },
+};
+
+export const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
+
+export const RUNTIME_MODE_AUTO_GLINT_MS = 200;
+
+/**
+ * True for one short window after the user switches *into* Auto. Never true on
+ * mount, so opening a thread already in Auto stays quiet.
+ */
+export function useRuntimeModeAutoGlint(runtimeMode: RuntimeMode): boolean {
+  const previousModeRef = useRef<RuntimeMode | null>(null);
+  const [glinting, setGlinting] = useState(false);
+
+  useEffect(() => {
+    const previousMode = previousModeRef.current;
+    previousModeRef.current = runtimeMode;
+    if (previousMode === null || previousMode === runtimeMode || runtimeMode !== "auto") {
+      if (runtimeMode !== "auto") setGlinting(false);
+      return;
+    }
+    setGlinting(true);
+    const timer = window.setTimeout(() => setGlinting(false), RUNTIME_MODE_AUTO_GLINT_MS);
+    return () => window.clearTimeout(timer);
+  }, [runtimeMode]);
+
+  return glinting;
+}
+
+/**
+ * Runtime-mode icon. Auto gets a crisp outline plus a tight afterglow anchored
+ * to the star shapes (drop-shadow follows the glyph alpha, so it never lights
+ * the whole trigger). The entry glint is one bounded violet-to-pink pass.
+ */
+export const RuntimeModeGlyph = memo(function RuntimeModeGlyph({
+  mode,
+  selected,
+  glinting = false,
+  className,
+}: {
+  mode: RuntimeMode;
+  selected: boolean;
+  glinting?: boolean;
+  className?: string;
+}) {
+  const Icon = runtimeModeConfig[mode].icon;
+  const isAuto = mode === "auto";
+  return (
+    <Icon
+      aria-hidden="true"
+      data-runtime-mode-glyph={mode}
+      data-auto-illuminated={isAuto && selected ? "true" : undefined}
+      className={cn(
+        "shrink-0",
+        isAuto && "composer-auto-glyph",
+        isAuto && selected && "composer-auto-glyph--illuminated",
+        isAuto && selected && glinting && "composer-auto-glyph--glint",
+        className,
+      )}
+    />
+  );
+});
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   activePlan: boolean;
@@ -24,6 +132,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
 }) {
+  const autoGlinting = useRuntimeModeAutoGlint(props.runtimeMode);
+
   return (
     <Menu>
       <MenuTrigger
@@ -69,10 +179,28 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             props.onRuntimeModeChange(value as RuntimeMode);
           }}
         >
-          <MenuRadioItem value="approval-required">Supervised</MenuRadioItem>
-          <MenuRadioItem value="auto-accept-edits">Auto-accept edits</MenuRadioItem>
-          <MenuRadioItem value="auto">Auto</MenuRadioItem>
-          <MenuRadioItem value="full-access">Full access</MenuRadioItem>
+          {runtimeModeOptions.map((mode) => {
+            const option = runtimeModeConfig[mode];
+            const selected = props.runtimeMode === mode;
+            return (
+              <MenuRadioItem key={mode} value={mode} className="py-1.5">
+                <span className="flex min-w-0 items-center gap-2">
+                  <RuntimeModeGlyph
+                    mode={mode}
+                    selected={selected}
+                    glinting={autoGlinting}
+                    className="size-3.5"
+                  />
+                  <span className="grid min-w-0 gap-0.5">
+                    <span className="truncate font-medium">{option.label}</span>
+                    <span className="truncate text-[11px] leading-4 text-muted-foreground">
+                      {option.compactDescription}
+                    </span>
+                  </span>
+                </span>
+              </MenuRadioItem>
+            );
+          })}
         </MenuRadioGroup>
         {props.activePlan ? (
           <>

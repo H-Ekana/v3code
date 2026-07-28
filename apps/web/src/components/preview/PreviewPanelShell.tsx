@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { isElectron } from "~/env";
 import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { cn } from "~/lib/utils";
+import { isSurfaceInert, type SurfacePhase } from "~/components/workbenchChoreography";
 
 import { RightPanelResizeHandle } from "./RightPanelResizeHandle";
 
@@ -26,10 +27,17 @@ export function getPreviewPanelMaxWidth(viewportWidth: number): number {
 export function PreviewPanelShell(props: {
   mode: PreviewPanelMode;
   maximized?: boolean;
+  /**
+   * Presence phase from `useSurfacePhase`. `entering`/`exiting` are the bounded
+   * animation windows during which the shell is preserved but inert. Defaults
+   * to `open` for the embedded/sheet hosts that own their own presence.
+   */
+  phase?: SurfacePhase;
   children: ReactNode;
 }) {
   const useDragRegion = isElectron && props.mode !== "sheet" && props.mode !== "embedded";
   const isInline = props.mode === "inline";
+  const phase: SurfacePhase = props.phase ?? "open";
   const maxWidth = useViewportClampedMaxWidth();
   const { width, isResizing, handlers, separatorProps } = useResizableWidth({
     storageKey: PREVIEW_PANEL_WIDTH_STORAGE_KEY,
@@ -42,16 +50,23 @@ export function PreviewPanelShell(props: {
   return (
     <div
       className={cn(
-        "relative flex h-full min-h-0 min-w-0 flex-col self-stretch bg-background",
+        "workbench-panel-shell relative flex h-full min-h-0 min-w-0 flex-col self-stretch bg-background",
         isInline
           ? props.maximized
             ? "flex-1 border-l border-border"
             : "shrink-0 border-l border-border"
           : "w-full",
       )}
+      // Width is a plain inline style and is never a transitioned or animated
+      // property, so a resize drag moves the edge on the same frame as the
+      // pointer even if the shell is mid-launch.
       style={isInline && !props.maximized ? { width: `${width}px` } : undefined}
       data-preview-panel-mode={props.mode}
       data-preview-panel-maximized={props.maximized ? "true" : "false"}
+      data-surface-phase={phase}
+      data-resizing={isResizing ? "true" : "false"}
+      inert={isSurfaceInert(phase) ? true : undefined}
+      aria-hidden={isSurfaceInert(phase) ? true : undefined}
     >
       {isInline && !props.maximized ? (
         <RightPanelResizeHandle

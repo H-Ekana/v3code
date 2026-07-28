@@ -2,7 +2,9 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { CloudIcon, MonitorIcon } from "lucide-react";
 import { memo, useMemo } from "react";
 
+import { cn } from "~/lib/utils";
 import type { EnvironmentOption } from "./BranchToolbar.logic";
+import { useConfirmedLabelCrossfade } from "./confirmedLabelCrossfade";
 import {
   Select,
   SelectGroup,
@@ -32,6 +34,11 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     return availableEnvironments.find((env) => env.environmentId === environmentId) ?? null;
   }, [availableEnvironments, environmentId]);
 
+  // `environmentId` is already the confirmed value — there is no optimistic
+  // environment state — so the crossfade genuinely marks a landed change and
+  // stays silent on first mount.
+  const confirmedEnvironmentLabelKey = useConfirmedLabelCrossfade(environmentId);
+
   const environmentItems = useMemo(
     () =>
       availableEnvironments.map((env) => ({
@@ -49,7 +56,15 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         ) : (
           <CloudIcon className="size-3 shrink-0" />
         )}
-        <span className="truncate">{activeEnvironment?.label ?? "Run on"}</span>
+        <span
+          className={cn(
+            "truncate",
+            confirmedEnvironmentLabelKey !== null && "feedback-label-crossfade",
+          )}
+          key={confirmedEnvironmentLabelKey ?? "confirmed-initial"}
+        >
+          {activeEnvironment?.label ?? "Run on"}
+        </span>
       </span>
     );
   }
@@ -72,7 +87,15 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         ) : (
           <CloudIcon className="size-3 shrink-0" />
         )}
-        <SelectValue />
+        <span
+          className={cn(
+            "min-w-0 truncate",
+            confirmedEnvironmentLabelKey !== null && "feedback-label-crossfade",
+          )}
+          key={confirmedEnvironmentLabelKey ?? "confirmed-initial"}
+        >
+          <SelectValue />
+        </span>
       </SelectTrigger>
       <SelectPopup>
         <SelectGroup>

@@ -1,5 +1,6 @@
 import { type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { ChevronRightIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { shortcutLabelForCommand } from "../keybindings";
 import {
   type CommandPaletteActionItem,
@@ -23,6 +24,21 @@ interface CommandPaletteResultsProps {
   isActionsOnly: boolean;
   keybindings: ResolvedKeybindingsConfig;
   onExecuteItem: (item: CommandPaletteActionItem | CommandPaletteSubmenuItem) => void;
+}
+
+/**
+ * Wrapper for a row's leading icon.
+ *
+ * The icon is caller-supplied content (a lucide glyph, a project favicon), so
+ * the shift/brightness response is hung on a wrapper rather than on the icon
+ * itself. `flex: none` in `navigation.css` reproduces what the bare glyph got
+ * as a direct flex child, so wrapping changes no geometry.
+ */
+function CommandPaletteRowIcon(props: { icon: ReactNode }) {
+  if (!props.icon) {
+    return null;
+  }
+  return <span className="nav-command-item-icon">{props.icon}</span>;
 }
 
 export function CommandPaletteResults(props: CommandPaletteResultsProps) {
@@ -68,7 +84,7 @@ function DisabledCommandPaletteResultRow(props: {
 }) {
   return (
     <div className="flex min-h-8 select-none items-center gap-2 rounded-sm px-2 py-1.5 text-base opacity-64 sm:min-h-7 sm:text-sm">
-      {props.item.icon}
+      <CommandPaletteRowIcon icon={props.item.icon} />
       {props.item.description ? (
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">
@@ -103,9 +119,14 @@ function CommandPaletteResultRow(props: {
   return (
     <CommandItem
       value={props.item.value}
+      // The highlighted plane and the leading-icon response are both driven by
+      // `data-nav-active` in navigation.css. They are transitions between two
+      // resting states, never animations: this row re-renders on every
+      // filtering keystroke, so an animation here would fire per character.
+      data-nav-active={props.isActive ? "true" : undefined}
       className={cn(
+        "nav-command-item",
         "cursor-pointer gap-2 hover:bg-transparent hover:text-inherit data-highlighted:bg-transparent data-highlighted:text-inherit data-selected:bg-transparent data-selected:text-inherit [&[data-highlighted][data-selected]]:bg-transparent [&[data-highlighted][data-selected]]:text-inherit",
-        props.isActive && "bg-accent! text-accent-foreground!",
       )}
       onMouseDown={(event) => {
         event.preventDefault();
@@ -114,7 +135,7 @@ function CommandPaletteResultRow(props: {
         props.onExecuteItem(props.item);
       }}
     >
-      {props.item.icon}
+      <CommandPaletteRowIcon icon={props.item.icon} />
       {props.item.description ? (
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">

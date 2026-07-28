@@ -24,6 +24,7 @@ import { useOpenInPreferredEditor } from "../editorPreferences";
 import { type DraftId } from "../composerDraftStore";
 import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { useCheckpointDiff } from "~/lib/checkpointDiffState";
+import { diffScopeNavigationDirection, type DiffScopeDirection } from "~/lib/filesDiffsMotion";
 import { cn } from "~/lib/utils";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "../diffPanelStore";
 import { useTheme } from "../hooks/useTheme";
@@ -40,6 +41,7 @@ import { useProject, useThread } from "../state/entities";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { useClientSettings } from "../hooks/useSettings";
 import { formatShortTimestamp } from "../timestampFormat";
+import { StateCrossfade } from "./StateCrossfade";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { AnnotatableCodeView, type AnnotatableCodeViewHandle } from "./diffs/AnnotatableCodeView";
 import { Button } from "./ui/button";
@@ -203,7 +205,16 @@ export default function DiffPanel({
     scopeKey: null,
     fileKeys: EMPTY_COLLAPSED_DIFF_FILE_KEYS,
   }));
-  const codeViewRef = useRef<AnnotatableCodeViewHandle>(null);
+  const codeViewInstanceRef = useRef<AnnotatableCodeViewHandle | null>(null);
+  // A callback ref rather than a ref object: during a scope crossfade the
+  // outgoing diff view is retained for a moment and shares this handle with the
+  // incoming one. Ignoring the null it emits on unmount keeps the live handle
+  // the incoming layer just set, so scroll-to-file never breaks after a handoff.
+  const attachCodeView = useCallback((handle: AnnotatableCodeViewHandle | null) => {
+    if (handle !== null) {
+      codeViewInstanceRef.current = handle;
+    }
+  }, []);
 
   const routeThreadRef = useParams({
     strict: false,
@@ -293,6 +304,37 @@ export default function DiffPanel({
         ? "Latest turn"
         : `Turn ${selectedCheckpointTurnCount ?? "?"}`;
   const reviewSectionId = selectedTurn ? `turn:${selectedTurn.turnId}` : selectedGitScope;
+  // Scope order for the directional navigation: working tree, branch, then
+  // turns newest-first. Moving down the list travels forward, back up travels
+  // backward. Only a user-initiated scope change records a direction, so a
+  // remount or a store reconcile settles in place instead of sliding.
+  const scopeNavigationOrder = useMemo(
+    () => [
+      "unstaged",
+      "branch",
+      ...orderedTurnDiffSummaries.map((summary) => `turn:${summary.turnId}`),
+    ],
+    [orderedTurnDiffSummaries],
+  );
+  const [scopeTransition, setScopeTransition] = useState<{
+    readonly sectionId: string;
+    readonly direction: DiffScopeDirection;
+  } | null>(null);
+  const scopeDirection: DiffScopeDirection =
+    scopeTransition?.sectionId === reviewSectionId ? scopeTransition.direction : "none";
+  const beginScopeNavigation = useCallback(
+    (nextSectionId: string) => {
+      setScopeTransition({
+        sectionId: nextSectionId,
+        direction: diffScopeNavigationDirection(
+          reviewSectionId,
+          nextSectionId,
+          scopeNavigationOrder,
+        ),
+      });
+    },
+    [reviewSectionId, scopeNavigationOrder],
+  );
   const collapseScopeKey = routeThreadRef
     ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}:${reviewSectionId}`
     : null;
@@ -426,6 +468,16 @@ export default function DiffPanel({
       }),
     [resolvedTheme, selectedPatch, selectedTurnId],
   );
+  // Crossfade key for the loading/empty/content handoff. A background refresh
+  // that keeps the previous patch stays on "files"/"text", so usable content is
+  // never swapped out for a skeleton while it refreshes.
+  const diffContentState = !renderablePatch
+    ? isLoadingSelectedPatch
+      ? "loading"
+      : "empty"
+    : renderablePatch.kind === "files"
+      ? "files"
+      : "text";
   const renderableFiles = useMemo(() => {
     if (!renderablePatch || renderablePatch.kind !== "files") {
       return [];
@@ -457,7 +509,7 @@ export default function DiffPanel({
     if (!selectedFilePath) return;
     const file = codeViewFiles.find((candidate) => candidate.filePath === selectedFilePath);
     if (!file) return;
-    codeViewRef.current?.scrollTo({ type: "item", id: file.fileKey, align: "start" });
+    codeViewInstanceRef.current?.scrollTo({ type: "item", id: file.fileKey, align: "start" });
   }, [codeViewFiles, selectedFilePath, selectedFileRevealRequestId]);
 
   const openDiffFile = useCallback(
@@ -516,10 +568,12 @@ export default function DiffPanel({
 
   const selectTurn = (turnId: TurnId) => {
     if (!routeThreadRef) return;
+    beginScopeNavigation(`turn:${turnId}`);
     useDiffPanelStore.getState().selectTurn(routeThreadRef, turnId);
   };
   const selectGitScope = (scope: "branch" | "unstaged") => {
     if (!routeThreadRef) return;
+    beginScopeNavigation(scope);
     useDiffPanelStore.getState().selectGitScope(routeThreadRef, scope);
   };
   const selectBranchBaseRef = (baseRef: string | null) => {
@@ -831,6 +885,10 @@ export default function DiffPanel({
       ) : (
         <>
           <div className="diff-panel-viewport flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            {/* Announced on the frame the scope changes, ahead of any transition. */}
+            <span className="sr-only" role="status" aria-live="polite">
+              {`Diff scope: ${selectedScopeLabel}`}
+            </span>
             {isSelectedPatchTruncated && (
               <p className="shrink-0 border-b border-border/70 bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
                 This diff was truncated because it exceeded the preview limit. The changes shown are
@@ -839,112 +897,123 @@ export default function DiffPanel({
             )}
             {selectedPatchError && !renderablePatch && (
               <div className="px-3">
-                <p className="mb-2 text-[11px] text-red-500/80">{selectedPatchError}</p>
+                <p className="mb-2 text-[11px] text-red-500/80" role="alert">
+                  {selectedPatchError}
+                </p>
               </div>
             )}
-            {!renderablePatch ? (
-              isLoadingSelectedPatch ? (
-                <DiffPanelLoadingState
-                  label={
-                    selectedTurn
-                      ? "Loading checkpoint diff..."
-                      : selectedGitScope === "unstaged"
-                        ? "Loading working tree diff..."
-                        : "Loading branch diff..."
-                  }
-                />
-              ) : (
-                <div className="flex h-full items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
-                  <p>
-                    {hasNoNetChanges
-                      ? "No net changes in this selection."
-                      : "No patch available for this selection."}
-                  </p>
-                </div>
-              )
-            ) : renderablePatch.kind === "files" ? (
-              <div
-                className="min-h-0 flex-1"
-                onClickCapture={(event) => {
-                  const composedPath = event.nativeEvent.composedPath?.() ?? [];
-                  const title = composedPath.find(
-                    (node): node is HTMLElement =>
-                      node instanceof HTMLElement && node.hasAttribute("data-title"),
-                  );
-                  const filePath = title?.textContent?.trim();
-                  if (filePath) openDiffFile(filePath);
-                }}
-              >
-                <AnnotatableCodeView
-                  viewerRef={codeViewRef}
-                  key={collapseScopeKey ?? reviewSectionId}
-                  className="diff-render-surface h-full min-h-0 overflow-auto [&>div>div:last-child]:top-0! [&>div>div:last-child]:bottom-auto!"
-                  files={codeViewFiles}
-                  sectionId={reviewSectionId}
-                  sectionTitle={reviewSectionTitle}
-                  composerDraftTarget={composerDraftTarget}
-                  renderHeaderPrefix={(fileDiff, fileKey, collapsed) => {
-                    const filePath = resolveFileDiffPath(fileDiff);
-                    return (
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <button
-                              type="button"
-                              className={cn(
-                                "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-[background-color,color] duration-200 hover:bg-primary/10 hover:text-primary focus-visible:outline-hidden motion-reduce:transition-none",
-                                getDiffCollapseIconClassName(fileDiff),
-                              )}
-                              aria-label={collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`}
-                              aria-expanded={!collapsed}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                toggleDiffFileCollapsed(fileKey);
-                              }}
-                            />
-                          }
-                        >
-                          {collapsed ? (
-                            <ChevronRightIcon className="size-4" />
-                          ) : (
-                            <ChevronDownIcon className="size-4" />
-                          )}
-                        </TooltipTrigger>
-                        <TooltipPopup side="top">
-                          {collapsed ? "Expand diff" : "Collapse diff"}
-                        </TooltipPopup>
-                      </Tooltip>
+            <StateCrossfade
+              contentKey={`${reviewSectionId}:${diffContentState}`}
+              direction={scopeDirection}
+              className="min-h-0 min-w-0 flex-1"
+              data-diff-content-state={diffContentState}
+            >
+              {!renderablePatch ? (
+                isLoadingSelectedPatch ? (
+                  <DiffPanelLoadingState
+                    label={
+                      selectedTurn
+                        ? "Loading checkpoint diff..."
+                        : selectedGitScope === "unstaged"
+                          ? "Loading working tree diff..."
+                          : "Loading branch diff..."
+                    }
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
+                    <p>
+                      {hasNoNetChanges
+                        ? "No net changes in this selection."
+                        : "No patch available for this selection."}
+                    </p>
+                  </div>
+                )
+              ) : renderablePatch.kind === "files" ? (
+                <div
+                  className="min-h-0 flex-1"
+                  onClickCapture={(event) => {
+                    const composedPath = event.nativeEvent.composedPath?.() ?? [];
+                    const title = composedPath.find(
+                      (node): node is HTMLElement =>
+                        node instanceof HTMLElement && node.hasAttribute("data-title"),
                     );
+                    const filePath = title?.textContent?.trim();
+                    if (filePath) openDiffFile(filePath);
                   }}
-                  options={{
-                    diffStyle: diffRenderMode === "split" ? "split" : "unified",
-                    lineDiffType: "none",
-                    overflow: wordWrap ? "wrap" : "scroll",
-                    theme: resolveDiffThemeName(resolvedTheme),
-                    themeType: resolvedTheme as DiffThemeType,
-                    unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
-                    stickyHeaders: true,
-                    layout: { paddingTop: 8, paddingBottom: 8, gap: 8 },
-                  }}
-                />
-              </div>
-            ) : (
-              <div className="min-h-0 flex-1 overflow-auto p-2">
-                <div className="space-y-2">
-                  <p className="text-[11px] text-muted-foreground/75">{renderablePatch.reason}</p>
-                  <pre
-                    className={cn(
-                      "max-h-[72vh] rounded-md border border-primary/10 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90",
-                      wordWrap
-                        ? "overflow-auto whitespace-pre-wrap wrap-break-word"
-                        : "overflow-auto",
-                    )}
-                  >
-                    {renderablePatch.text}
-                  </pre>
+                >
+                  <AnnotatableCodeView
+                    viewerRef={attachCodeView}
+                    key={collapseScopeKey ?? reviewSectionId}
+                    className="diff-render-surface h-full min-h-0 overflow-auto [&>div>div:last-child]:top-0! [&>div>div:last-child]:bottom-auto!"
+                    files={codeViewFiles}
+                    sectionId={reviewSectionId}
+                    sectionTitle={reviewSectionTitle}
+                    composerDraftTarget={composerDraftTarget}
+                    renderHeaderPrefix={(fileDiff, fileKey, collapsed) => {
+                      const filePath = resolveFileDiffPath(fileDiff);
+                      return (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                className={cn(
+                                  "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-[background-color,color] duration-200 hover:bg-primary/10 hover:text-primary focus-visible:outline-hidden motion-reduce:transition-none",
+                                  getDiffCollapseIconClassName(fileDiff),
+                                )}
+                                aria-label={
+                                  collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`
+                                }
+                                aria-expanded={!collapsed}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleDiffFileCollapsed(fileKey);
+                                }}
+                              />
+                            }
+                          >
+                            {collapsed ? (
+                              <ChevronRightIcon className="size-4" />
+                            ) : (
+                              <ChevronDownIcon className="size-4" />
+                            )}
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">
+                            {collapsed ? "Expand diff" : "Collapse diff"}
+                          </TooltipPopup>
+                        </Tooltip>
+                      );
+                    }}
+                    options={{
+                      diffStyle: diffRenderMode === "split" ? "split" : "unified",
+                      lineDiffType: "none",
+                      overflow: wordWrap ? "wrap" : "scroll",
+                      theme: resolveDiffThemeName(resolvedTheme),
+                      themeType: resolvedTheme as DiffThemeType,
+                      unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
+                      stickyHeaders: true,
+                      layout: { paddingTop: 8, paddingBottom: 8, gap: 8 },
+                    }}
+                  />
                 </div>
-              </div>
-            )}
+              ) : (
+                <div className="min-h-0 flex-1 overflow-auto p-2">
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground/75">{renderablePatch.reason}</p>
+                    <pre
+                      className={cn(
+                        "max-h-[72vh] rounded-md border border-primary/10 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90",
+                        wordWrap
+                          ? "overflow-auto whitespace-pre-wrap wrap-break-word"
+                          : "overflow-auto",
+                      )}
+                    >
+                      {renderablePatch.text}
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </StateCrossfade>
           </div>
         </>
       )}

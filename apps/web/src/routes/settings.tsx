@@ -102,7 +102,17 @@ function SettingsContentLayout() {
           </div>
         )}
 
-        <div key={restoreSignal} className="min-h-0 flex flex-1 flex-col">
+        {/*
+          The incoming section settles by 4px with a short crossfade. It is
+          keyed by pathname so the animation runs once per route change and
+          never on re-render. The page starts at 0.55 opacity rather than 0, so
+          nothing is withheld from the reader or from assistive technology, and
+          routing/focus/history are unaffected — this is purely presentational.
+        */}
+        <div
+          key={`${restoreSignal}:${location.pathname}`}
+          className="nav-settings-page min-h-0 flex flex-1 flex-col"
+        >
           <Outlet />
         </div>
       </div>

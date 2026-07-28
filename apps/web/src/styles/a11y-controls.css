@@ -1,7 +1,18 @@
-/* Accessibility and coarse-pointer controls — owned by the a11y controls area. */
+/*
+ * Accessibility and coarse-pointer controls — owned by the a11y controls area.
+ *
+ * Timing and easing come from `motion.css`, referenced bare. A `var()` fallback
+ * here would be an untested second copy of the value: this file previously read
+ * `var(--motion-hover, 120ms)` while the token is 140ms, so the two had already
+ * drifted apart with nothing to catch it.
+ *
+ * Intensity budget: Level 1 throughout (trigger crossfade, rail illumination,
+ * drag tip). These are high-frequency controls and must stay quieter than the
+ * composer/send signature.
+ */
 
 .sidebar-trigger-icon {
-  transition: opacity var(--motion-hover, 120ms) linear;
+  transition: opacity var(--motion-hover) linear;
 }
 
 .sidebar-trigger-icon-open {
@@ -25,8 +36,7 @@
   background: transparent;
   content: "";
   pointer-events: none;
-  transition: background-color var(--motion-hover, 140ms)
-    var(--ease-out-quart, cubic-bezier(0.25, 1, 0.5, 1));
+  transition: background-color var(--motion-hover) var(--ease-out-quart);
 }
 
 .sidebar-resize-rail:hover::after,
@@ -53,8 +63,7 @@
 }
 
 .sidebar-resize-rail[data-resizing="true"] .sidebar-resize-tip {
-  animation: sidebar-resize-tip-arrival 140ms var(--ease-out-quint, cubic-bezier(0.22, 1, 0.36, 1))
-    both;
+  animation: sidebar-resize-tip-arrival var(--motion-hover) var(--ease-out-quint) both;
 }
 
 @keyframes sidebar-resize-tip-arrival {

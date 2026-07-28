@@ -45,8 +45,10 @@ import { isV3DemoResponderTarget } from "@t3tools/shared/v3Demo";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useAtomValue } from "@effect/atom-react";
 import {
+  type CSSProperties,
   lazy,
   memo,
+  startTransition,
   Suspense,
   useCallback,
   useEffect,
@@ -92,6 +94,7 @@ import { deriveLatestAgentSnapshot } from "@t3tools/client-runtime/state/thread-
 import { type LegendListRef } from "@legendapp/list/react";
 import {
   getAnchoredTurnMetrics,
+  resolveTimelineSendScroll,
   shouldPositionTimelineAnchor,
   type TimelineScrollMode,
 } from "./chat/timelineScrollAnchoring";
@@ -127,6 +130,7 @@ import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import {
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
+  selectThreadRightPanelWorkspace,
   selectThreadRightPanelState,
   type RightPanelSurface,
   useRightPanelStore,
@@ -146,13 +150,21 @@ import {
   usePreviewMiniPlayerStore,
 } from "../previewMiniPlayerStore";
 import { RightPanelTabs } from "./RightPanelTabs";
+import {
+  isSurfaceInert,
+  useCenterFlip,
+  usePrefersReducedMotion,
+  useSurfacePhase,
+  type SurfacePhase,
+  type TerminalCloseSessionState,
+} from "./workbenchChoreography";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import AgentsPanel from "./AgentsPanel";
 import AgentsLiveStrip from "./chat/AgentsLiveStrip";
 import PlanSidebar from "./PlanSidebar";
-import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
+import ThreadTerminalDrawer, { clampDrawerHeight } from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
@@ -205,8 +217,15 @@ import {
 } from "../lib/elementContext";
 import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
+import {
+  appendConversationReferencesToPrompt,
+  createConversationReference,
+  type ConversationReference,
+  type ConversationReferenceSelection,
+} from "../conversationReference";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
+import type { KnownTerminalSession } from "@t3tools/client-runtime/state/terminal";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
@@ -230,10 +249,22 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import {
+  COMPOSER_INTERRUPT_UNCONFIRMED_TIMEOUT_MS,
+  type ComposerInterruptState,
+  canRequestComposerInterrupt,
+  nextComposerInterruptState,
+} from "./chat/ComposerPrimaryActions";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import {
+  deferSendCleanup,
+  mergeOptimisticUserMessages,
+  retireSendMorph,
+  runSendMorphTransition,
+} from "./chat/sendMorphTransition";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -610,10 +641,34 @@ function serverTerminalIdsStrictSubsetOfClient(
   return true;
 }
 
+/**
+ * Project the exit facts the clean-close gate reads out of the known sessions.
+ * `status` comes from the live session state; `exitCode`/`exitSignal` come from
+ * the server summary, which is the only place a forced kill is distinguishable
+ * from a clean `exit`.
+ */
+function buildTerminalCloseStates(
+  sessions: ReadonlyArray<KnownTerminalSession>,
+): ReadonlyMap<string, TerminalCloseSessionState> {
+  const next = new Map<string, TerminalCloseSessionState>();
+  for (const session of sessions) {
+    const summary = session.state.summary;
+    next.set(session.target.terminalId, {
+      status: session.state.status,
+      exitCode: summary?.exitCode ?? null,
+      exitSignal: summary?.exitSignal ?? null,
+      hasRunningSubprocess: session.state.hasRunningSubprocess,
+    });
+  }
+  return next;
+}
+
 interface PersistentThreadTerminalDrawerProps {
   threadRef: { environmentId: EnvironmentId; threadId: ThreadId };
   threadId: ThreadId;
   visible: boolean;
+  /** Surface presence for the active thread's drawer; `closed` for the rest. */
+  phase: SurfacePhase;
   launchContext: PersistentTerminalLaunchContext | null;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
@@ -628,6 +683,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   threadRef,
   threadId,
   visible,
+  phase,
   launchContext,
   focusRequestId,
   splitShortcutLabel,
@@ -716,6 +772,10 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   }, [drawerTerminalSessions, launchContext, project]);
   const serverOrderedTerminalIds = useMemo(
     () => drawerTerminalSessions.map((session) => session.target.terminalId),
+    [drawerTerminalSessions],
+  );
+  const terminalCloseStatesById = useMemo(
+    () => buildTerminalCloseStates(drawerTerminalSessions),
     [drawerTerminalSessions],
   );
   const storeSetTerminalHeight = useTerminalUiStateStore((state) => state.setTerminalHeight);
@@ -922,12 +982,31 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     [onAddTerminalContext, visible],
   );
 
-  if (!project || !terminalUiState.terminalOpen || !cwd) {
+  // The drawer stays mounted through its bounded exit window so the surface can
+  // animate out; `phase` reaches "closed" on a timer, after which it unmounts.
+  if (!project || !cwd || (!terminalUiState.terminalOpen && phase === "closed")) {
     return null;
   }
 
   return (
-    <div className={visible ? undefined : "hidden"}>
+    <div
+      className="workbench-terminal-surface"
+      data-surface-phase={phase}
+      // The height the surface animates *to* on launch and *from* on exit. It is
+      // the same clamped value the drawer body renders at, so the space the
+      // composer sits on grows and shrinks in lockstep with the drawer over one
+      // shared duration — the two motions are one coupled surface, not a jump
+      // followed by a slide. Kept in sync with the child's own clampDrawerHeight.
+      style={
+        {
+          "--drawer-surface-height": `${clampDrawerHeight(terminalUiState.terminalHeight)}px`,
+        } as CSSProperties
+      }
+      // Closed and exiting terminal content is absent from keyboard navigation
+      // while the xterm instance and its buffer stay mounted underneath.
+      inert={isSurfaceInert(phase) ? true : undefined}
+      aria-hidden={isSurfaceInert(phase) ? true : undefined}
+    >
       <ThreadTerminalDrawer
         threadRef={threadRef}
         threadId={threadId}
@@ -956,6 +1035,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
         onAddTerminalContext={handleAddTerminalContext}
         terminalLabelsById={terminalLabelsById}
         terminalLaunchLocationsById={terminalLaunchLocationsById}
+        terminalCloseStatesById={terminalCloseStatesById}
       />
     </div>
   );
@@ -1046,6 +1126,10 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
     }
     return labels;
   }, [knownTerminalSessions, surface.terminalIds]);
+  const terminalCloseStatesById = useMemo(
+    () => buildTerminalCloseStates(knownTerminalSessions),
+    [knownTerminalSessions],
+  );
   const terminalLaunchLocationsById = useMemo(() => {
     const locations = new Map<
       string,
@@ -1125,6 +1209,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
       onAddTerminalContext={onAddTerminalContext}
       terminalLabelsById={terminalLabelsById}
       terminalLaunchLocationsById={terminalLaunchLocationsById}
+      terminalCloseStatesById={terminalCloseStatesById}
       keybindings={keybindings}
     />
   );
@@ -1243,6 +1328,12 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setPreviewAnnotations,
   );
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
+  const addComposerDraftConversationReference = useComposerDraftStore(
+    (store) => store.addConversationReference,
+  );
+  const setComposerDraftConversationReferences = useComposerDraftStore(
+    (store) => store.setConversationReferences,
+  );
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
@@ -1287,6 +1378,11 @@ function ChatViewContent(props: ChatViewProps) {
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
+  const [composerInterruptState, setComposerInterruptState] =
+    useState<ComposerInterruptState>("idle");
+  const composerInterruptStateRef = useRef<ComposerInterruptState>("idle");
+  composerInterruptStateRef.current = composerInterruptState;
+  const composerInterruptWatchdogRef = useRef<number | null>(null);
   const [respondingRequestIds, setRespondingRequestIds] = useState<ApprovalRequestId[]>([]);
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
     ApprovalRequestId[]
@@ -1517,8 +1613,10 @@ function ChatViewContent(props: ChatViewProps) {
   const activeRightPanelSurface = useRightPanelStore((state) =>
     selectActiveRightPanelSurface(state.byThreadKey, activeThreadRef),
   );
-  const activeFileSurface =
-    activeRightPanelSurface?.kind === "file" ? activeRightPanelSurface : null;
+  const rightPanelWorkspace = useMemo(
+    () => selectThreadRightPanelWorkspace(rightPanelState),
+    [rightPanelState],
+  );
   const activePreviewState = useThreadPreviewState(activeThreadRef);
   const activePreviewMiniPlayer = usePreviewMiniPlayerStore((state) =>
     selectThreadPreviewMiniPlayer(state.byThreadKey, activeThreadRef),
@@ -1534,10 +1632,112 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const previewPanelOpen = activeRightPanelKind === "preview" && isPreviewSupportedInRuntime();
   const rightPanelOpen = rightPanelState.isOpen;
-  const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
+
+  // --- Plan item 13: right-panel shell presence and chat-column continuity ---
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const inlineRightPanelOpen = Boolean(
+    !shouldUsePlanSidebarSheet && rightPanelOpen && activeThreadRef,
+  );
+  /**
+   * Preserves the shell through a bounded exit instead of hard-unmounting it.
+   * The window is closed by a timer inside the hook, so the panel's browser and
+   * terminal children are never retained for longer than one transition; their
+   * state lives in the right-panel/preview/terminal stores, not in the shell.
+   */
+  const rightPanelPhase = useSurfacePhase(inlineRightPanelOpen, {
+    animate: !prefersReducedMotion,
+  });
+  /**
+   * The shell is still on screen for the whole exit window. Chrome that belongs
+   * to it — the titlebar controls, the maximized geometry, the header's reserved
+   * inset — keys off presence rather than `rightPanelOpen`, so nothing snaps to
+   * its closed position while the panel is still visibly leaving.
+   */
+  const rightPanelShellPresent = rightPanelPhase !== "closed";
+  /**
+   * ...and so does the panel's *content*. `selectActiveRightPanelSurface` gates
+   * on `isOpen`, so it returned null the instant the close began and the body
+   * fell back to its "open a surface" empty state for the entire exit window —
+   * the suggestion cards visibly flashed as the shell slid away. Hold the last
+   * surface for as long as the shell is on screen so the exiting panel keeps
+   * painting what the user was actually looking at.
+   *
+   * Deliberately separate from `activeRightPanelSurface`: that one still gates
+   * on `isOpen` and remains the truth for *actions* (terminal splits, close
+   * keybindings), which must not operate on a panel that is already closing.
+   */
+  const lastRightPanelSurfaceRef = useRef(activeRightPanelSurface);
+  if (activeRightPanelSurface) lastRightPanelSurfaceRef.current = activeRightPanelSurface;
+  const renderedRightPanelSurface =
+    activeRightPanelSurface ?? (rightPanelShellPresent ? lastRightPanelSurfaceRef.current : null);
+  const canMaximizeRightPanel = rightPanelShellPresent && !shouldUsePlanSidebarSheet;
   const rightPanelMaximized =
     canMaximizeRightPanel && maximizedRightPanelThreadKey === routeThreadKey;
-  const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUsePlanSidebarSheet;
+  const inlineRightPanelOwnsTitleBar = rightPanelShellPresent && !shouldUsePlanSidebarSheet;
+  /**
+   * FLIP the chat column's centre so its content glides to the new width rather
+   * than jumping. Keyed on the *phase*, not on `rightPanelOpen`: the layout only
+   * actually changes when the shell mounts (`entering`) and when it finally
+   * unmounts (`closed`), and a drag never changes the phase, so panel width is
+   * never animated while the resize handle is held.
+   */
+  const chatColumnFlipRef = useCenterFlip<HTMLDivElement>({
+    key: `${rightPanelPhase}:${rightPanelMaximized ? "max" : "inline"}`,
+    enabled: !prefersReducedMotion,
+  });
+
+  /**
+   * Plan item 16: the drawer's surface launch/exit. Hoisted to the active
+   * thread so switching threads cannot replay a launch on a drawer that was
+   * already open, and so two mounted drawers can never animate at once.
+   */
+  const terminalDrawerPhase = useSurfacePhase(Boolean(terminalUiState.terminalOpen), {
+    animate: !prefersReducedMotion,
+  });
+
+  /**
+   * The thread key whose drawer is animating *out* right now, and only because
+   * the user genuinely closed it — same thread, its drawer went from open to
+   * shut. `terminalDrawerPhase` alone cannot be trusted here: switching from a
+   * thread with an open drawer to one with a closed drawer also reads as
+   * "exiting", and retaining the new thread through that phantom exit would mount
+   * and flash a drawer it never opened. This is what keeps the *closing* thread's
+   * drawer mounted for its exit window (see the mount-keys reconcile below).
+   */
+  const [terminalDrawerExitThreadKey, setTerminalDrawerExitThreadKey] = useState<string | null>(
+    null,
+  );
+  const previousActiveTerminalRef = useRef<{ key: string | null; open: boolean }>({
+    key: activeThreadKey,
+    open: Boolean(terminalUiState.terminalOpen),
+  });
+  useEffect(() => {
+    const open = Boolean(terminalUiState.terminalOpen);
+    const previous = previousActiveTerminalRef.current;
+    previousActiveTerminalRef.current = { key: activeThreadKey, open };
+    if (previous.key === activeThreadKey && previous.open && !open) {
+      // A genuine close of the current thread's drawer: mark it exiting.
+      setTerminalDrawerExitThreadKey(activeThreadKey);
+    } else if (open || previous.key !== activeThreadKey) {
+      // Reopened, or the active thread changed: no drawer is closing.
+      setTerminalDrawerExitThreadKey(null);
+    }
+  }, [activeThreadKey, terminalUiState.terminalOpen]);
+  useEffect(() => {
+    // The exit window is over once the surface phase settles closed.
+    if (terminalDrawerPhase === "closed" && terminalDrawerExitThreadKey !== null) {
+      setTerminalDrawerExitThreadKey(null);
+    }
+  }, [terminalDrawerExitThreadKey, terminalDrawerPhase]);
+
+  // Focus must not be stranded inside a shell that is about to become inert.
+  useEffect(() => {
+    if (rightPanelPhase !== "exiting") return;
+    const shell = document.querySelector<HTMLElement>('[data-preview-panel-mode="inline"]');
+    const focused = document.activeElement;
+    if (!shell || !(focused instanceof HTMLElement) || !shell.contains(focused)) return;
+    document.querySelector<HTMLElement>("[data-chat-column]")?.focus();
+  }, [rightPanelPhase]);
 
   useEffect(() => {
     if (!activeThreadRef) return;
@@ -1600,7 +1800,16 @@ function ChatViewContent(props: ChatViewProps) {
         currentThreadIds,
         openThreadIds: existingOpenTerminalThreadKeys,
         activeThreadId: activeThreadKey,
-        activeThreadTerminalOpen: Boolean(activeThreadKey && terminalUiState.terminalOpen),
+        // Retain the active drawer through its bounded exit window: `terminalOpen`
+        // flips false the instant the user closes it, but the surface animates out
+        // for ~200ms afterwards. Dropping the mount key in that same flush would
+        // unmount the drawer before its exit animation could play. Keyed on the
+        // *closing* thread (not the raw phase) so a thread switch never retains a
+        // drawer the newly-active thread never opened.
+        activeThreadTerminalOpen: Boolean(
+          activeThreadKey &&
+          (terminalUiState.terminalOpen || activeThreadKey === terminalDrawerExitThreadKey),
+        ),
         maxHiddenThreadCount: MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
       });
       return currentThreadIds.length === nextThreadIds.length &&
@@ -1608,7 +1817,12 @@ function ChatViewContent(props: ChatViewProps) {
         ? currentThreadIds
         : nextThreadIds;
     });
-  }, [activeThreadKey, existingOpenTerminalThreadKeys, terminalUiState.terminalOpen]);
+  }, [
+    activeThreadKey,
+    existingOpenTerminalThreadKeys,
+    terminalDrawerExitThreadKey,
+    terminalUiState.terminalOpen,
+  ]);
   const latestTurnSettled = isLatestTurnSettled(activeLatestTurn, activeThread?.session ?? null);
   const activeProjectRef = activeThread
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
@@ -1991,6 +2205,29 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
+  // The stop control settles the moment the turn stops running, and resets
+  // outright when the active thread changes or this view unmounts. Combined
+  // with the unconfirmed watchdog in `onInterrupt`, there is no path that
+  // leaves the button permanently disabled.
+  useEffect(() => {
+    if (phase === "running") return;
+    if (composerInterruptWatchdogRef.current !== null) {
+      window.clearTimeout(composerInterruptWatchdogRef.current);
+      composerInterruptWatchdogRef.current = null;
+    }
+    setComposerInterruptState((current) =>
+      current === "idle" ? current : nextComposerInterruptState(current, "turn-settled"),
+    );
+  }, [phase]);
+  useEffect(() => {
+    return () => {
+      if (composerInterruptWatchdogRef.current !== null) {
+        window.clearTimeout(composerInterruptWatchdogRef.current);
+        composerInterruptWatchdogRef.current = null;
+      }
+      setComposerInterruptState("idle");
+    };
+  }, [activeThreadId]);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const threadAgents = useMemo(
@@ -2328,15 +2565,7 @@ function ChatViewContent(props: ChatViewProps) {
             return changed ? { ...message, attachments } : message;
           });
 
-    if (optimisticUserMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
-    }
-    const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
-    const pendingMessages = optimisticUserMessages.filter((message) => !serverIds.has(message.id));
-    if (pendingMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
-    }
-    return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
+    return mergeOptimisticUserMessages(serverMessagesWithPreviewHandoff, optimisticUserMessages);
   }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
   const timelineEntries = useMemo(
     () =>
@@ -2603,6 +2832,25 @@ function ChatViewContent(props: ChatViewProps) {
       focusComposer();
     });
   }, [focusComposer]);
+  const addConversationReferenceToDraft = useCallback(
+    (selection: ConversationReferenceSelection) => {
+      const accepted = addComposerDraftConversationReference(
+        composerDraftTarget,
+        createConversationReference(selection),
+      );
+      if (!accepted) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Reference already added",
+            description: "That exact excerpt is already in this prompt.",
+          }),
+        );
+      }
+      return accepted;
+    },
+    [addComposerDraftConversationReference, composerDraftTarget],
+  );
   const addTerminalContextToDraft = useCallback(
     (selection: TerminalContextSelection) => {
       composerRef.current?.addTerminalContext(selection);
@@ -3201,14 +3449,16 @@ function ChatViewContent(props: ChatViewProps) {
     openTerminal,
     panelTerminalIds,
   ]);
-  const splitPanelTerminal = useCallback(
-    (direction: "horizontal" | "vertical" = "horizontal") => {
+  const splitPanelTerminalSurface = useCallback(
+    (
+      surface: Extract<RightPanelSurface, { kind: "terminal" }>,
+      direction: "horizontal" | "vertical" = "horizontal",
+    ) => {
       if (
         !activeThreadRef ||
         !activeThreadId ||
         !activeProject ||
-        activeRightPanelSurface?.kind !== "terminal" ||
-        activeRightPanelSurface.terminalIds.length >= MAX_TERMINALS_PER_GROUP
+        surface.terminalIds.length >= MAX_TERMINALS_PER_GROUP
       ) {
         return;
       }
@@ -3216,7 +3466,7 @@ function ChatViewContent(props: ChatViewProps) {
       const cwd = gitCwd ?? activeProject.workspaceRoot;
       useRightPanelStore
         .getState()
-        .splitTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId, direction);
+        .splitTerminal(activeThreadRef, surface.id, terminalId, direction);
       setTerminalFocusRequestId((value) => value + 1);
       void openTerminal({
         environmentId: activeThreadRef.environmentId,
@@ -3235,7 +3485,6 @@ function ChatViewContent(props: ChatViewProps) {
     [
       activeKnownTerminalIds,
       activeProject,
-      activeRightPanelSurface,
       activeThreadId,
       activeThreadRef,
       activeThreadWorktreePath,
@@ -3244,33 +3493,40 @@ function ChatViewContent(props: ChatViewProps) {
       panelTerminalIds,
     ],
   );
-  const splitPanelTerminalVertical = useCallback(() => {
-    splitPanelTerminal("vertical");
-  }, [splitPanelTerminal]);
-  const activatePanelTerminal = useCallback(
-    (terminalId: string) => {
-      if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
-      useRightPanelStore
-        .getState()
-        .activateTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
+  const splitPanelTerminal = useCallback(
+    (direction: "horizontal" | "vertical" = "horizontal") => {
+      if (activeRightPanelSurface?.kind !== "terminal") return;
+      splitPanelTerminalSurface(activeRightPanelSurface, direction);
+    },
+    [activeRightPanelSurface, splitPanelTerminalSurface],
+  );
+  const activatePanelTerminalSurface = useCallback(
+    (surface: Extract<RightPanelSurface, { kind: "terminal" }>, terminalId: string) => {
+      if (!activeThreadRef) return;
+      useRightPanelStore.getState().activateTerminal(activeThreadRef, surface.id, terminalId);
       setTerminalFocusRequestId((value) => value + 1);
     },
-    [activeRightPanelSurface, activeThreadRef],
+    [activeThreadRef],
   );
-  const closePanelTerminal = useCallback(
-    (terminalId: string) => {
-      if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
+  const closePanelTerminalSurface = useCallback(
+    (surface: Extract<RightPanelSurface, { kind: "terminal" }>, terminalId: string) => {
+      if (!activeThreadRef) return;
       void closeTerminalMutation({
         environmentId: activeThreadRef.environmentId,
         input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
       });
       storeCloseTerminal(activeThreadRef, terminalId);
-      useRightPanelStore
-        .getState()
-        .closeTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
+      useRightPanelStore.getState().closeTerminal(activeThreadRef, surface.id, terminalId);
       setTerminalFocusRequestId((value) => value + 1);
     },
-    [activeRightPanelSurface, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
+    [activeThreadRef, closeTerminalMutation, storeCloseTerminal],
+  );
+  const closePanelTerminal = useCallback(
+    (terminalId: string) => {
+      if (activeRightPanelSurface?.kind !== "terminal") return;
+      closePanelTerminalSurface(activeRightPanelSurface, terminalId);
+    },
+    [activeRightPanelSurface, closePanelTerminalSurface],
   );
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
@@ -3886,6 +4142,13 @@ function ChatViewContent(props: ChatViewProps) {
     setIsRevertingCheckpoint(false);
   }, [activeThread?.id]);
 
+  // The send-morph clone lives outside React (a `position: fixed` node on
+  // document.body). Retire any still-airborne flight when the thread switches
+  // or ChatView unmounts, so a clone can never be stranded mid-flight.
+  useEffect(() => {
+    return () => retireSendMorph();
+  }, [routeThreadKey]);
+
   useEffect(() => {
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
@@ -4099,7 +4362,8 @@ function ChatViewContent(props: ChatViewProps) {
         draft.terminalContexts.length > 0 ||
         draft.elementContexts.length > 0 ||
         draft.previewAnnotations.length > 0 ||
-        draft.reviewComments.length > 0),
+        draft.reviewComments.length > 0 ||
+        draft.conversationReferences.length > 0),
     );
   });
   const activeBranchMismatchKey = branchMismatchKey(
@@ -4639,6 +4903,7 @@ function ChatViewContent(props: ChatViewProps) {
       elementContexts: composerElementContexts,
       previewAnnotations: composerPreviewAnnotations,
       reviewComments: composerReviewComments,
+      conversationReferences: composerConversationReferences,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
       selectedProviderModels: ctxSelectedProviderModels,
@@ -4658,19 +4923,25 @@ function ChatViewContent(props: ChatViewProps) {
       elementContextCount:
         composerElementContexts.length +
         composerPreviewAnnotations.length +
-        composerReviewComments.length,
+        composerReviewComments.length +
+        composerConversationReferences.length,
     });
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
       });
-      promptRef.current = "";
-      clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
+      // Defer the composer clear into the send-morph so the composer still holds
+      // its text when the View Transition captures it as the morph's OLD side.
       await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
+        sendMorphSurface: composerRef.current?.getSendMorphSurface() ?? null,
+        clearComposer: () => {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+        },
       });
       return;
     }
@@ -4679,7 +4950,8 @@ function ChatViewContent(props: ChatViewProps) {
       sendableComposerTerminalContexts.length === 0 &&
       composerElementContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0
+      composerReviewComments.length === 0 &&
+      composerConversationReferences.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     const isStandaloneCompactCommand =
@@ -4689,7 +4961,8 @@ function ChatViewContent(props: ChatViewProps) {
       sendableComposerTerminalContexts.length === 0 &&
       composerElementContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0;
+      composerReviewComments.length === 0 &&
+      composerConversationReferences.length === 0;
     if (isStandaloneCompactCommand) {
       const compacted = await onCompactContext();
       if (compacted) {
@@ -4783,6 +5056,9 @@ function ChatViewContent(props: ChatViewProps) {
     const composerElementContextsSnapshot = [...composerElementContexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
+    const composerConversationReferencesSnapshot: ConversationReference[] = [
+      ...composerConversationReferences,
+    ];
     const messageTextWithContexts = appendElementContextsToPrompt(
       appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
       composerElementContextsSnapshot,
@@ -4791,9 +5067,13 @@ function ChatViewContent(props: ChatViewProps) {
       (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
       messageTextWithContexts,
     );
-    const messageTextForSend = appendReviewCommentsToPrompt(
+    const messageTextWithReviewComments = appendReviewCommentsToPrompt(
       messageTextWithPreviewAnnotations,
       composerReviewCommentsSnapshot,
+    );
+    const messageTextForSend = appendConversationReferencesToPrompt(
+      messageTextWithReviewComments,
+      composerConversationReferencesSnapshot,
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
@@ -4821,34 +5101,27 @@ function ChatViewContent(props: ChatViewProps) {
       sizeBytes: image.sizeBytes,
       previewUrl: image.previewUrl,
     }));
-    // Sending always returns to the live edge. The new row becomes the
-    // anchored end-space target so it lands near the top while the response
-    // streams into the reserved space below it.
-    isAtEndRef.current = true;
-    timelineScrollModeRef.current = "anchoring-new-turn";
-    liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = messageIdForSend;
+    // Minimal-scroll on send: never anchor the new turn to the top. If the
+    // reader was at the live edge we keep following the end so the sent message
+    // rises just above the composer and the reply streams there; if they had
+    // scrolled up we leave them put. See resolveTimelineSendScroll.
+    const sendScroll = resolveTimelineSendScroll({ userWasAtEnd: isAtEndRef.current });
+    isAtEndRef.current = sendScroll.isAtEnd;
+    timelineScrollModeRef.current = sendScroll.mode;
+    liveFollowUserScrollGenerationRef.current = sendScroll.followOutput
+      ? anchorUserScrollGenerationRef.current
+      : null;
+    pendingTimelineAnchorRef.current = null;
+    positionedTimelineAnchorRef.current = null;
+    settledTimelineAnchorRef.current = null;
     activeTimelineAnchorIndexRef.current = null;
-    setTimelineFollowOutput(true);
+    setTimelineFollowOutput(sendScroll.followOutput);
     newTextIndicatorDebouncer.current.cancel();
     setShowNewTextIndicator(false);
     setTimelineAnchor({
       threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-      messageId: messageIdForSend,
+      messageId: null,
     });
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        turnId: null,
-        createdAt: messageCreatedAt,
-        updatedAt: messageCreatedAt,
-        streaming: false,
-      },
-    ]);
     setThreadError(threadIdForSend, null);
     if (expiredTerminalContextCount > 0) {
       const toastCopy = buildExpiredTerminalContextToastCopy(
@@ -4863,9 +5136,43 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     }
-    promptRef.current = "";
-    clearComposerDraftContent(composerDraftTarget);
-    composerRef.current?.resetCursorState();
+    // The send-morph: a hand-built flyer carrying the just-sent text lifts out
+    // of the composer's text area and flies (rAF-driven, live-retargeted) into
+    // the optimistic bubble. The commit — mounting the bubble and clearing the
+    // composer — runs on React's normal schedule while the flyer covers the
+    // composer area. When the flight can't run (headless/tests, reduced motion,
+    // no surface) the commit runs directly and the CSS arrival is the handoff.
+    // No scroll here.
+    const sendMorphSurface = composerRef.current?.getSendMorphSurface() ?? null;
+    runSendMorphTransition(sendMorphSurface, outgoingMessageText, () => {
+      // The commit was one ~500ms synchronous block (optimistic render + Lexical
+      // teardown) landing on exactly the frames the flyer needs — the measured
+      // ~4fps send freeze. Split it: the optimistic mount renders interruptibly
+      // (startTransition) so flyer frames interleave, and the composer clear —
+      // invisible behind the flyer — waits until after the first painted frames
+      // (deferSendCleanup). The flyer's landing seek is time-based, so the
+      // transition-delayed bubble cannot trip the fallback.
+      startTransition(() => {
+        setOptimisticUserMessages((existing) => [
+          ...existing,
+          {
+            id: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+            turnId: null,
+            createdAt: messageCreatedAt,
+            updatedAt: messageCreatedAt,
+            streaming: false,
+          },
+        ]);
+      });
+      promptRef.current = "";
+      deferSendCleanup(() => {
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      });
+    });
 
     let firstComposerImageName: string | null = null;
     if (composerImagesSnapshot.length > 0) {
@@ -4996,7 +5303,9 @@ function ChatViewContent(props: ChatViewProps) {
         (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.previewAnnotations
           .length ?? 0) === 0 &&
         (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.reviewComments
-          .length ?? 0) === 0
+          .length ?? 0) === 0 &&
+        (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+          ?.conversationReferences.length ?? 0) === 0
       ) {
         setOptimisticUserMessages((existing) => {
           const removed = existing.filter((message) => message.id === messageIdForSend);
@@ -5017,6 +5326,10 @@ function ChatViewContent(props: ChatViewProps) {
         setComposerDraftElementContexts(composerDraftTarget, composerElementContextsSnapshot);
         setComposerDraftPreviewAnnotations(composerDraftTarget, composerPreviewAnnotationsSnapshot);
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
+        setComposerDraftConversationReferences(
+          composerDraftTarget,
+          composerConversationReferencesSnapshot,
+        );
         composerRef.current?.resetCursorState({
           cursor: collapseExpandedComposerCursor(promptForSend, promptForSend.length),
           prompt: promptForSend,
@@ -5040,19 +5353,57 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
+  const clearComposerInterruptWatchdog = () => {
+    if (composerInterruptWatchdogRef.current !== null) {
+      window.clearTimeout(composerInterruptWatchdogRef.current);
+      composerInterruptWatchdogRef.current = null;
+    }
+  };
+
+  const applyComposerInterruptEvent = (event: Parameters<typeof nextComposerInterruptState>[1]) => {
+    setComposerInterruptState((current) => nextComposerInterruptState(current, event));
+  };
+
   const onInterrupt = async () => {
     if (!activeThread) return;
+    // Repeated stop presses are dropped while one request is in flight.
+    if (!canRequestComposerInterrupt(composerInterruptStateRef.current)) return;
+
+    composerInterruptStateRef.current = "pending";
+    applyComposerInterruptEvent("press");
+    clearComposerInterruptWatchdog();
+    // An accepted interrupt can still fail to settle the session row
+    // (KNOWN-ISSUES.md: interrupted turns wedge the thread). The watchdog hands
+    // the stop action back so a server-side wedge can never present as a dead
+    // button.
+    composerInterruptWatchdogRef.current = window.setTimeout(() => {
+      composerInterruptWatchdogRef.current = null;
+      applyComposerInterruptEvent("unconfirmed");
+    }, COMPOSER_INTERRUPT_UNCONFIRMED_TIMEOUT_MS);
+
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
     });
+
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      clearComposerInterruptWatchdog();
+      applyComposerInterruptEvent("request-failed");
       const error = squashAtomCommandFailure(result);
       setThreadError(
         activeThread.id,
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
+      return;
     }
+    if (result._tag === "Failure") {
+      // The command itself was interrupted (unmount/navigation): release the
+      // control rather than leaving it pending.
+      clearComposerInterruptWatchdog();
+      applyComposerInterruptEvent("reset");
+      return;
+    }
+    applyComposerInterruptEvent("request-accepted");
   };
 
   const onRespondToApproval = useCallback(
@@ -5221,9 +5572,15 @@ function ChatViewContent(props: ChatViewProps) {
     async ({
       text,
       interactionMode: nextInteractionMode,
+      sendMorphSurface = null,
+      clearComposer,
     }: {
       text: string;
       interactionMode: "default" | "plan";
+      /** Live composer surface to morph into the optimistic bubble, or null. */
+      sendMorphSurface?: HTMLElement | null;
+      /** Clears the composer; deferred into the send-morph commit. */
+      clearComposer?: () => void;
     }) => {
       if (
         !activeThread ||
@@ -5232,6 +5589,7 @@ function ChatViewContent(props: ChatViewProps) {
         isConnecting ||
         sendInFlightRef.current
       ) {
+        clearComposer?.();
         return;
       }
 
@@ -5267,32 +5625,52 @@ function ChatViewContent(props: ChatViewProps) {
       beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
 
-      // Position this sent row once LegendList has measured the anchored tail.
-      isAtEndRef.current = true;
-      timelineScrollModeRef.current = "anchoring-new-turn";
-      liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-      pendingTimelineAnchorRef.current = messageIdForSend;
+      // Minimal-scroll on send: never anchor the new turn to the top. Follow
+      // the live edge when the reader was already there so the sent message
+      // rises just above the composer; otherwise leave their place untouched.
+      const sendScroll = resolveTimelineSendScroll({ userWasAtEnd: isAtEndRef.current });
+      isAtEndRef.current = sendScroll.isAtEnd;
+      timelineScrollModeRef.current = sendScroll.mode;
+      liveFollowUserScrollGenerationRef.current = sendScroll.followOutput
+        ? anchorUserScrollGenerationRef.current
+        : null;
+      pendingTimelineAnchorRef.current = null;
+      positionedTimelineAnchorRef.current = null;
+      settledTimelineAnchorRef.current = null;
       activeTimelineAnchorIndexRef.current = null;
-      setTimelineFollowOutput(true);
+      setTimelineFollowOutput(sendScroll.followOutput);
       newTextIndicatorDebouncer.current.cancel();
       setShowNewTextIndicator(false);
       setTimelineAnchor({
         threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-        messageId: messageIdForSend,
+        messageId: null,
       });
 
-      setOptimisticUserMessages((existing) => [
-        ...existing,
-        {
-          id: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          turnId: null,
-          createdAt: messageCreatedAt,
-          updatedAt: messageCreatedAt,
-          streaming: false,
-        },
-      ]);
+      // Same send-morph as the main composer path: the flyer lifts the just-sent
+      // text out of the composer into the optimistic follow-up bubble. The text
+      // is passed in explicitly, so clearing the composer inside the commit is
+      // safe.
+      runSendMorphTransition(sendMorphSurface, outgoingMessageText, () => {
+        // Same split as the main send path: interruptible optimistic mount,
+        // composer clear deferred behind the flyer's first painted frames.
+        startTransition(() => {
+          setOptimisticUserMessages((existing) => [
+            ...existing,
+            {
+              id: messageIdForSend,
+              role: "user",
+              text: outgoingMessageText,
+              turnId: null,
+              createdAt: messageCreatedAt,
+              updatedAt: messageCreatedAt,
+              streaming: false,
+            },
+          ]);
+        });
+        deferSendCleanup(() => {
+          clearComposer?.();
+        });
+      });
 
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
@@ -5739,7 +6117,7 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const panelLayoutControls = (
     <div className="workspace-titlebar-controls z-50 gap-1 [-webkit-app-region:no-drag]">
-      {rightPanelOpen && !shouldUsePlanSidebarSheet ? (
+      {rightPanelShellPresent && !shouldUsePlanSidebarSheet ? (
         <RightPanelMaximizeControl
           maximized={rightPanelMaximized}
           onToggle={toggleRightPanelMaximized}
@@ -5748,89 +6126,96 @@ function ChatViewContent(props: ChatViewProps) {
       {panelToggleControls}
     </div>
   );
-  const rightPanelContent = activeThreadRef ? (
-    activeRightPanelSurface?.kind === "preview" ? (
-      <Suspense fallback={null}>
-        <PreviewPanel
-          mode="embedded"
+  const renderRightPanelSurface = (surface: RightPanelSurface) =>
+    activeThreadRef ? (
+      surface.kind === "preview" ? (
+        <Suspense fallback={null}>
+          <PreviewPanel
+            mode="embedded"
+            threadRef={activeThreadRef}
+            tabId={surface.resourceId}
+            configuredUrls={configuredPreviewUrls}
+            visible
+          />
+        </Suspense>
+      ) : surface.kind === "terminal" ? (
+        <PersistentThreadTerminalPanel
           threadRef={activeThreadRef}
-          tabId={activeRightPanelSurface.resourceId}
-          configuredUrls={configuredPreviewUrls}
-          visible
-        />
-      </Suspense>
-    ) : activeRightPanelSurface?.kind === "terminal" ? (
-      <PersistentThreadTerminalPanel
-        threadRef={activeThreadRef}
-        surface={activeRightPanelSurface}
-        launchContext={activeTerminalLaunchContext ?? null}
-        focusRequestId={terminalFocusRequestId}
-        keybindings={keybindings}
-        onAddTerminalContext={addTerminalContextToDraft}
-        onSplitTerminal={splitPanelTerminal}
-        onSplitTerminalVertical={splitPanelTerminalVertical}
-        onNewTerminal={addTerminalSurface}
-        onActiveTerminalChange={activatePanelTerminal}
-        onCloseTerminal={closePanelTerminal}
-        splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
-        splitVerticalShortcutLabel={splitTerminalVerticalShortcutLabel ?? undefined}
-        newShortcutLabel={newTerminalShortcutLabel ?? undefined}
-        closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
-      />
-    ) : activeRightPanelSurface?.kind === "diff" ? (
-      <Suspense fallback={null}>
-        <DiffPanel
-          key={`${activeThreadKey}:${diffPanelGitStatusResolutionKey}`}
-          mode="embedded"
-          composerDraftTarget={composerDraftTarget}
-          initialGitScope={initialDiffPanelGitScope}
-        />
-      </Suspense>
-    ) : activeRightPanelSurface?.kind === "agents" ? (
-      <AgentsPanel agents={threadAgents} onOpenScript={openAgentScript} mode="embedded" />
-    ) : activeRightPanelSurface?.kind === "plan" ? (
-      <PlanSidebar
-        activePlan={activePlan}
-        activeProposedPlan={sidebarProposedPlan}
-        label={planSidebarLabel}
-        environmentId={environmentId}
-        threadRef={activeThreadRef}
-        markdownCwd={gitCwd ?? undefined}
-        workspaceRoot={activeWorkspaceRoot}
-        timestampFormat={timestampFormat}
-        mode="embedded"
-      />
-    ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
-      activeProject &&
-      activeWorkspaceRoot ? (
-      <Suspense fallback={null}>
-        <FilePreviewPanel
-          key={`${activeProject.environmentId}:${activeWorkspaceRoot}`}
-          environmentId={activeProject.environmentId}
-          cwd={activeWorkspaceRoot}
-          projectName={activeProject.title}
-          threadRef={activeThreadRef}
-          composerDraftTarget={composerDraftTarget}
+          surface={surface}
+          launchContext={activeTerminalLaunchContext ?? null}
+          focusRequestId={terminalFocusRequestId}
           keybindings={keybindings}
-          availableEditors={availableEditors}
-          relativePath={
-            activeRightPanelSurface.kind === "file" ? activeRightPanelSurface.relativePath : null
-          }
-          revealLine={activeFileSurface?.revealLine ?? null}
-          revealRequestId={activeFileSurface?.revealRequestId ?? 0}
-          onOpenFile={openFileSurface}
-          onPendingChange={handleFilePendingChange}
+          onAddTerminalContext={addTerminalContextToDraft}
+          onSplitTerminal={() => splitPanelTerminalSurface(surface)}
+          onSplitTerminalVertical={() => splitPanelTerminalSurface(surface, "vertical")}
+          onNewTerminal={addTerminalSurface}
+          onActiveTerminalChange={(terminalId) => activatePanelTerminalSurface(surface, terminalId)}
+          onCloseTerminal={(terminalId) => closePanelTerminalSurface(surface, terminalId)}
+          splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
+          splitVerticalShortcutLabel={splitTerminalVerticalShortcutLabel ?? undefined}
+          newShortcutLabel={newTerminalShortcutLabel ?? undefined}
+          closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
         />
-      </Suspense>
-    ) : null
-  ) : null;
+      ) : surface.kind === "diff" ? (
+        <Suspense fallback={null}>
+          <DiffPanel
+            key={`${activeThreadKey}:${diffPanelGitStatusResolutionKey}`}
+            mode="embedded"
+            composerDraftTarget={composerDraftTarget}
+            initialGitScope={initialDiffPanelGitScope}
+          />
+        </Suspense>
+      ) : surface.kind === "agents" ? (
+        <AgentsPanel agents={threadAgents} onOpenScript={openAgentScript} mode="embedded" />
+      ) : surface.kind === "plan" ? (
+        <PlanSidebar
+          activePlan={activePlan}
+          activeProposedPlan={sidebarProposedPlan}
+          label={planSidebarLabel}
+          environmentId={environmentId}
+          threadRef={activeThreadRef}
+          markdownCwd={gitCwd ?? undefined}
+          workspaceRoot={activeWorkspaceRoot}
+          timestampFormat={timestampFormat}
+          mode="embedded"
+        />
+      ) : (surface.kind === "files" || surface.kind === "file") &&
+        activeProject &&
+        activeWorkspaceRoot ? (
+        <Suspense fallback={null}>
+          <FilePreviewPanel
+            key={`${activeProject.environmentId}:${activeWorkspaceRoot}`}
+            environmentId={activeProject.environmentId}
+            cwd={activeWorkspaceRoot}
+            projectName={activeProject.title}
+            threadRef={activeThreadRef}
+            composerDraftTarget={composerDraftTarget}
+            keybindings={keybindings}
+            availableEditors={availableEditors}
+            relativePath={surface.kind === "file" ? surface.relativePath : null}
+            revealLine={surface.kind === "file" ? surface.revealLine : null}
+            revealRequestId={surface.kind === "file" ? surface.revealRequestId : 0}
+            onOpenFile={openFileSurface}
+            onPendingChange={handleFilePendingChange}
+          />
+        </Suspense>
+      ) : null
+    ) : null;
+  const rightPanelContent = renderedRightPanelSurface
+    ? renderRightPanelSurface(renderedRightPanelSurface)
+    : null;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
-      {rightPanelOpen && !shouldUsePlanSidebarSheet ? panelLayoutControls : null}
+      {rightPanelShellPresent && !shouldUsePlanSidebarSheet ? panelLayoutControls : null}
       <div
+        ref={chatColumnFlipRef}
+        // Focusable only programmatically: it is where focus returns when the
+        // right panel starts exiting and its content becomes inert.
+        tabIndex={-1}
+        data-chat-column
         className={cn(
-          "flex min-h-0 min-w-0 flex-col overflow-x-hidden",
+          "flex min-h-0 min-w-0 flex-col overflow-x-hidden outline-none",
           rightPanelMaximized ? "w-0 flex-none" : "flex-1",
         )}
         data-chat-column-maximized-away={rightPanelMaximized ? "true" : "false"}
@@ -5851,7 +6236,7 @@ function ChatViewContent(props: ChatViewProps) {
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >
-          {!rightPanelOpen ? panelLayoutControls : null}
+          {!rightPanelShellPresent ? panelLayoutControls : null}
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadId={activeThread.id}
@@ -5866,7 +6251,7 @@ function ChatViewContent(props: ChatViewProps) {
             }
             keybindings={keybindings}
             availableEditors={availableEditors}
-            rightPanelOpen={rightPanelOpen}
+            rightPanelOpen={rightPanelShellPresent}
             gitCwd={gitCwd}
             onNewThreadInProject={handleNewThreadInActiveProject}
             onRunProjectScript={runProjectScript}
@@ -5896,6 +6281,7 @@ function ChatViewContent(props: ChatViewProps) {
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 key={activeThread.id}
+                interruptState={composerInterruptState}
                 isWorking={isWorking}
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
@@ -5927,6 +6313,7 @@ function ChatViewContent(props: ChatViewProps) {
                 followOutput={timelineFollowOutput}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
+                onAddConversationReference={addConversationReferenceToDraft}
                 hideEmptyPlaceholder={isDraftHeroState}
                 topFadeEnabled={!hasTimelineTopBanner}
               />
@@ -6038,6 +6425,7 @@ function ChatViewContent(props: ChatViewProps) {
                             phase={phase}
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
+                            interruptState={composerInterruptState}
                             isPreparingWorktree={isPreparingWorktree}
                             environmentUnavailable={activeEnvironmentUnavailableState}
                             activePendingApproval={activePendingApproval}
@@ -6214,6 +6602,7 @@ function ChatViewContent(props: ChatViewProps) {
             threadRef={mountedThreadRef}
             threadId={mountedThreadRef.threadId}
             visible={mountedThreadKey === activeThreadKey && terminalUiState.terminalOpen}
+            phase={mountedThreadKey === activeThreadKey ? terminalDrawerPhase : "closed"}
             launchContext={
               mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
             }
@@ -6228,12 +6617,17 @@ function ChatViewContent(props: ChatViewProps) {
         ))}
       </div>
 
-      {!shouldUsePlanSidebarSheet && rightPanelOpen && activeThreadRef ? (
+      {!shouldUsePlanSidebarSheet && rightPanelPhase !== "closed" && activeThreadRef ? (
         <RightPanelTabs
           mode="inline"
           maximized={rightPanelMaximized}
+          phase={rightPanelPhase}
           surfaces={rightPanelState.surfaces}
-          activeSurfaceId={activeRightPanelSurface?.id ?? null}
+          workspace={rightPanelWorkspace}
+          // Retained, like the body below: this strip renders for the whole exit
+          // window, and the active tab must not drop its highlight and indicator
+          // the instant the close begins.
+          activeSurfaceId={renderedRightPanelSurface?.id ?? null}
           pendingSurfaceIds={pendingFileSurfaceIds}
           previewSessions={activePreviewState.sessions}
           terminalLabelsById={activeTerminalLabelsById}
@@ -6248,9 +6642,22 @@ function ChatViewContent(props: ChatViewProps) {
           onAddDiff={addDiffSurface}
           onAddFiles={addFilesSurface}
           onAddAgents={addAgentsSurface}
+          onMoveSurface={(surface, paneId) =>
+            useRightPanelStore.getState().moveSurface(activeThreadRef, surface.id, paneId)
+          }
+          onSplitSurface={(surface, paneId, position) =>
+            useRightPanelStore
+              .getState()
+              .splitSurface(activeThreadRef, surface.id, paneId, position)
+          }
+          onFocusPane={(paneId) => useRightPanelStore.getState().focusPane(activeThreadRef, paneId)}
+          onSplitRatioChange={(splitId, ratio) =>
+            useRightPanelStore.getState().setSplitRatio(activeThreadRef, splitId, ratio)
+          }
           browserAvailable={isPreviewSupportedInRuntime()}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
+          renderSurface={renderRightPanelSurface}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -6261,6 +6668,7 @@ function ChatViewContent(props: ChatViewProps) {
             mode="sheet"
             layoutControls={panelToggleControls}
             surfaces={rightPanelState.surfaces}
+            workspace={rightPanelWorkspace}
             activeSurfaceId={activeRightPanelSurface?.id ?? null}
             pendingSurfaceIds={pendingFileSurfaceIds}
             previewSessions={activePreviewState.sessions}
@@ -6276,9 +6684,24 @@ function ChatViewContent(props: ChatViewProps) {
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
             onAddAgents={addAgentsSurface}
+            onMoveSurface={(surface, paneId) =>
+              useRightPanelStore.getState().moveSurface(activeThreadRef, surface.id, paneId)
+            }
+            onSplitSurface={(surface, paneId, position) =>
+              useRightPanelStore
+                .getState()
+                .splitSurface(activeThreadRef, surface.id, paneId, position)
+            }
+            onFocusPane={(paneId) =>
+              useRightPanelStore.getState().focusPane(activeThreadRef, paneId)
+            }
+            onSplitRatioChange={(splitId, ratio) =>
+              useRightPanelStore.getState().setSplitRatio(activeThreadRef, splitId, ratio)
+            }
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
+            renderSurface={renderRightPanelSurface}
           >
             {rightPanelContent}
           </RightPanelTabs>

@@ -207,6 +207,43 @@ function CommandShortcut({ className, ...props }: React.ComponentProps<"kbd">) {
   );
 }
 
+/**
+ * Direction of the palette's results-panel transition. `none` is the resting
+ * value and produces no animation at all.
+ */
+type CommandPaletteViewDirection = "forward" | "back" | "none";
+
+interface CommandPaletteViewMotion {
+  readonly key: string;
+  readonly className: string;
+  readonly direction: CommandPaletteViewDirection;
+}
+
+/**
+ * Motion identity for the command palette's results panel.
+ *
+ * This is deliberately a function of submenu depth and an explicit navigation
+ * direction only. The filter query is not an input and must never become one:
+ * the palette re-renders its results on every keystroke, so anything derived
+ * from the query would replay an entrance animation while the user is typing.
+ *
+ * `direction` is separate from `depth` because the palette's autocomplete root
+ * remounts for reasons that are not navigation (entering filesystem-browse
+ * mode, walking into a folder). A mount-triggered animation would fire on
+ * those keystrokes; a direction-gated one does not, because the caller returns
+ * the direction to `none` as soon as the transition window has passed.
+ */
+function commandPaletteViewMotion(input: {
+  depth: number;
+  direction: CommandPaletteViewDirection;
+}): CommandPaletteViewMotion {
+  return {
+    key: `command-view-${input.depth}`,
+    className: "nav-command-view",
+    direction: input.direction,
+  };
+}
+
 function CommandFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
@@ -220,7 +257,10 @@ function CommandFooter({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
+export type { CommandPaletteViewDirection, CommandPaletteViewMotion };
+
 export {
+  commandPaletteViewMotion,
   CommandCreateHandle,
   Command,
   CommandCollection,

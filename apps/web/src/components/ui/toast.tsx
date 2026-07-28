@@ -33,6 +33,7 @@ import { resolveThreadRouteTarget } from "~/threadRoutes";
 import {
   buildVisibleToastLayout,
   shouldHideCollapsedToastContent,
+  shouldPlayToastCompletionTrace,
   shouldRenderThreadScopedToast,
 } from "./toast.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./tooltip";
@@ -43,6 +44,12 @@ export type ThreadToastData = {
   leadingIcon?: ReactNode;
   tooltipStyle?: boolean;
   onClose?: (() => void) | undefined;
+  /**
+   * Opt in to one tight Level 2 completion trace on the success glyph. Reserve
+   * it for meaningful, user-initiated completions; routine outcomes (commit,
+   * pull, push, already-up-to-date, copy) leave this unset and just crossfade.
+   */
+  completionTrace?: boolean;
   dismissAfterVisibleMs?: number;
   hideCopyButton?: boolean;
   additionalActions?: ReadonlyArray<{
@@ -275,6 +282,7 @@ interface ToastBodyDescriptor {
   readonly copyErrorText: string | null;
   readonly hasTrailingControls: boolean;
   readonly inlineContentEndPad: string;
+  readonly completionTrace: boolean;
 }
 
 function deriveToastBodyDescriptor(toast: {
@@ -310,6 +318,7 @@ function deriveToastBodyDescriptor(toast: {
     copyErrorText,
     hasTrailingControls,
     inlineContentEndPad,
+    completionTrace: shouldPlayToastCompletionTrace(toast.type, toast.data),
   };
 }
 
@@ -328,6 +337,7 @@ function ToastBodyContent({
   actionVariant,
   secondaryActionVariant,
   hasTrailingControls,
+  completionTrace,
   toastData,
   toastDescription,
   toastType,
@@ -350,8 +360,15 @@ function ToastBodyContent({
           </div>
         ) : Icon ? (
           <div
-            className="[&>svg]:h-lh [&>svg]:w-4 [&_svg]:pointer-events-none [&_svg]:shrink-0"
+            className={cn(
+              "[&>svg]:h-lh [&>svg]:w-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+              // Level 2 completion trace, opt-in and icon-sized. Keyed on the
+              // toast type so a loading -> success update replays it exactly
+              // once and ordinary re-renders never do.
+              completionTrace && "motion-completion rounded-full",
+            )}
             data-slot="toast-icon"
+            key={`toast-icon-${String(toastType)}`}
           >
             <Icon className="in-data-[type=loading]:animate-spin in-data-[type=error]:text-destructive in-data-[type=info]:text-info in-data-[type=success]:text-success in-data-[type=warning]:text-warning in-data-[type=loading]:opacity-80" />
           </div>
@@ -585,7 +602,10 @@ function Toasts({ position }: { position: ToastPosition }) {
           return (
             <Toast.Root
               className={cn(
-                "absolute z-[calc(9999-var(--toast-index))] w-full overflow-visible select-none rounded-lg border bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 [transition:transform_.5s_cubic-bezier(.22,1,.36,1),opacity_.5s,height_.15s] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+                // Arrival is a Level 2 state handoff: `--feedback-toast-arrival`
+                // (230ms), not the previous 500ms. Height stays on its own short
+                // duration so stack reflow still tracks the transform.
+                "absolute z-[calc(9999-var(--toast-index))] w-full overflow-visible select-none rounded-lg border bg-popover not-dark:bg-clip-padding text-popover-foreground shadow-lg/5 [transition:transform_var(--feedback-toast-arrival)_var(--ease-out-quint),opacity_var(--feedback-toast-arrival),height_.15s] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
                 // Base positioning using data-position
                 "data-[position*=right]:right-0 data-[position*=right]:left-auto",
                 "data-[position*=left]:right-auto data-[position*=left]:left-0",
@@ -638,6 +658,7 @@ function Toasts({ position }: { position: ToastPosition }) {
                 "data-expanded:data-ending-style:data-[swipe-direction=down]:transform-[translateY(calc(var(--toast-swipe-movement-y)+100%+var(--toast-inset)))]",
               )}
               data-position={position}
+              data-slot="toast-root"
               key={toast.id}
               style={
                 {

@@ -48,6 +48,7 @@ import {
   resolveThreadBranchMetadataPatch,
   resolveQuickAction,
   resolveThreadBranchUpdate,
+  shouldPlayPublishAcknowledgment,
 } from "./GitActionsControl.logic";
 import { AnimatedHeight } from "./AnimatedHeight";
 import { Button } from "~/components/ui/button";
@@ -870,7 +871,16 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                 {publishResult ? (
                   <>
                     <div className="flex flex-col items-center gap-2 py-1 text-center">
-                      <span className="grid size-8 place-items-center rounded-full bg-success/15 text-success">
+                      <span
+                        className={cn(
+                          "grid size-8 place-items-center rounded-full bg-success/15 text-success",
+                          // Level 3, and the only one in this area. Runs once,
+                          // 280ms, semantic green centre with a single ring no
+                          // wider than 5px — and only once the remote exists
+                          // *and* the initial push is confirmed.
+                          shouldPlayPublishAcknowledgment(publishResult) && "feedback-publish-ack",
+                        )}
+                      >
                         <CheckIcon className="size-4" aria-hidden />
                       </span>
                       <h3 className="text-sm font-semibold text-foreground">
@@ -1711,12 +1721,27 @@ export default function GitActionsControl({
             </Popover>
           ) : (
             <Button
+              aria-busy={isGitActionRunning}
               variant="outline"
               size="xs"
               disabled={isGitActionRunning || quickAction.disabled}
               onClick={runQuickAction}
             >
-              <GitQuickActionIcon quickAction={quickAction} SourceControlIcon={SourceControlIcon} />
+              {/*
+               * Pending ownership stays inside the invoked control: the glyph
+               * swaps to an identically sized spinner and the label is
+               * untouched, so the button's outer geometry never moves.
+               * Level 2 (`motion-arrival`, 200ms, opacity + 4px).
+               */}
+              {isGitActionRunning ? (
+                <Spinner aria-hidden className="motion-arrival size-3.5" key="git-quick-pending" />
+              ) : (
+                <GitQuickActionIcon
+                  key="git-quick-idle"
+                  quickAction={quickAction}
+                  SourceControlIcon={SourceControlIcon}
+                />
+              )}
               <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
                 {quickAction.label}
               </span>

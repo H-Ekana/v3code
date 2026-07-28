@@ -309,6 +309,21 @@ export function resolveQuickAction(
   };
 }
 
+/**
+ * Gate for the single Level 3 accent in the Git/publishing area.
+ *
+ * `status: "created"` means the remote exists but nothing has been pushed yet,
+ * so the wizard shows a quiet static success mark and the user still has work
+ * to do. Only a confirmed initial push (`status: "pushed"`) earns the bounded
+ * violet-to-pink ring. A failed publish never reaches this call site at all —
+ * the publish button stays the recovery owner and shows the error inline.
+ */
+export function shouldPlayPublishAcknowledgment(
+  result: { readonly status?: string | undefined } | null | undefined,
+): boolean {
+  return result?.status === "pushed";
+}
+
 export function requiresDefaultBranchConfirmation(
   action: GitStackedAction,
   isDefaultRef: boolean,

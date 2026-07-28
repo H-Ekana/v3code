@@ -32,6 +32,12 @@ interface ChatHeaderProps {
   preferredScriptId: string | null;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
+  /**
+   * Whether the right-panel shell is on screen — including its exit window, not
+   * just `isOpen`. The header reserves space for the titlebar controls only
+   * while the panel is not there to host them, so keying this off presence stops
+   * the actions jumping 4rem the instant the panel starts leaving.
+   */
   rightPanelOpen: boolean;
   gitCwd: string | null;
   onNewThreadInProject: () => void;
@@ -145,6 +151,9 @@ export const ChatHeader = memo(function ChatHeader({
         data-chat-header-actions
         className={cn(
           "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
+          // Matches the shell's launch/exit so the reserved titlebar inset hands
+          // over in step with the panel instead of snapping.
+          "transition-[padding-right] [transition-duration:var(--workbench-surface-transition)] [transition-timing-function:var(--ease-out-quart)] motion-reduce:transition-none",
           rightPanelOpen ? "pr-0" : "pr-16",
         )}
       >

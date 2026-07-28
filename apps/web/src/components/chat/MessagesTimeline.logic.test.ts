@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  advanceTimelineLifecycle,
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
+  EMPTY_TIMELINE_LIFECYCLE_LEDGER,
+  expireTimelineLifecycleOneShots,
+  isRunningToolWorkEntry,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveWorkEntryToolStatus,
+  TIMELINE_ONE_SHOT_TTL_MS,
+  timelineLifecycleHasOneShots,
+  type MessagesTimelineRow,
+  type TimelineLifecycleLedger,
 } from "./MessagesTimeline.logic";
+import type { WorkLogEntry } from "../../session-logic";
 
 describe("computeMessageDurationStart", () => {
   it("returns message createdAt when there is no preceding user message", () => {
@@ -673,6 +683,14 @@ describe("deriveMessagesTimelineRows", () => {
         label: "You stopped after 47s",
         expanded: false,
       }),
+      // The interrupted turn also settles into an explicit trailing state
+      // rather than the response simply stopping with no explanation.
+      expect.objectContaining({
+        kind: "interrupted",
+        id: "interrupted-indicator-row",
+        turnId: "turn-1",
+        createdAt: "2026-01-01T00:00:47Z",
+      }),
     ]);
   });
 
@@ -1169,5 +1187,422 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(reordered).not.toBe(initial);
     expect(reordered.result).toEqual([initial.result[1], initial.result[0]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One-shot lifecycle ledger (plan items 5, 6, 10)
+//
+// These are the replay-prevention tests. The timeline is virtualized, so a row
+// mounting is not a lifecycle event — every case below is a way the UI can make
+// old content look new (remount, rehydrate, expand a fold, return to a thread)
+// and must therefore stay silent.
+// ---------------------------------------------------------------------------
+
+const LIFECYCLE_AT = "2026-05-04T10:00:00.000Z";
+const RUNNING_TURN = "turn-1" as never;
+
+function userRow(id: string): MessagesTimelineRow {
+  return {
+    kind: "message",
+    id: `row:${id}`,
+    createdAt: LIFECYCLE_AT,
+    message: {
+      id: id as never,
+      role: "user",
+      text: `prompt ${id}`,
+      turnId: null,
+      createdAt: LIFECYCLE_AT,
+      updatedAt: LIFECYCLE_AT,
+      streaming: false,
+    },
+    durationStart: LIFECYCLE_AT,
+    showAssistantMeta: false,
+    showAssistantCopyButton: false,
+    assistantCopyStreaming: false,
+  };
+}
+
+function assistantRow(id: string, streaming: boolean): MessagesTimelineRow {
+  return {
+    kind: "message",
+    id: `row:${id}`,
+    createdAt: LIFECYCLE_AT,
+    message: {
+      id: id as never,
+      role: "assistant",
+      text: `answer ${id}`,
+      turnId: RUNNING_TURN,
+      createdAt: LIFECYCLE_AT,
+      updatedAt: LIFECYCLE_AT,
+      streaming,
+    },
+    durationStart: LIFECYCLE_AT,
+    showAssistantMeta: !streaming,
+    showAssistantCopyButton: !streaming,
+    assistantCopyStreaming: streaming,
+  };
+}
+
+function toolRow(id: string, overrides: Partial<WorkLogEntry> = {}): MessagesTimelineRow {
+  return {
+    kind: "work",
+    id: `row:${id}`,
+    createdAt: LIFECYCLE_AT,
+    groupedEntries: [
+      {
+        id,
+        createdAt: LIFECYCLE_AT,
+        label: "Bash",
+        tone: "tool",
+        turnId: RUNNING_TURN,
+        ...overrides,
+      },
+    ],
+  };
+}
+
+function advance(
+  rows: MessagesTimelineRow[],
+  previous: TimelineLifecycleLedger,
+  options: {
+    threadKey?: string;
+    unsettledTurnId?: never;
+    interruptedTurnId?: never;
+    now?: number;
+  } = {},
+) {
+  return advanceTimelineLifecycle(
+    {
+      rows,
+      threadKey: options.threadKey ?? "env:thread-1",
+      unsettledTurnId: options.unsettledTurnId ?? null,
+      interruptedTurnId: options.interruptedTurnId ?? null,
+      now: options.now ?? 1_000,
+    },
+    previous,
+  );
+}
+
+describe("resolveWorkEntryToolStatus", () => {
+  it("only treats an in-progress tool call as running while its turn is unsettled", () => {
+    const entry: WorkLogEntry = {
+      id: "tool-1",
+      createdAt: LIFECYCLE_AT,
+      label: "Bash",
+      tone: "tool",
+      turnId: RUNNING_TURN,
+      toolLifecycleStatus: "inProgress",
+    };
+
+    expect(resolveWorkEntryToolStatus(entry, RUNNING_TURN)).toBe("running");
+    expect(isRunningToolWorkEntry(entry, RUNNING_TURN)).toBe(true);
+    // Turn is over: a leftover inProgress entry is stale history, not a live
+    // spinner that should keep turning in restored scrollback.
+    expect(resolveWorkEntryToolStatus(entry, null)).toBe("neutral");
+    expect(isRunningToolWorkEntry(entry, null)).toBe(false);
+    expect(resolveWorkEntryToolStatus(entry, "turn-9" as never)).toBe("neutral");
+  });
+
+  it("classifies the remaining lifecycle faces", () => {
+    const base = { id: "t", createdAt: LIFECYCLE_AT, label: "Bash", tone: "tool" } as const;
+
+    expect(resolveWorkEntryToolStatus({ ...base, detail: "ok" }, null)).toBe("success");
+    expect(resolveWorkEntryToolStatus({ ...base, toolLifecycleStatus: "failed" }, null)).toBe(
+      "failure",
+    );
+    expect(resolveWorkEntryToolStatus({ ...base, detail: "ENOENT" }, RUNNING_TURN)).toBe("failure");
+    expect(resolveWorkEntryToolStatus({ ...base, toolLifecycleStatus: "stopped" }, null)).toBe(
+      "neutral",
+    );
+    // Not tool-like: a plain info log owns no completion semantics and must not
+    // borrow a success check.
+    expect(
+      resolveWorkEntryToolStatus(
+        { id: "t", createdAt: LIFECYCLE_AT, label: "Context compacted", tone: "info" },
+        null,
+      ),
+    ).toBe("none");
+  });
+});
+
+describe("deriveMessagesTimelineRows tool visibility", () => {
+  function rowsForInProgressTool(unsettled: boolean) {
+    return deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "entry-tool",
+          kind: "work",
+          createdAt: LIFECYCLE_AT,
+          entry: {
+            id: "tool-1",
+            createdAt: LIFECYCLE_AT,
+            label: "Bash",
+            tone: "tool",
+            turnId: RUNNING_TURN,
+            toolLifecycleStatus: "inProgress",
+          },
+        },
+      ],
+      latestTurn: unsettled
+        ? { turnId: RUNNING_TURN, state: "running", startedAt: LIFECYCLE_AT, completedAt: null }
+        : {
+            turnId: RUNNING_TURN,
+            state: "completed",
+            startedAt: LIFECYCLE_AT,
+            completedAt: LIFECYCLE_AT,
+          },
+      runningTurnId: unsettled ? RUNNING_TURN : null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+  }
+
+  it("shows a live tool call while its turn runs and hides it once the turn settles", () => {
+    expect(rowsForInProgressTool(true).map((row) => row.kind)).toEqual(["work"]);
+    // Settled with no outcome: back to the pre-existing "hide empty rows"
+    // behaviour, so restored history renders exactly as it did before — only
+    // the turn's own fold row remains.
+    expect(rowsForInProgressTool(false).map((row) => row.kind)).toEqual(["turn-fold"]);
+  });
+});
+
+describe("advanceTimelineLifecycle replay prevention", () => {
+  it("treats the first snapshot of a thread as history and animates none of it", () => {
+    const ledger = advance(
+      [
+        userRow("user-1"),
+        toolRow("tool-1", { detail: "done" }),
+        assistantRow("assistant-1", false),
+      ],
+      EMPTY_TIMELINE_LIFECYCLE_LEDGER,
+    );
+
+    expect(timelineLifecycleHasOneShots(ledger)).toBe(false);
+    expect(ledger.liveEdgeMessageId).toBeNull();
+    expect(ledger.hydrated).toBe(true);
+  });
+
+  it("emits exactly one arrival for a newly sent user turn", () => {
+    const history = [userRow("user-1"), assistantRow("assistant-1", false)];
+    const hydrated = advance(history, EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+
+    const sent = advance([...history, userRow("user-2")], hydrated);
+
+    expect([...sent.arrivingUserMessageIds]).toEqual(["user-2"]);
+  });
+
+  it("is inert when re-advanced over the same snapshot — the virtualized remount case", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const nextRows = [userRow("user-1"), userRow("user-2")];
+    const sent = advance(nextRows, hydrated);
+
+    // Same rows identity, same thread: scroll away and back, a React double
+    // render, or a re-render from unrelated state must not re-emit.
+    expect(advance(nextRows, sent, { now: 1_010 })).toBe(sent);
+  });
+
+  it("expires the one-shot instead of leaving it armed for a later remount", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const nextRows = [userRow("user-1"), userRow("user-2")];
+    const sent = advance(nextRows, hydrated);
+    expect(sent.arrivingUserMessageIds.has("user-2")).toBe(true);
+
+    const later = advance(nextRows, sent, { now: 1_000 + TIMELINE_ONE_SHOT_TTL_MS });
+    expect(timelineLifecycleHasOneShots(later)).toBe(false);
+
+    // The same content re-derived later (a streaming tick, a fold toggle) stays
+    // quiet, because the identity was marked seen when it was emitted.
+    const rederived = advance([userRow("user-1"), userRow("user-2")], later, { now: 9_000 });
+    expect(timelineLifecycleHasOneShots(rederived)).toBe(false);
+  });
+
+  it("never animates history restored by switching threads and coming back", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const sent = advance([userRow("user-1"), userRow("user-2")], hydrated);
+    expect(timelineLifecycleHasOneShots(sent)).toBe(true);
+
+    const otherThread = advance([userRow("other-1")], sent, { threadKey: "env:thread-2" });
+    expect(timelineLifecycleHasOneShots(otherThread)).toBe(false);
+
+    // Back to the original thread: the whole conversation, including the turn
+    // that animated a moment ago, re-hydrates silently.
+    const back = advance([userRow("user-1"), userRow("user-2")], otherThread, {
+      threadKey: "env:thread-1",
+    });
+    expect(timelineLifecycleHasOneShots(back)).toBe(false);
+  });
+
+  it("records a backfilled batch of older user turns without animating them", () => {
+    const hydrated = advance([userRow("user-9")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+
+    // A turn-fold or work-group expansion inserts older turns above the newest
+    // one. Only the newest user turn is ever eligible, and it is already seen.
+    const expandedFold = advance(
+      [userRow("user-6"), userRow("user-7"), userRow("user-8"), userRow("user-9")],
+      hydrated,
+    );
+
+    expect(timelineLifecycleHasOneShots(expandedFold)).toBe(false);
+  });
+
+  it("keeps the live edge on the newest streaming message and drops it immediately", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+
+    const streaming = advance([userRow("user-1"), assistantRow("assistant-1", true)], hydrated);
+    expect(streaming.liveEdgeMessageId).toBe("assistant-1");
+
+    // A newer stream starts: the older one loses the edge on the same tick.
+    const twoStreams = advance(
+      [userRow("user-1"), assistantRow("assistant-1", true), assistantRow("assistant-2", true)],
+      streaming,
+    );
+    expect(twoStreams.liveEdgeMessageId).toBe("assistant-2");
+
+    const settled = advance(
+      [userRow("user-1"), assistantRow("assistant-1", true), assistantRow("assistant-2", false)],
+      twoStreams,
+    );
+    expect(settled.liveEdgeMessageId).toBe("assistant-1");
+  });
+
+  it("glints once when a stream it watched resolves, and never for history", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const streaming = advance([userRow("user-1"), assistantRow("assistant-1", true)], hydrated);
+
+    const resolved = advance([userRow("user-1"), assistantRow("assistant-1", false)], streaming);
+    expect([...resolved.resolvingStreamMessageIds]).toEqual(["assistant-1"]);
+
+    const expired = expireTimelineLifecycleOneShots(resolved);
+    // Re-deriving the same settled message (remount, fold expand, scroll
+    // restore) must not glint again.
+    const again = advance([userRow("user-1"), assistantRow("assistant-1", false)], expired, {
+      now: 9_000,
+    });
+    expect(again.resolvingStreamMessageIds.size).toBe(0);
+  });
+
+  it("never glints when a stream is interrupted instead of completing", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const streaming = advance([userRow("user-1"), assistantRow("assistant-1", true)], hydrated);
+    expect(streaming.liveEdgeMessageId).toBe("assistant-1");
+
+    // The user pressed stop: the turn settles as interrupted. An interruption
+    // is not a completion — no glint, and the live edge goes immediately.
+    const interrupted = advance(
+      [userRow("user-1"), assistantRow("assistant-1", false)],
+      streaming,
+      { interruptedTurnId: RUNNING_TURN },
+    );
+
+    expect(interrupted.resolvingStreamMessageIds.size).toBe(0);
+    expect(interrupted.liveEdgeMessageId).toBeNull();
+
+    // And it cannot glint later either, once the interrupted flag is gone from
+    // the input (e.g. a newer turn becomes the latest turn).
+    const afterwards = advance(
+      [userRow("user-1"), assistantRow("assistant-1", false)],
+      interrupted,
+      { now: 9_000 },
+    );
+    expect(afterwards.resolvingStreamMessageIds.size).toBe(0);
+  });
+
+  it("drops the live edge even if an interrupted message is left flagged as streaming", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const streaming = advance([userRow("user-1"), assistantRow("assistant-1", true)], hydrated);
+
+    const interrupted = advance([userRow("user-1"), assistantRow("assistant-1", true)], streaming, {
+      interruptedTurnId: RUNNING_TURN,
+    });
+
+    expect(interrupted.liveEdgeMessageId).toBeNull();
+    expect(interrupted.resolvingStreamMessageIds.size).toBe(0);
+  });
+
+  it("does not glint for an assistant message that arrives already settled", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+
+    const appended = advance([userRow("user-1"), assistantRow("assistant-1", false)], hydrated);
+
+    expect(appended.resolvingStreamMessageIds.size).toBe(0);
+  });
+
+  it("flashes a tool exactly once on running to success", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const running = advance(
+      [userRow("user-1"), toolRow("tool-1", { toolLifecycleStatus: "inProgress" })],
+      hydrated,
+      { unsettledTurnId: RUNNING_TURN },
+    );
+    expect(running.runningToolIds.has("tool-1")).toBe(true);
+    expect(timelineLifecycleHasOneShots(running)).toBe(false);
+
+    const completed = advance(
+      [userRow("user-1"), toolRow("tool-1", { toolLifecycleStatus: "completed" })],
+      running,
+      { unsettledTurnId: RUNNING_TURN },
+    );
+    expect([...completed.completingToolIds]).toEqual(["tool-1"]);
+
+    const expired = expireTimelineLifecycleOneShots(completed);
+    const remounted = advance(
+      [userRow("user-1"), toolRow("tool-1", { toolLifecycleStatus: "completed" })],
+      expired,
+      { unsettledTurnId: RUNNING_TURN, now: 9_000 },
+    );
+    expect(remounted.completingToolIds.size).toBe(0);
+  });
+
+  it("does not flash tool calls that were expanded into view already completed", () => {
+    const hydrated = advance(
+      [userRow("user-1"), toolRow("tool-9", { toolLifecycleStatus: "completed" })],
+      EMPTY_TIMELINE_LIFECYCLE_LEDGER,
+    );
+
+    // Expanding a work group reveals older, already-finished tool calls.
+    const expanded = advance(
+      [
+        userRow("user-1"),
+        toolRow("tool-6", { toolLifecycleStatus: "completed" }),
+        toolRow("tool-7", { toolLifecycleStatus: "completed" }),
+        toolRow("tool-9", { toolLifecycleStatus: "completed" }),
+      ],
+      hydrated,
+    );
+
+    expect(timelineLifecycleHasOneShots(expanded)).toBe(false);
+  });
+
+  it("gives a failed tool no completion accent", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const running = advance(
+      [userRow("user-1"), toolRow("tool-1", { toolLifecycleStatus: "inProgress" })],
+      hydrated,
+      { unsettledTurnId: RUNNING_TURN },
+    );
+
+    const failed = advance(
+      [userRow("user-1"), toolRow("tool-1", { toolLifecycleStatus: "failed" })],
+      running,
+      { unsettledTurnId: RUNNING_TURN },
+    );
+
+    expect(failed.completingToolIds.size).toBe(0);
+    expect(timelineLifecycleHasOneShots(failed)).toBe(false);
+  });
+
+  it("keeps empty one-shot sets identity-stable so streaming ticks do not churn context", () => {
+    const hydrated = advance([userRow("user-1")], EMPTY_TIMELINE_LIFECYCLE_LEDGER);
+    const tick = advance([userRow("user-1"), assistantRow("assistant-1", true)], hydrated);
+    const nextTick = advance([userRow("user-1"), assistantRow("assistant-1", true)], tick, {
+      now: 1_050,
+    });
+
+    expect(nextTick.arrivingUserMessageIds).toBe(tick.arrivingUserMessageIds);
+    expect(nextTick.resolvingStreamMessageIds).toBe(tick.resolvingStreamMessageIds);
+    expect(nextTick.completingToolIds).toBe(tick.completingToolIds);
   });
 });

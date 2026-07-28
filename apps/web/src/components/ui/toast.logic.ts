@@ -1,5 +1,18 @@
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 
+/**
+ * One tight Level 2 completion trace is allowed on *important* success toasts.
+ * It is opt-in (`data.completionTrace`) precisely so the high-frequency
+ * outcomes — commit, pull, push, already-up-to-date, copied-to-clipboard —
+ * stay quiet by default and simply crossfade in.
+ */
+export function shouldPlayToastCompletionTrace(
+  type: string | null | undefined,
+  data: { completionTrace?: boolean | undefined } | null | undefined,
+): boolean {
+  return type === "success" && data?.completionTrace === true;
+}
+
 export function shouldHideCollapsedToastContent(
   visibleToastIndex: number,
   visibleToastCount: number,

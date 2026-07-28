@@ -1,7 +1,9 @@
 import * as Equal from "effect/Equal";
 import {
   formatDuration,
+  workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
+  workEntryIndicatesToolSuccess,
   workLogEntryIsToolLike,
   type TimelineEntry,
   type WorkLogEntry,
@@ -175,7 +177,8 @@ export type MessagesTimelineRow =
       createdAt: string;
       proposedPlan: ProposedPlan;
     }
-  | { kind: "working"; id: string; createdAt: string | null };
+  | { kind: "working"; id: string; createdAt: string | null }
+  | { kind: "interrupted"; id: string; createdAt: string | null; turnId: TurnId };
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -263,7 +266,7 @@ interface TurnFold {
  * user sends a message, the previous turn is still the "active" one until the
  * server creates the new turn, and folding must not flicker through that window.
  */
-function deriveUnsettledTurnId(
+export function deriveUnsettledTurnId(
   latestTurn: TimelineLatestTurn | null,
   runningTurnId: TurnId | null,
 ): TurnId | null {
@@ -402,6 +405,349 @@ function deriveTurnFolds(input: {
   return foldsByAnchorEntryId;
 }
 
+// ---------------------------------------------------------------------------
+// Tool-call lifecycle (plan item 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * The four lifecycle faces a tool row can present, plus `none` for log rows
+ * that are not tool-like at all (context compaction, plain info) and therefore
+ * own no completion semantics.
+ */
+export type TimelineToolStatus = "none" | "running" | "success" | "failure" | "neutral";
+
+/**
+ * The identity a tool row keeps across its whole lifecycle. `toolCallId` is
+ * stable from `tool.started` through `tool.completed`; `id` is not — it is the
+ * originating activity id and is swapped out at completion. The one-shot
+ * completion flash and the running-trace ledger must key on this, or a running
+ * row and its completion look like two different tools and the flash never arms.
+ */
+export function toolLifecycleFlashKey(entry: WorkLogEntry): string {
+  return entry.toolCallId ?? entry.id;
+}
+
+/**
+ * A tool call is "running" only while its own turn is still unsettled. Once the
+ * turn ends, an entry left at `inProgress` is stale rather than live — treating
+ * it as running would leave a spinner turning forever in restored history.
+ */
+export function isRunningToolWorkEntry(
+  entry: WorkLogEntry,
+  unsettledTurnId: TurnId | null,
+): boolean {
+  if (unsettledTurnId === null) return false;
+  if (entry.toolLifecycleStatus !== "inProgress") return false;
+  if (!workLogEntryIsToolLike(entry)) return false;
+  if (workEntryIndicatesToolFailure(entry)) return false;
+  const turnId = entry.turnId ?? null;
+  return turnId === null || turnId === unsettledTurnId;
+}
+
+export function resolveWorkEntryToolStatus(
+  entry: WorkLogEntry,
+  unsettledTurnId: TurnId | null,
+): TimelineToolStatus {
+  if (!workLogEntryIsToolLike(entry)) return "none";
+  if (workEntryIndicatesToolFailure(entry)) return "failure";
+  if (isRunningToolWorkEntry(entry, unsettledTurnId)) return "running";
+  if (workEntryIndicatesToolSuccess(entry)) return "success";
+  return "neutral";
+}
+
+/**
+ * Settled tool rows with no outcome are noise and stay hidden, but a tool that
+ * is running right now is the one row item 6's running trace attaches to.
+ */
+function workEntryIsHiddenNeutral(entry: WorkLogEntry, unsettledTurnId: TurnId | null): boolean {
+  return (
+    workEntryIndicatesToolNeutralStatus(entry) && !isRunningToolWorkEntry(entry, unsettledTurnId)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// One-shot lifecycle ledger (plan items 5, 6, 10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Replay prevention lives here, in one place, for a specific reason: the
+ * timeline is virtualized, so a row component's mount is *not* a lifecycle
+ * event. Rows unmount and remount purely because the user scrolled. Anything
+ * that keys a one-shot animation off `useState`/`useEffect` inside a row will
+ * replay on every remount, on scroll restoration, on history hydration, and
+ * every time a fold or work group expands and pushes older rows back into the
+ * data array.
+ *
+ * So the list owner advances this ledger from the *full* row array (which
+ * virtualization does not touch) and hands each row a plain boolean. The
+ * ledger:
+ *
+ *   - treats the first snapshot of a thread as history and emits nothing;
+ *   - resets on thread change, so returning to a thread re-hydrates silently;
+ *   - marks an identity as seen at the moment it emits, so re-advancing over
+ *     the same content is inert;
+ *   - only ever emits for a transition it personally observed (streaming ->
+ *     settled, running -> success, absent -> newest user turn), never for
+ *     content that merely appeared in an already-terminal state.
+ */
+export const TIMELINE_ONE_SHOT_TTL_MS = 260;
+
+const EMPTY_LIFECYCLE_KEYS: ReadonlySet<string> = new Set<string>();
+
+export interface TimelineLifecycleLedger {
+  /** Row array identity the ledger was last advanced against. */
+  readonly source: ReadonlyArray<MessagesTimelineRow> | null;
+  readonly threadKey: string | null;
+  readonly hydrated: boolean;
+  readonly issuedAt: number;
+  readonly seenUserMessageIds: ReadonlySet<string>;
+  readonly streamingMessageIds: ReadonlySet<string>;
+  readonly resolvedStreamMessageIds: ReadonlySet<string>;
+  readonly runningToolIds: ReadonlySet<string>;
+  readonly settledToolIds: ReadonlySet<string>;
+  /** Newest assistant message that is actively streaming right now. */
+  readonly liveEdgeMessageId: string | null;
+  readonly arrivingUserMessageIds: ReadonlySet<string>;
+  readonly resolvingStreamMessageIds: ReadonlySet<string>;
+  readonly completingToolIds: ReadonlySet<string>;
+}
+
+export const EMPTY_TIMELINE_LIFECYCLE_LEDGER: TimelineLifecycleLedger = {
+  source: null,
+  threadKey: null,
+  hydrated: false,
+  issuedAt: 0,
+  seenUserMessageIds: EMPTY_LIFECYCLE_KEYS,
+  streamingMessageIds: EMPTY_LIFECYCLE_KEYS,
+  resolvedStreamMessageIds: EMPTY_LIFECYCLE_KEYS,
+  runningToolIds: EMPTY_LIFECYCLE_KEYS,
+  settledToolIds: EMPTY_LIFECYCLE_KEYS,
+  liveEdgeMessageId: null,
+  arrivingUserMessageIds: EMPTY_LIFECYCLE_KEYS,
+  resolvingStreamMessageIds: EMPTY_LIFECYCLE_KEYS,
+  completingToolIds: EMPTY_LIFECYCLE_KEYS,
+};
+
+export function timelineLifecycleHasOneShots(ledger: TimelineLifecycleLedger): boolean {
+  return (
+    ledger.arrivingUserMessageIds.size > 0 ||
+    ledger.resolvingStreamMessageIds.size > 0 ||
+    ledger.completingToolIds.size > 0
+  );
+}
+
+export function expireTimelineLifecycleOneShots(
+  ledger: TimelineLifecycleLedger,
+): TimelineLifecycleLedger {
+  if (!timelineLifecycleHasOneShots(ledger)) return ledger;
+  return {
+    ...ledger,
+    arrivingUserMessageIds: EMPTY_LIFECYCLE_KEYS,
+    resolvingStreamMessageIds: EMPTY_LIFECYCLE_KEYS,
+    completingToolIds: EMPTY_LIFECYCLE_KEYS,
+  };
+}
+
+/** Union that preserves the base reference when nothing is added, so context
+ *  values built from these sets stay identity-stable across streaming ticks. */
+function withLifecycleKeys(
+  base: ReadonlySet<string>,
+  additions: Iterable<string>,
+): ReadonlySet<string> {
+  let next: Set<string> | null = null;
+  for (const value of additions) {
+    if (base.has(value)) continue;
+    next ??= new Set(base);
+    next.add(value);
+  }
+  return next ?? base;
+}
+
+interface TimelineLifecycleObservation {
+  readonly userMessageIds: string[];
+  readonly newestUserMessageId: string | null;
+  readonly streamingMessageIds: Set<string>;
+  readonly settledAssistantIds: Set<string>;
+  readonly interruptedAssistantIds: Set<string>;
+  readonly runningToolIds: Set<string>;
+  readonly successToolIds: Set<string>;
+  readonly terminalToolIds: Set<string>;
+  readonly liveEdgeMessageId: string | null;
+}
+
+function observeTimelineLifecycle(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  unsettledTurnId: TurnId | null,
+  interruptedTurnId: TurnId | null,
+): TimelineLifecycleObservation {
+  const userMessageIds: string[] = [];
+  const streamingMessageIds = new Set<string>();
+  const settledAssistantIds = new Set<string>();
+  const interruptedAssistantIds = new Set<string>();
+  const runningToolIds = new Set<string>();
+  const successToolIds = new Set<string>();
+  const terminalToolIds = new Set<string>();
+  let newestUserMessageId: string | null = null;
+  let liveEdgeMessageId: string | null = null;
+
+  for (const row of rows) {
+    if (row.kind === "message") {
+      if (row.message.role === "user") {
+        userMessageIds.push(row.message.id);
+        newestUserMessageId = row.message.id;
+        continue;
+      }
+      if (row.message.role !== "assistant") continue;
+      const wasInterrupted = interruptedTurnId !== null && row.message.turnId === interruptedTurnId;
+      // An interrupted turn is not a completion. Its content stops carrying the
+      // live edge immediately, and it is recorded as already-resolved so the
+      // completion glint can never fire for it — celebrating a stop would be
+      // exactly the wrong signal.
+      if (row.message.streaming && !wasInterrupted) {
+        streamingMessageIds.add(row.message.id);
+        liveEdgeMessageId = row.message.id;
+      } else {
+        settledAssistantIds.add(row.message.id);
+        if (wasInterrupted) interruptedAssistantIds.add(row.message.id);
+      }
+      continue;
+    }
+    if (row.kind !== "work") continue;
+    for (const entry of row.groupedEntries) {
+      const status = resolveWorkEntryToolStatus(entry, unsettledTurnId);
+      // Key on the stable tool-call identity, not `entry.id`: `id` is the
+      // originating activity id and is replaced the instant the tool completes
+      // (`tool.updated` -> `tool.completed`), so a set keyed on it can never
+      // match a running row against its own completion. The flash keyed here
+      // was therefore always empty. See `toolLifecycleFlashKey`.
+      const key = toolLifecycleFlashKey(entry);
+      if (status === "running") {
+        runningToolIds.add(key);
+        continue;
+      }
+      if (status === "none") continue;
+      terminalToolIds.add(key);
+      if (status === "success") successToolIds.add(key);
+    }
+  }
+
+  return {
+    userMessageIds,
+    newestUserMessageId,
+    streamingMessageIds,
+    settledAssistantIds,
+    interruptedAssistantIds,
+    runningToolIds,
+    successToolIds,
+    terminalToolIds,
+    liveEdgeMessageId,
+  };
+}
+
+export interface TimelineLifecycleInput {
+  readonly rows: ReadonlyArray<MessagesTimelineRow>;
+  readonly threadKey: string;
+  readonly unsettledTurnId: TurnId | null;
+  /** Latest turn when it settled as interrupted, so a stop never reads as a win. */
+  readonly interruptedTurnId: TurnId | null;
+  readonly now: number;
+}
+
+export function advanceTimelineLifecycle(
+  input: TimelineLifecycleInput,
+  previous: TimelineLifecycleLedger,
+): TimelineLifecycleLedger {
+  // Re-advancing over the identical snapshot must be inert. This is what makes
+  // a virtualized remount, a scroll restoration, or a React double-render
+  // incapable of re-triggering anything.
+  if (previous.source === input.rows && previous.threadKey === input.threadKey) {
+    return input.now - previous.issuedAt >= TIMELINE_ONE_SHOT_TTL_MS
+      ? expireTimelineLifecycleOneShots(previous)
+      : previous;
+  }
+
+  const seen = observeTimelineLifecycle(input.rows, input.unsettledTurnId, input.interruptedTurnId);
+
+  // First snapshot of a thread is history by definition: record it, animate none
+  // of it. A thread switch takes this branch again, so navigating back to an
+  // already-read conversation never replays its arrivals or completions.
+  if (!previous.hydrated || previous.threadKey !== input.threadKey) {
+    return {
+      source: input.rows,
+      threadKey: input.threadKey,
+      hydrated: true,
+      issuedAt: input.now,
+      seenUserMessageIds: new Set(seen.userMessageIds),
+      streamingMessageIds: seen.streamingMessageIds,
+      resolvedStreamMessageIds: seen.settledAssistantIds,
+      runningToolIds: seen.runningToolIds,
+      settledToolIds: seen.terminalToolIds,
+      liveEdgeMessageId: seen.liveEdgeMessageId,
+      arrivingUserMessageIds: EMPTY_LIFECYCLE_KEYS,
+      resolvingStreamMessageIds: EMPTY_LIFECYCLE_KEYS,
+      completingToolIds: EMPTY_LIFECYCLE_KEYS,
+    };
+  }
+
+  const expired = input.now - previous.issuedAt >= TIMELINE_ONE_SHOT_TTL_MS;
+  const carriedArrivals = expired ? EMPTY_LIFECYCLE_KEYS : previous.arrivingUserMessageIds;
+  const carriedGlints = expired ? EMPTY_LIFECYCLE_KEYS : previous.resolvingStreamMessageIds;
+  const carriedFlashes = expired ? EMPTY_LIFECYCLE_KEYS : previous.completingToolIds;
+
+  // Only the newest user turn arrives. A batch of older user messages appearing
+  // at once (fold expansion, history backfill, reconnection replay) is recorded
+  // silently.
+  const arrivingUserMessageIds =
+    seen.newestUserMessageId !== null && !previous.seenUserMessageIds.has(seen.newestUserMessageId)
+      ? withLifecycleKeys(carriedArrivals, [seen.newestUserMessageId])
+      : carriedArrivals;
+
+  const glintIds: string[] = [];
+  for (const messageId of previous.streamingMessageIds) {
+    if (seen.streamingMessageIds.has(messageId)) continue;
+    // Gone from the row array entirely (reverted / folded away) is not a
+    // completion, and neither is a message we already saw settle.
+    if (!seen.settledAssistantIds.has(messageId)) continue;
+    if (seen.interruptedAssistantIds.has(messageId)) continue;
+    if (previous.resolvedStreamMessageIds.has(messageId)) continue;
+    glintIds.push(messageId);
+  }
+  const resolvingStreamMessageIds = withLifecycleKeys(carriedGlints, glintIds);
+
+  const flashIds: string[] = [];
+  for (const toolId of previous.runningToolIds) {
+    if (seen.runningToolIds.has(toolId)) continue;
+    if (!seen.successToolIds.has(toolId)) continue;
+    if (previous.settledToolIds.has(toolId)) continue;
+    flashIds.push(toolId);
+  }
+  const completingToolIds = withLifecycleKeys(carriedFlashes, flashIds);
+
+  const emitted =
+    arrivingUserMessageIds !== carriedArrivals ||
+    resolvingStreamMessageIds !== carriedGlints ||
+    completingToolIds !== carriedFlashes;
+
+  return {
+    source: input.rows,
+    threadKey: input.threadKey,
+    hydrated: true,
+    issuedAt: emitted ? input.now : previous.issuedAt,
+    seenUserMessageIds: withLifecycleKeys(previous.seenUserMessageIds, seen.userMessageIds),
+    streamingMessageIds: seen.streamingMessageIds,
+    resolvedStreamMessageIds: withLifecycleKeys(
+      previous.resolvedStreamMessageIds,
+      seen.settledAssistantIds,
+    ),
+    runningToolIds: seen.runningToolIds,
+    settledToolIds: withLifecycleKeys(previous.settledToolIds, seen.terminalToolIds),
+    liveEdgeMessageId: seen.liveEdgeMessageId,
+    arrivingUserMessageIds,
+    resolvingStreamMessageIds,
+    completingToolIds,
+  };
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
@@ -476,7 +822,7 @@ export function deriveMessagesTimelineRows(input: {
         cursor += 1;
       }
       const visibleGroupedEntries = groupedEntries.filter(
-        (entry) => !workEntryIndicatesToolNeutralStatus(entry),
+        (entry) => !workEntryIsHiddenNeutral(entry, unsettledTurnId),
       );
       if (visibleGroupedEntries.length > 0) {
         if (visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
@@ -569,6 +915,16 @@ export function deriveMessagesTimelineRows(input: {
       id: "working-indicator-row",
       createdAt: input.activeTurnStartedAt,
     });
+  } else if (input.latestTurn?.state === "interrupted") {
+    // Interrupted is a persistence state of its own, distinct from completion
+    // and from failure. It replaces the working indicator once the stop lands
+    // so the response never just stops with no explanation.
+    nextRows.push({
+      kind: "interrupted",
+      id: "interrupted-indicator-row",
+      createdAt: input.latestTurn.completedAt,
+      turnId: input.latestTurn.turnId,
+    });
   }
 
   return nextRows;
@@ -601,6 +957,11 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   switch (a.kind) {
     case "working":
       return a.createdAt === (b as typeof a).createdAt;
+
+    case "interrupted": {
+      const bi = b as typeof a;
+      return a.createdAt === bi.createdAt && a.turnId === bi.turnId;
+    }
 
     case "turn-fold": {
       const bf = b as typeof a;

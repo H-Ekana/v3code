@@ -119,6 +119,8 @@ import {
   CommandFooter,
   CommandInput,
   CommandPanel,
+  commandPaletteViewMotion,
+  type CommandPaletteViewDirection,
 } from "./ui/command";
 import { Button } from "./ui/button";
 import { Kbd, KbdGroup } from "./ui/kbd";
@@ -501,6 +503,33 @@ function OpenCommandPaletteDialog(props: {
   const providers = useAtomValue(primaryServerProvidersAtom);
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
+  // Drives the directional submenu transition. It is armed only by an explicit
+  // push/pop and disarms itself once the transition window closes, so the
+  // autocomplete remounts caused by ordinary typing (entering browse mode,
+  // stepping into a folder) inherit the resting `none` and do not animate.
+  const [viewTransition, setViewTransition] = useState<{
+    readonly direction: CommandPaletteViewDirection;
+    readonly nonce: number;
+  }>({ direction: "none", nonce: 0 });
+  const armViewTransition = useCallback(
+    (direction: Exclude<CommandPaletteViewDirection, "none">) => {
+      setViewTransition((previous) => ({ direction, nonce: previous.nonce + 1 }));
+    },
+    [],
+  );
+  useEffect(() => {
+    if (viewTransition.direction === "none") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setViewTransition((previous) =>
+        previous.nonce === viewTransition.nonce
+          ? { direction: "none", nonce: previous.nonce }
+          : previous,
+      );
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [viewTransition]);
   const [browseGeneration, setBrowseGeneration] = useState(0);
   const [addProjectEnvironmentId, setAddProjectEnvironmentId] = useState<EnvironmentId | null>(
     null,
@@ -866,6 +895,7 @@ function OpenCommandPaletteDialog(props: {
   const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
 
   function pushPaletteView(view: CommandPaletteView): void {
+    armViewTransition("forward");
     setViewStack((previousViews) => [
       ...previousViews,
       {
@@ -887,6 +917,7 @@ function OpenCommandPaletteDialog(props: {
   }
 
   function popView(): void {
+    armViewTransition("back");
     setAddProjectCloneFlow(null);
     if (viewStack.length <= 1) {
       setAddProjectEnvironmentId(null);
@@ -1608,6 +1639,10 @@ function OpenCommandPaletteDialog(props: {
     displayedGroups = relativePathNeedsActiveProject ? [] : browseGroups;
   }
 
+  const paletteViewMotion = commandPaletteViewMotion({
+    depth: viewStack.length,
+    direction: viewTransition.direction,
+  });
   const inputPlaceholder =
     remoteProjectInputPlaceholder(addProjectCloneFlow) ??
     getCommandPaletteInputPlaceholder(paletteMode);
@@ -1997,7 +2032,12 @@ function OpenCommandPaletteDialog(props: {
             </Tooltip>
           ) : null}
         </div>
-        <CommandPanel className="max-h-[min(28rem,70vh)]">
+        <CommandPanel
+          key={paletteViewMotion.key}
+          className={cn("max-h-[min(28rem,70vh)]", paletteViewMotion.className)}
+          data-nav-direction={paletteViewMotion.direction}
+          data-nav-depth={viewStack.length}
+        >
           {remoteProjectContext ? (
             <div className="p-2 pb-0">
               <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">

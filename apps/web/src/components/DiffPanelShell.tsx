@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { isElectron } from "~/env";
+import { FILES_SKELETON_DELAY_MS, useDeferredPending } from "~/lib/filesDiffsMotion";
 import { cn } from "~/lib/utils";
 
 import { Skeleton } from "./ui/skeleton";
@@ -59,30 +60,43 @@ export function DiffPanelHeaderSkeleton() {
   );
 }
 
-export function DiffPanelLoadingState(props: { label: string }) {
+/**
+ * The skeleton is withheld for {@link FILES_SKELETON_DELAY_MS} after this state
+ * mounts. A cached diff resolves inside that window and unmounts this component
+ * before anything is painted, so a fast scope change never flashes a skeleton.
+ * The polite announcement is not delayed — it renders on the first frame.
+ */
+export function DiffPanelLoadingState(props: { label: string; delayMs?: number }) {
+  const skeletonVisible = useDeferredPending(true, props.delayMs ?? FILES_SKELETON_DELAY_MS);
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-2">
-      <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-primary/10 bg-card/25"
-        role="status"
-        aria-live="polite"
-        aria-label={props.label}
-      >
-        <div className="flex items-center gap-2 border-b border-border/50 px-3 py-2">
-          <Skeleton className="h-4 w-32 rounded-full" />
-          <Skeleton className="ml-auto h-4 w-20 rounded-full" />
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col gap-4 px-3 py-4">
-          <div className="space-y-2">
-            <Skeleton className="h-3 w-full rounded-full" />
-            <Skeleton className="h-3 w-full rounded-full" />
-            <Skeleton className="h-3 w-10/12 rounded-full" />
-            <Skeleton className="h-3 w-11/12 rounded-full" />
-            <Skeleton className="h-3 w-9/12 rounded-full" />
+    <div
+      className="flex min-h-0 flex-1 flex-col p-2"
+      data-diff-loading-skeleton={skeletonVisible ? "visible" : "deferred"}
+    >
+      <span className="sr-only" role="status" aria-live="polite">
+        {props.label}
+      </span>
+      {skeletonVisible ? (
+        <div
+          aria-hidden="true"
+          className="files-state-enter flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-primary/10 bg-card/25"
+        >
+          <div className="flex items-center gap-2 border-b border-border/50 px-3 py-2">
+            <Skeleton className="h-4 w-32 rounded-full" />
+            <Skeleton className="ml-auto h-4 w-20 rounded-full" />
           </div>
-          <span className="sr-only">{props.label}</span>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 px-3 py-4">
+            <div className="space-y-2">
+              <Skeleton className="h-3 w-full rounded-full" />
+              <Skeleton className="h-3 w-full rounded-full" />
+              <Skeleton className="h-3 w-10/12 rounded-full" />
+              <Skeleton className="h-3 w-11/12 rounded-full" />
+              <Skeleton className="h-3 w-9/12 rounded-full" />
+            </div>
+          </div>
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }

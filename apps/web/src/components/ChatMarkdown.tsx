@@ -127,6 +127,14 @@ interface ChatMarkdownProps {
   className?: string;
   /** Treat single newlines as hard breaks — chat-style user input. */
   lineBreaks?: boolean;
+  /**
+   * Append the live-response caret hook as the final child so a violet caret
+   * can track the growth point at the end of the last streamed text block. The
+   * caller drives this off the timeline lifecycle ledger's live-edge state; the
+   * visible caret is a CSS `::after` on the preceding block (see
+   * `conversation.css`), so the hook element itself stays invisible.
+   */
+  streamingCaret?: boolean;
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
@@ -1551,6 +1559,7 @@ function ChatMarkdown({
   skills = EMPTY_MARKDOWN_SKILLS,
   className,
   lineBreaks = false,
+  streamingCaret = false,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
@@ -1972,6 +1981,7 @@ function ChatMarkdown({
         rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
         urlTransform={markdownUrlTransform}
       />
+      {streamingCaret ? <span className="conversation-live-caret" aria-hidden="true" /> : null}
     </div>
   );
 }

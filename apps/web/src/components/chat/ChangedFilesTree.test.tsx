@@ -70,6 +70,25 @@ describe("ChangedFilesCard", () => {
     expect(markup).not.toContain("App.test.tsx");
   });
 
+  it("does not replay the tree reveal when a card mounts already expanded", () => {
+    const markup = renderToStaticMarkup(
+      <ChangedFilesCard
+        turnId={TurnId.make("turn-1")}
+        files={[{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }]}
+        expanded
+        showCompactPreview={false}
+        allDirectoriesExpanded
+        resolvedTheme="light"
+        onExpandedChange={() => {}}
+        onToggleAllDirectories={() => {}}
+        onOpenTurnDiff={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('data-changed-files-state="expanded"');
+    expect(markup).not.toContain("files-tree-reveal");
+  });
+
   it("keeps older collapsed changes to a one-line receipt", () => {
     const markup = renderToStaticMarkup(
       <ChangedFilesCard
@@ -231,4 +250,57 @@ describe("ChangedFilesTree", () => {
       }
     },
   );
+
+  const treeFiles = (count: number) =>
+    Array.from({ length: count }, (_unused, index) => ({
+      path: `apps/web/src/module-${index}/file-${index}.ts`,
+      kind: "modified" as const,
+      additions: 1,
+      deletions: 0,
+    }));
+
+  it("does not reveal anything when an already-expanded card remounts", () => {
+    const markup = renderToStaticMarkup(
+      <ChangedFilesTree
+        turnId={TurnId.make("turn-1")}
+        files={treeFiles(6)}
+        allDirectoriesExpanded
+        resolvedTheme="light"
+        onOpenTurnDiff={() => {}}
+      />,
+    );
+
+    expect(markup).not.toContain("files-tree-reveal");
+  });
+
+  it("reveals a small tree as exactly one container, never per row", () => {
+    const markup = renderToStaticMarkup(
+      <ChangedFilesTree
+        turnId={TurnId.make("turn-1")}
+        files={treeFiles(6)}
+        allDirectoriesExpanded
+        resolvedTheme="light"
+        reveal
+        onOpenTurnDiff={() => {}}
+      />,
+    );
+
+    expect(markup.match(/files-tree-reveal/g)).toHaveLength(1);
+  });
+
+  it("leaves a large tree completely unanimated", () => {
+    const markup = renderToStaticMarkup(
+      <ChangedFilesTree
+        turnId={TurnId.make("turn-1")}
+        files={treeFiles(200)}
+        allDirectoriesExpanded
+        resolvedTheme="light"
+        reveal
+        onOpenTurnDiff={() => {}}
+      />,
+    );
+
+    expect(markup).not.toContain("files-tree-reveal");
+    expect(markup).not.toContain("files-state-enter");
+  });
 });

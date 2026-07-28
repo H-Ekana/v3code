@@ -78,12 +78,18 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /**
+   * Stable identity of the underlying tool call, carried across `tool.started`
+   * -> `tool.updated` -> `tool.completed`. The one-shot completion flash and the
+   * running-trace ledger key on this rather than `id`, because `id` is the
+   * originating activity id and is *replaced* the instant a tool completes.
+   */
+  toolCallId?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
   collapseKey?: string;
-  toolCallId?: string;
 }
 
 export interface PendingApproval {
@@ -631,7 +637,12 @@ export function deriveWorkLogEntries(
   const entries: DerivedWorkLogEntry[] = [];
   let pendingContextCompactionIndex: number | null = null;
   for (const activity of ordered) {
-    if (activity.kind === "tool.started") continue;
+    // `tool.started` is NOT discarded: on Codex it is the only signal that a
+    // tool is running (there is no `tool.updated` carrying `inProgress`), so
+    // dropping it left `toolLifecycleStatus` never once set to `inProgress` and
+    // the running orbit never mounted. It carries the same `toolCallId` as the
+    // later `tool.updated`/`tool.completed`, so it collapses into them below and
+    // never produces a duplicate row.
     if (activity.kind === "task.started") continue;
     if (activity.kind === "context-window.updated") continue;
     if (activity.kind === "agent.snapshot") continue;
@@ -779,6 +790,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
     toolLifecycleStatus = "completed";
   }
+  if (!toolLifecycleStatus && activity.kind === "tool.started") {
+    // A started-but-not-yet-reported tool is in flight. This is what lets the
+    // running trace mount on providers (Codex) that only emit `tool.started`.
+    toolLifecycleStatus = "inProgress";
+  }
   if (toolLifecycleStatus) {
     entry.toolLifecycleStatus = toolLifecycleStatus;
   }
@@ -808,10 +824,10 @@ function shouldCollapseToolLifecycleEntries(
   previous: DerivedWorkLogEntry,
   next: DerivedWorkLogEntry,
 ): boolean {
-  if (previous.activityKind !== "tool.updated" && previous.activityKind !== "tool.completed") {
+  if (!isCollapsibleToolLifecycleKind(previous.activityKind)) {
     return false;
   }
-  if (next.activityKind !== "tool.updated" && next.activityKind !== "tool.completed") {
+  if (!isCollapsibleToolLifecycleKind(next.activityKind)) {
     return false;
   }
   if (previous.activityKind === "tool.completed") {
@@ -872,8 +888,12 @@ function mergeChangedFiles(
   return [...new Set(merged)];
 }
 
+function isCollapsibleToolLifecycleKind(kind: OrchestrationThreadActivity["kind"]): boolean {
+  return kind === "tool.started" || kind === "tool.updated" || kind === "tool.completed";
+}
+
 function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
-  if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
+  if (!isCollapsibleToolLifecycleKind(entry.activityKind)) {
     return undefined;
   }
   if (entry.toolCallId) {

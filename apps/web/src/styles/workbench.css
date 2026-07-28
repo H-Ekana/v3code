@@ -1,1 +1,425 @@
 /* Panels, terminal, and workbench continuity — owned by the workbench area. */
+
+/*
+ * INTENSITY BUDGET (recorded here rather than in a contract test: `?raw` CSS
+ * imports resolve to an empty string under the `unit` project, so a stylesheet
+ * test would assert against nothing).
+ *
+ * | Effect                              | Level | Duration                       | Reach          |
+ * | ----------------------------------- | ----- | ------------------------------ | -------------- |
+ * | Right-panel shell launch / exit     | 2     | --workbench-surface-transition | 4px + opacity  |
+ * | Chat-column FLIP (JS/WAAPI)         | 2     | --workbench-surface-transition | layout delta   |
+ * | Active-tab indicator travel         | 2     | --motion-state                 | 2px tall rule  |
+ * | Active-tab pink leading tip         | 0     | static                         | 6px wide       |
+ * | Panel content crossfade (JS/WAAPI)  | 2     | --workbench-content-crossfade  | 4px + opacity  |
+ * | Terminal drawer launch / exit       | 2     | --workbench-surface-transition | own-axis height |
+ * | Terminal resize rail illumination   | 1     | --motion-hover                 | 1px line       |
+ * | Terminal tab quiet transition       | 1     | --motion-hover                 | colour only    |
+ * | Terminal clean-close acknowledgment | 3     | --workbench-close-ack          | glyph-sized    |
+ *
+ * No effect here exceeds a 4px translation except the two layout-continuity
+ * moves: the chat-column FLIP (a compositor transform) and the drawer's
+ * own-axis height, which grows/shrinks the one flex row the composer sits above
+ * so the two move as a single coupled surface. Both carry no glow, no scale and
+ * no colour accent. Only that one drawer move animates height, and only over
+ * the shared surface-transition window; nothing animates width, filter, or a
+ * large shadow. Nothing animates while no work is happening.
+ */
+
+:root {
+  /*
+   * Plan items 13 and 16 both specify a 180-220ms surface launch/exit. It sits
+   * between --motion-state (200ms) and --motion-layout (240ms) in intent, so it
+   * is named separately and can be retuned without moving the ladder. Mirrors
+   * WORKBENCH_SURFACE_TRANSITION_MS in components/workbenchChoreography.ts,
+   * which drives the matching JS presence timers.
+   */
+  --workbench-surface-transition: 200ms;
+
+  /*
+   * Plan item 13: "directionally crossfade panel content by about 4px over
+   * 150-180ms". No ladder token sits in that band. Mirrors
+   * WORKBENCH_CONTENT_CROSSFADE_MS.
+   */
+  --workbench-content-crossfade: 165ms;
+
+  /*
+   * Plan item 16: "let the tab glyph resolve into a compact check/fade over
+   * roughly 180-220ms" - item 16's explicit band, not the ladder's generic
+   * 240-340ms Level 3 range. Mirrors WORKBENCH_CLOSE_ACKNOWLEDGMENT_MS.
+   */
+  --workbench-close-ack: 200ms;
+
+  /* Plan item 13: "about 4px" directional offset for panel content. */
+  --workbench-content-offset: 4px;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Right panel shell                                                          */
+/* -------------------------------------------------------------------------- */
+
+.workbench-panel-shell[data-surface-phase="entering"] {
+  animation: workbench-panel-enter var(--workbench-surface-transition) var(--ease-out-expo)
+    backwards;
+}
+
+.workbench-panel-shell[data-surface-phase="exiting"] {
+  animation: workbench-panel-exit var(--workbench-surface-transition) var(--ease-out-quart) forwards;
+}
+
+/*
+ * A drag must never coincide with a shell animation, and the shell's width is
+ * never a transitioned property, so dragging the handle can only ever move the
+ * panel edge immediately.
+ */
+.workbench-panel-shell[data-resizing="true"] {
+  animation: none;
+}
+
+.workbench-panel-content {
+  /* Owns nothing but the stacking context the WAAPI crossfade animates in. */
+  isolation: isolate;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Right panel tab strip                                                      */
+/* -------------------------------------------------------------------------- */
+
+.workbench-tab-strip {
+  position: relative;
+}
+
+.workbench-tab-indicator {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  width: var(--workbench-tab-indicator-w);
+  translate: var(--workbench-tab-indicator-x) 0;
+  border-radius: 1px;
+  background: var(--primary);
+  opacity: var(--workbench-tab-indicator-opacity);
+  pointer-events: none;
+  transition-property: translate, width, opacity;
+  transition-duration: var(--motion-state);
+  transition-timing-function: var(--ease-out-quint);
+}
+
+/*
+ * The small pink leading tip. Static, per the "no permanent second primary
+ * colour" rule: it marks which way the indicator travelled and then rests.
+ */
+.workbench-tab-indicator::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  border-radius: 1px;
+  background: var(--astro-highlight);
+  content: "";
+}
+
+.workbench-tab-strip[data-tab-direction="backward"] .workbench-tab-indicator::after {
+  right: auto;
+  left: 0;
+}
+
+.workbench-tab-strip[data-tab-direction="forward"] .workbench-tab-indicator::after,
+.workbench-tab-strip[data-tab-direction="none"] .workbench-tab-indicator::after {
+  right: 0;
+  left: auto;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Terminal drawer                                                            */
+/* -------------------------------------------------------------------------- */
+
+.workbench-terminal-surface {
+  /* Clips its own-axis slide so it never overlaps the composer. */
+  overflow: hidden;
+}
+
+.workbench-terminal-surface[data-surface-phase="closed"] {
+  display: none;
+}
+
+.workbench-terminal-surface[data-surface-phase="entering"] {
+  animation: workbench-terminal-enter var(--workbench-surface-transition) var(--ease-out-expo)
+    backwards;
+}
+
+.workbench-terminal-surface[data-surface-phase="exiting"] {
+  animation: workbench-terminal-exit var(--workbench-surface-transition) var(--ease-out-quart)
+    forwards;
+}
+
+.workbench-terminal-resize-rail {
+  background: transparent;
+  transition-property: background-color, box-shadow;
+  transition-duration: var(--motion-hover);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+.workbench-terminal-resize-handle:hover .workbench-terminal-resize-rail,
+.workbench-terminal-resize-handle:focus-visible .workbench-terminal-resize-rail {
+  background: color-mix(in srgb, var(--primary) 65%, transparent);
+}
+
+.workbench-terminal-resize-handle[data-resizing="true"] .workbench-terminal-resize-rail {
+  background: var(--primary);
+  box-shadow: 0 0 3px color-mix(in srgb, var(--primary) 30%, transparent);
+}
+
+/* Quiet terminal-tab transitions: colour only, no movement, no glow. */
+.workbench-terminal-tab {
+  transition-property: color, background-color, box-shadow;
+  transition-duration: var(--motion-hover);
+  transition-timing-function: var(--ease-out-quart);
+}
+
+/*
+ * Level 3, and the only Level 3 in this file. Reached exclusively through
+ * shouldAcknowledgeTerminalClose(): a user-initiated close of a session that
+ * had already exited cleanly. The row is a bounded ghost - it is inert, and a
+ * timer removes it - so nothing waits on this to finish.
+ */
+.workbench-terminal-tab-settled {
+  animation: workbench-terminal-close-ack var(--workbench-close-ack) var(--ease-out-quint) forwards;
+}
+
+.workbench-terminal-tab-settled-glyph {
+  animation: workbench-terminal-close-glyph var(--workbench-close-ack) var(--ease-out-quint)
+    backwards;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Recursive right-panel workspace                                            */
+/* -------------------------------------------------------------------------- */
+
+.right-panel-pane {
+  animation: right-panel-pane-arrive 220ms var(--ease-out-quint) backwards;
+  box-shadow: inset 0 0 0 0 transparent;
+  transition: box-shadow var(--motion-hover) var(--ease-out-quart);
+}
+
+.right-panel-pane[data-focused="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.right-panel-split-child {
+  flex-grow: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  transition: flex-basis 220ms var(--ease-out-quint);
+}
+
+.right-panel-split[data-resizing="true"] > .right-panel-split-child {
+  transition: none;
+}
+
+.right-panel-splitter::before {
+  position: absolute;
+  content: "";
+}
+
+.right-panel-split[data-right-panel-split="horizontal"] > .right-panel-splitter::before {
+  inset: 0 -4px;
+}
+
+.right-panel-split[data-right-panel-split="vertical"] > .right-panel-splitter::before {
+  inset: -4px 0;
+}
+
+.right-panel-snap-preview {
+  border: 1px solid color-mix(in srgb, var(--primary) 78%, white 8%);
+  border-radius: 0.5rem;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary) 17%, transparent),
+    color-mix(in srgb, var(--primary) 7%, transparent)
+  );
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--primary) 16%, transparent),
+    0 0 8px color-mix(in srgb, var(--primary) 18%, transparent);
+  animation: right-panel-snap-preview-in 140ms var(--ease-out-quint) backwards;
+  backdrop-filter: blur(2px);
+}
+
+.right-panel-tab-dock-target {
+  transition:
+    background-color var(--motion-hover) var(--ease-out-quart),
+    box-shadow var(--motion-hover) var(--ease-out-quart);
+}
+
+.right-panel-tab-dock-target-active {
+  background: color-mix(in srgb, var(--primary) 8%, var(--background));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+.right-panel-drag-overlay {
+  animation: right-panel-drag-lift 160ms var(--ease-out-quint) backwards;
+  cursor: grabbing;
+}
+
+.workbench-terminal-tab[data-dragging="true"] {
+  transition-duration: 120ms;
+}
+
+@keyframes right-panel-pane-arrive {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes right-panel-snap-preview-in {
+  from {
+    opacity: 0;
+    transform: scale(0.975);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes right-panel-drag-lift {
+  from {
+    opacity: 0.72;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes workbench-panel-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(4px, 0, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes workbench-panel-exit {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(4px, 0, 0);
+  }
+}
+
+/*
+ * The launch/exit is the drawer's own height, not a transform slide over
+ * already-reserved space. Animating the height is what couples the drawer to
+ * the composer: the surface is the flex row the composer sits above, so as its
+ * height grows the composer glides up in the same frames, and as it shrinks the
+ * composer glides down — one surface, one duration, one easing. The drawer body
+ * keeps its fixed height underneath, so xterm is never reflowed per frame; the
+ * surface only clips more of it into view (`overflow: hidden`).
+ * `--drawer-surface-height` is set per-instance to the clamped drawer height.
+ */
+@keyframes workbench-terminal-enter {
+  from {
+    opacity: 0;
+    height: 0;
+  }
+
+  to {
+    opacity: 1;
+    height: var(--drawer-surface-height);
+  }
+}
+
+@keyframes workbench-terminal-exit {
+  from {
+    opacity: 1;
+    height: var(--drawer-surface-height);
+  }
+
+  to {
+    opacity: 0;
+    height: 0;
+  }
+}
+
+@keyframes workbench-terminal-close-ack {
+  from {
+    opacity: 1;
+  }
+
+  55% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes workbench-terminal-close-glyph {
+  from {
+    opacity: 0;
+    scale: 0.9;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * Reduced motion keeps the meaning and drops the travel. Presence still
+   * changes - the JS timers collapse to zero - so nothing is hidden behind an
+   * animation that no longer runs.
+   */
+  .workbench-panel-shell[data-surface-phase="entering"],
+  .workbench-panel-shell[data-surface-phase="exiting"],
+  .workbench-terminal-surface[data-surface-phase="entering"],
+  .workbench-terminal-surface[data-surface-phase="exiting"] {
+    animation: none;
+  }
+
+  .workbench-tab-indicator,
+  .workbench-terminal-resize-rail,
+  .workbench-terminal-tab,
+  .right-panel-pane,
+  .right-panel-split-child,
+  .right-panel-tab-dock-target {
+    transition-duration: 0.01ms;
+  }
+
+  .right-panel-pane,
+  .right-panel-snap-preview,
+  .right-panel-drag-overlay {
+    animation: none;
+  }
+
+  /*
+   * The acknowledgment keeps its meaning under reduced motion: the check still
+   * appears in the tab for the same window and the row is still removed by the
+   * same timer. Only the fade and the glyph's scale are dropped.
+   */
+  .workbench-terminal-tab-settled,
+  .workbench-terminal-tab-settled-glyph {
+    animation: none;
+  }
+}

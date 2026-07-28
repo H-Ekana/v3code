@@ -1,4 +1,4 @@
-import { memo, type PointerEventHandler } from "react";
+import { memo, useCallback, useEffect, useState, type PointerEventHandler } from "react";
 import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
@@ -14,10 +14,112 @@ interface PendingActionState {
   isComplete: boolean;
 }
 
+/**
+ * Stop/interrupt state contract.
+ *
+ * `pending` is the only state that disables the control, and every exit from
+ * `pending` is driven by an event that this module also owns: the request
+ * failing, the turn settling, or the unconfirmed watchdog firing. There is no
+ * path that leaves the user without a working stop button.
+ */
+export type ComposerInterruptState = "idle" | "pending" | "failed" | "unconfirmed";
+
+export type ComposerInterruptEvent =
+  | "press"
+  | "request-failed"
+  | "request-accepted"
+  | "turn-settled"
+  | "unconfirmed"
+  | "reset";
+
+/**
+ * The interrupted-turn wedge (see KNOWN-ISSUES.md) means an accepted interrupt
+ * can never settle the session row. The watchdog restores the stop action so a
+ * server-side wedge cannot present as a dead button.
+ */
+export const COMPOSER_INTERRUPT_UNCONFIRMED_TIMEOUT_MS = 6000;
+
+export const nextComposerInterruptState = (
+  current: ComposerInterruptState,
+  event: ComposerInterruptEvent,
+): ComposerInterruptState => {
+  switch (event) {
+    case "press":
+      return "pending";
+    case "request-accepted":
+      return current === "pending" ? "pending" : current;
+    case "request-failed":
+      return "failed";
+    case "unconfirmed":
+      return current === "pending" ? "unconfirmed" : current;
+    case "turn-settled":
+    case "reset":
+      return "idle";
+  }
+};
+
+/** Repeated stop requests are dropped while one is in flight. */
+export const canRequestComposerInterrupt = (current: ComposerInterruptState): boolean =>
+  current !== "pending";
+
+export interface StopControlPresentation {
+  readonly dataState: ComposerInterruptState;
+  readonly disabled: boolean;
+  readonly ariaBusy: boolean;
+  readonly label: string;
+  readonly showTrace: boolean;
+  /** Politely announced; never the only carrier of the state. */
+  readonly status: string;
+}
+
+export const deriveStopControlPresentation = (
+  state: ComposerInterruptState,
+): StopControlPresentation => {
+  switch (state) {
+    case "pending":
+      return {
+        dataState: "pending",
+        disabled: true,
+        ariaBusy: true,
+        label: "Stopping generation",
+        showTrace: true,
+        status: "Stopping…",
+      };
+    case "failed":
+      return {
+        dataState: "failed",
+        disabled: false,
+        ariaBusy: false,
+        label: "Stop generation — previous stop failed, try again",
+        showTrace: false,
+        status: "Stop request failed. The stop button is available again.",
+      };
+    case "unconfirmed":
+      return {
+        dataState: "unconfirmed",
+        disabled: false,
+        ariaBusy: false,
+        label: "Stop generation — stop not confirmed, try again",
+        showTrace: false,
+        status: "Stop was not confirmed. The stop button is available again.",
+      };
+    case "idle":
+      return {
+        dataState: "idle",
+        disabled: false,
+        ariaBusy: false,
+        label: "Stop generation",
+        showTrace: false,
+        status: "",
+      };
+  }
+};
+
 interface ComposerPrimaryActionsProps {
   compact: boolean;
   pendingAction: PendingActionState | null;
   isRunning: boolean;
+  interruptState?: ComposerInterruptState;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -67,6 +169,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compact,
   pendingAction,
   isRunning,
+  interruptState = "idle",
   showPlanFollowUpPrompt,
   promptHasText,
   isSendBusy,
@@ -85,6 +188,27 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     ? { onPointerDown: preventPointerFocus }
     : undefined;
   const stageBackdropVariant = useSidebarStageBackdropVariant();
+
+  // Press acknowledgment is owned by React state, not `:active`. Binding to
+  // `:active` cancelled the ring at pointerup, so it could never coexist with
+  // the pending state. Latching on pointerdown makes the ack fire immediately
+  // and persist through the whole `pending` phase; it clears only when the
+  // stop machine settles back to `idle`.
+  const [stopPressed, setStopPressed] = useState(false);
+  useEffect(() => {
+    if (interruptState === "idle") {
+      setStopPressed(false);
+    }
+  }, [interruptState]);
+  const handleStopPointerDown = useCallback<PointerEventHandler<HTMLButtonElement>>(
+    (event) => {
+      if (preserveComposerFocusOnPointerDown) {
+        event.preventDefault();
+      }
+      setStopPressed(true);
+    },
+    [preserveComposerFocusOnPointerDown],
+  );
 
   if (pendingAction) {
     return (
@@ -118,6 +242,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         <Button
           type="submit"
           size="sm"
+          data-composer-pending-submit="true"
+          aria-busy={pendingAction.isResponding}
           className={cn("rounded-full", compact ? "px-3" : "px-4")}
           {...pointerFocusProps}
           disabled={
@@ -133,23 +259,48 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             questionIndex: pendingAction.questionIndex,
           })}
         </Button>
+        <span className="sr-only" role="status" aria-live="polite">
+          {pendingAction.isResponding ? "Submitting your answer…" : ""}
+        </span>
       </div>
     );
   }
 
   if (isRunning) {
+    const stop = deriveStopControlPresentation(interruptState);
     return (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-all duration-150 hover:bg-destructive hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none sm:h-8 sm:w-8"
-        {...pointerFocusProps}
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
+      <div className="relative flex items-center">
+        <button
+          type="button"
+          data-composer-stop-button="true"
+          data-stop-state={stop.dataState}
+          data-stop-pressed={stopPressed ? "true" : undefined}
+          className="composer-stop-button relative flex size-8 items-center justify-center rounded-full bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-all duration-150 enabled:cursor-pointer enabled:hover:scale-105 enabled:hover:bg-destructive active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8"
+          onPointerDown={handleStopPointerDown}
+          onClick={onInterrupt}
+          disabled={stop.disabled}
+          aria-busy={stop.ariaBusy}
+          aria-label={stop.label}
+        >
+          <span className="composer-stop-button__press-ring" aria-hidden="true" />
+          <svg
+            className="composer-stop-button__glyph"
+            width="12"
+            height="12"
+            viewBox="0 0 12 12"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <rect x="2" y="2" width="8" height="8" rx="1.5" />
+          </svg>
+          {stop.showTrace ? (
+            <span className="composer-stop-button__trace" aria-hidden="true" />
+          ) : null}
+        </button>
+        <span className="sr-only" role="status" aria-live="polite" data-composer-stop-status="true">
+          {stop.status}
+        </span>
+      </div>
     );
   }
 

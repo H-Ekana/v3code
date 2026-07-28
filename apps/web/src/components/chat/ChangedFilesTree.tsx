@@ -14,6 +14,7 @@ import {
   FolderIcon,
   FolderClosedIcon,
 } from "lucide-react";
+import { shouldRevealChangedFiles } from "~/lib/filesDiffsMotion";
 import { cn } from "~/lib/utils";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { PierreEntryIcon } from "./PierreEntryIcon";
@@ -53,6 +54,17 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
   const scopeSummary = useMemo(() => summarizeChangedFileScopes(files), [files]);
   const previewFiles = useMemo(() => selectChangedFilePreview(files), [files]);
   const compactPreviewVisible = showCompactPreview && !expanded;
+  // The reveal belongs to the act of expanding, not to being expanded. This
+  // stays false when an already-expanded card remounts — timeline
+  // virtualization and history restore therefore never replay it.
+  const [expansionRevealed, setExpansionRevealed] = useState(false);
+  const handleExpandedChange = useCallback(
+    (nextExpanded: boolean) => {
+      if (nextExpanded) setExpansionRevealed(true);
+      onExpandedChange(nextExpanded);
+    },
+    [onExpandedChange],
+  );
 
   return (
     <div
@@ -73,7 +85,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
           aria-expanded={expanded}
           data-scroll-anchor-ignore
           className="group flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1 py-1.5 text-left transition-[background-color,color] duration-200 hover:bg-primary/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
-          onClick={() => onExpandedChange(!expanded)}
+          onClick={() => handleExpandedChange(!expanded)}
         >
           <ChevronRightIcon
             aria-hidden="true"
@@ -154,6 +166,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
           files={files}
           allDirectoriesExpanded={allDirectoriesExpanded}
           resolvedTheme={resolvedTheme}
+          reveal={expansionRevealed}
           onOpenTurnDiff={onOpenTurnDiff}
         />
       ) : compactPreviewVisible ? (
@@ -190,7 +203,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
             <button
               type="button"
               className="rounded-md px-1.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => onExpandedChange(true)}
+              onClick={() => handleExpandedChange(true)}
             >
               Show all {files.length} files
             </button>
@@ -206,9 +219,18 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   files: ReadonlyArray<TurnDiffFileChange>;
   allDirectoriesExpanded: boolean;
   resolvedTheme: "light" | "dark";
+  /** Set only when the user just expanded this card; never on a remount. */
+  reveal?: boolean;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
 }) {
-  const { files, allDirectoriesExpanded, onOpenTurnDiff, resolvedTheme, turnId } = props;
+  const {
+    files,
+    allDirectoriesExpanded,
+    onOpenTurnDiff,
+    resolvedTheme,
+    reveal = false,
+    turnId,
+  } = props;
   const treeNodes = useMemo(() => buildTurnDiffTree(files), [files]);
   const directoryPathsKey = useMemo(
     () => collectDirectoryPaths(treeNodes).join("\u0000"),
@@ -219,14 +241,20 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   const [directoryExpansionState, setDirectoryExpansionState] = useState<{
     key: string;
     overrides: Record<string, boolean>;
+    revealPath: string | null;
   }>(() => ({
     key: expansionStateKey,
     overrides: {},
+    revealPath: null,
   }));
   const expandedDirectories =
     directoryExpansionState.key === expansionStateKey
       ? directoryExpansionState.overrides
       : EMPTY_DIRECTORY_OVERRIDES;
+  // At most one directory carries the reveal at a time: the one the user just
+  // opened. Nothing else in the tree animates when it opens.
+  const revealDirectoryPath =
+    directoryExpansionState.key === expansionStateKey ? directoryExpansionState.revealPath : null;
 
   const toggleDirectory = useCallback(
     (pathValue: string) => {
@@ -238,6 +266,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
             ...nextOverrides,
             [pathValue]: !(nextOverrides[pathValue] ?? allDirectoriesExpanded),
           },
+          revealPath: pathValue,
         };
       });
     },
@@ -279,7 +308,14 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
             )}
           </button>
           {isExpanded && (
-            <div className="space-y-0.5">
+            <div
+              className={cn(
+                "space-y-0.5",
+                node.path === revealDirectoryPath &&
+                  shouldRevealChangedFiles(node.children.length) &&
+                  "files-tree-reveal",
+              )}
+            >
               {node.children.map((childNode) => renderTreeNode(childNode, depth + 1))}
             </div>
           )}
@@ -316,7 +352,16 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
     );
   };
 
-  return <div className="space-y-0.5">{treeNodes.map((node) => renderTreeNode(node, 0))}</div>;
+  return (
+    <div
+      className={cn(
+        "space-y-0.5",
+        reveal && shouldRevealChangedFiles(files.length) && "files-tree-reveal",
+      )}
+    >
+      {treeNodes.map((node) => renderTreeNode(node, 0))}
+    </div>
+  );
 });
 
 function collectDirectoryPaths(nodes: ReadonlyArray<TurnDiffTreeNode>): string[] {

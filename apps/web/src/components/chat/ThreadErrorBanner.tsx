@@ -14,7 +14,13 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   if (!error) return null;
   return (
     <div className="mx-auto w-fit max-w-[min(48rem,calc(100%-2rem))] pt-3">
-      <Alert variant="error">
+      {/*
+       * Level 2 entrance. `Alert` renders `role="alert"` with the error text
+       * already inside it, and `motion-arrival` only animates opacity and a 4px
+       * translate — nothing is mounted late, hidden, or deferred, so the
+       * announcement fires immediately regardless of the animation.
+       */}
+      <Alert className="motion-arrival" variant="error">
         <CircleAlertIcon />
         <AlertDescription>
           <Tooltip>

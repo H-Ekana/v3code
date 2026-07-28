@@ -3,6 +3,7 @@ import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
+import { appendConversationReferencesToPrompt } from "../../conversationReference";
 
 vi.mock("@legendapp/list/react", async () => {
   const legendListTestId = "legend-list";
@@ -199,6 +200,7 @@ function buildProps() {
     followOutput: true,
     onIsAtEndChange: () => {},
     onManualNavigation: () => {},
+    onAddConversationReference: () => true,
   };
 }
 
@@ -226,6 +228,36 @@ function buildUserTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("renders sent conversation references as ordered context instead of raw prompt markup", () => {
+    const text = appendConversationReferencesToPrompt("Please address these.", [
+      {
+        id: "reference-1",
+        sourceMessageId: MessageId.make("assistant-message-1"),
+        sourceRole: "assistant",
+        selectedAt: "2026-07-28T12:00:00.000Z",
+        text: "First selected excerpt.",
+      },
+      {
+        id: "reference-2",
+        sourceMessageId: MessageId.make("assistant-message-2"),
+        sourceRole: "assistant",
+        selectedAt: "2026-07-28T12:01:00.000Z",
+        text: "Second selected excerpt.",
+      },
+    ]);
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[buildUserTimelineEntry(text)]} />,
+    );
+
+    expect(markup).toContain("Please address these.");
+    expect(markup).toContain("2 references attached");
+    expect(markup).toContain("<details");
+    expect(markup.indexOf("First selected excerpt.")).toBeLessThan(
+      markup.indexOf("Second selected excerpt."),
+    );
+    expect(markup).not.toContain("&lt;conversation_references&gt;");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 
@@ -701,5 +733,187 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
+    expect(markup).toContain('data-tool-status="failure"');
+    // Failure gets semantic destructive emphasis and no celebratory accent.
+    expect(markup).not.toContain("conversation-tool-flash");
+  });
+
+  it("gives the live edge only to the newest actively streaming message", () => {
+    const turnId = TurnId.make("turn-streaming");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        activeTurnInProgress
+        runningTurnId={turnId}
+        latestTurn={{
+          turnId,
+          state: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={[
+          {
+            id: "entry-assistant-settled",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: MessageId.make("message-settled"),
+              role: "assistant",
+              text: "Earlier commentary.",
+              turnId,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: false,
+            },
+          },
+          {
+            id: "entry-assistant-streaming",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: MessageId.make("message-streaming"),
+              role: "assistant",
+              text: "Still writing",
+              turnId,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    // Exactly one caret hook, on the streaming message — never on the settled
+    // one, and never as a whole-message illumination.
+    expect(markup.match(/conversation-live-caret/g)?.length).toBe(1);
+    expect(markup).toContain('data-live-response-edge="streaming"');
+  });
+
+  it("never plays the user-turn arrival for initial history", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[buildUserTimelineEntry("Hello"), buildUserTimelineEntry("Again")]}
+      />,
+    );
+
+    expect(markup).not.toContain("conversation-user-arrival");
+    expect(markup).not.toContain("data-user-turn-arrival");
+    expect(markup).not.toContain("conversation-live-caret");
+  });
+
+  it("shows a contained running trace on a tool call that is still in flight", () => {
+    const turnId = TurnId.make("turn-running-tool");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        activeTurnInProgress
+        runningTurnId={turnId}
+        latestTurn={{
+          turnId,
+          state: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={[
+          {
+            id: "entry-running-tool",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "work-running",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Bash",
+              tone: "tool",
+              turnId,
+              command: "pnpm test",
+              toolLifecycleStatus: "inProgress",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('data-tool-status="running"');
+    expect(markup).toContain("conversation-tool-running");
+    // No misleading completion mark while the call is still running.
+    expect(markup).not.toContain("lucide-check");
+    expect(markup).not.toContain("conversation-tool-flash");
+    // Details stay mounted and inert so disclosure has two states to animate
+    // between rather than a hard mount.
+    expect(markup).toContain("conversation-disclosure");
+    expect(markup).toContain('data-expanded="false"');
+  });
+
+  it("shows Stopping… in the active response state while a stop is pending", () => {
+    const working = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        activeTurnStartedAt={MESSAGE_CREATED_AT}
+        timelineEntries={[buildUserTimelineEntry("Do the thing")]}
+      />,
+    );
+    const stopping = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        activeTurnStartedAt={MESSAGE_CREATED_AT}
+        interruptState="pending"
+        timelineEntries={[buildUserTimelineEntry("Do the thing")]}
+      />,
+    );
+
+    expect(working).toContain('data-response-state="working"');
+    expect(working).toContain("Working for");
+    expect(working).not.toContain("Stopping");
+
+    expect(stopping).toContain('data-response-state="stopping"');
+    expect(stopping).toContain("Stopping…");
+    expect(stopping).toContain('aria-busy="true"');
+    expect(stopping).not.toContain("Working for");
+  });
+
+  it("settles an interrupted turn into an explicit labelled interrupted state", () => {
+    const turnId = TurnId.make("turn-interrupted");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        latestTurn={{
+          turnId,
+          state: "interrupted",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: MESSAGE_CREATED_AT,
+        }}
+        timelineEntries={[
+          {
+            id: "entry-assistant-interrupted",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: MessageId.make("message-interrupted"),
+              role: "assistant",
+              text: "Partial answer",
+              turnId,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: false,
+            },
+          },
+        ]}
+      />,
+    );
+
+    // Label plus stop icon: never color alone, and never a success check.
+    expect(markup).toContain('data-response-state="interrupted"');
+    expect(markup).toContain("Interrupted");
+    expect(markup).toContain("lucide-circle-stop");
+    expect(markup).toContain("motion-resting");
+    // An interruption is not a completion.
+    expect(markup).not.toContain("conversation-live-caret");
+    expect(markup).not.toContain("motion-completion");
   });
 });

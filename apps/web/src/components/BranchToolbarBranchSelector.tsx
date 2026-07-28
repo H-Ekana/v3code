@@ -21,6 +21,7 @@ import {
 } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { useConfirmedLabelCrossfade } from "./confirmedLabelCrossfade";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { readLocalApi } from "../localApi";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
@@ -49,6 +50,7 @@ import {
   resolveThreadPr,
 } from "./ThreadStatusIndicators";
 import { Button } from "./ui/button";
+import { Spinner } from "./ui/spinner";
 import { Switch } from "./ui/switch";
 import {
   Combobox,
@@ -590,6 +592,10 @@ export function BranchToolbarBranchSelector({
     effectiveEnvMode,
     resolvedActiveBranch,
   });
+  // Keyed on the canonical branch, not the optimistic one: the label text still
+  // updates instantly on selection, but the crossfade only runs once the
+  // checkout is confirmed.
+  const confirmedBranchLabelKey = useConfirmedLabelCrossfade(canonicalActiveBranch);
 
   // PR pill shown next to the branch selector when the active branch has one.
   const branchPr = resolveThreadPr({
@@ -731,18 +737,36 @@ export function BranchToolbarBranchSelector({
             pointer-events-none, so the trigger itself never sees right-clicks
             while refs are loading or a branch action is pending. */}
         <span
-          className="flex min-w-0"
+          className="relative flex min-w-0"
           onContextMenu={(event) => handleBranchContextMenu(event, resolvedActiveBranch)}
         >
           <ComboboxTrigger
+            aria-busy={isBranchActionPending}
             render={<Button variant="ghost" size="xs" />}
             className="min-w-0 max-w-full text-muted-foreground/80 hover:text-foreground/95"
             disabled={isInitialBranchesLoadPending || isBranchActionPending}
           >
-            <GitBranchIcon className="size-3 shrink-0 opacity-70" />
-            <span className="min-w-0 max-w-[240px] truncate">{triggerLabel}</span>
+            {/* Same-size glyph swap keeps the trigger's geometry fixed. */}
+            {isBranchActionPending ? (
+              <Spinner aria-hidden className="motion-arrival size-3 shrink-0 opacity-70" />
+            ) : (
+              <GitBranchIcon className="size-3 shrink-0 opacity-70" />
+            )}
+            <span
+              className={cn(
+                "min-w-0 max-w-[240px] truncate",
+                confirmedBranchLabelKey !== null && "feedback-label-crossfade",
+              )}
+              key={confirmedBranchLabelKey ?? "confirmed-initial"}
+            >
+              {triggerLabel}
+            </span>
             <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
           </ComboboxTrigger>
+          {/* Narrow route-progress rail for the pending context change. */}
+          {isBranchActionPending ? (
+            <span aria-hidden className="feedback-route-progress" data-slot="route-progress" />
+          ) : null}
         </span>
       </div>
       <ComboboxPopup align="end" side="top" className="flex w-80 flex-col">

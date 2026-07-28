@@ -126,6 +126,10 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     };
   }, [isMenuOpen]);
 
+  // Selection dispatches and the popup closes in the same tick. The picker's
+  // selection acknowledgement lives on the row inside `ModelPickerContent` and
+  // rides the popover's existing exit, so nothing here may be deferred to let a
+  // flourish finish — that would be perceived close latency.
   const handleInstanceModelChange = (instanceId: ProviderInstanceId, model: string) => {
     if (props.disabled) return;
     props.onInstanceModelChange(instanceId, model);

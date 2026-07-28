@@ -44,6 +44,20 @@ describe("ProviderStatusBanner", () => {
     expect(markup).toContain("absolute top-2 right-2");
   });
 
+  it("announces immediately: the alert role and the message are in the first render, not gated on the entrance animation", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderStatusBanner status={warningProvider()} onDismiss={() => {}} />,
+    );
+
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("Provider is temporarily degraded.");
+    expect(markup).toContain("Codex provider status");
+    // The Level 2 entrance is opacity + 4px on the already-announced element.
+    expect(markup).toContain("motion-arrival");
+    expect(markup).not.toContain("visibility:hidden");
+    expect(markup).not.toContain("display:none");
+  });
+
   it("labels error dismiss controls with the correct severity", () => {
     const markup = renderToStaticMarkup(
       <ProviderStatusBanner
