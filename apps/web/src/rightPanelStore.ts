@@ -1,11 +1,11 @@
 /**
  * Thread-scoped right-panel surface state.
  *
- * This is intentionally a shallow workspace model: it owns an ordered set of
- * surface descriptors and the active surface, while each feature continues to
- * own its durable resource state. Browser surfaces point at preview tab ids,
- * terminal surfaces point at terminal session ids, file surfaces point at
- * workspace paths, and diff/plan/files remain singleton surfaces.
+ * This owns the ordered surface descriptors plus a recursive split tree whose
+ * leaves are tab panes. Each feature still owns its durable resource state:
+ * browser surfaces point at preview tab ids, terminal surfaces at terminal
+ * session ids, file surfaces at workspace paths, and diff/plan/files remain
+ * singleton surfaces.
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -48,13 +48,69 @@ export type RightPanelSurface =
   | { id: "plan"; kind: "plan" }
   | { id: "agents"; kind: "agents" };
 
+export const RIGHT_PANEL_ROOT_PANE_ID = "pane:root";
+export const RIGHT_PANEL_WORKSPACE_DROP_ID = "workspace:root";
+export const RIGHT_PANEL_MAX_PANES = 4;
+
+export type RightPanelPaneId = string;
+export type RightPanelSplitAxis = "horizontal" | "vertical";
+export type RightPanelDropPosition = "top" | "right" | "bottom" | "left" | "center";
+
+export interface RightPanelPane {
+  id: RightPanelPaneId;
+  surfaceIds: string[];
+  activeSurfaceId: string | null;
+}
+
+export type RightPanelLayoutNode =
+  | { type: "pane"; paneId: RightPanelPaneId }
+  | {
+      type: "split";
+      id: string;
+      axis: RightPanelSplitAxis;
+      ratio: number;
+      first: RightPanelLayoutNode;
+      second: RightPanelLayoutNode;
+    };
+
+export interface RightPanelWorkspaceState {
+  layout: RightPanelLayoutNode;
+  panes: Record<RightPanelPaneId, RightPanelPane>;
+  focusedPaneId: RightPanelPaneId;
+}
+
+export type RightPanelDropIntent =
+  | {
+      type: "move";
+      targetPaneId: RightPanelPaneId;
+      destination: "pane" | "tab-strip";
+    }
+  | {
+      type: "split";
+      target: "pane";
+      targetPaneId: RightPanelPaneId;
+      position: Exclude<RightPanelDropPosition, "center">;
+    }
+  | {
+      type: "split";
+      target: "workspace";
+      position: Exclude<RightPanelDropPosition, "center">;
+    };
+
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 8;
+const RIGHT_PANEL_STORAGE_VERSION = 9;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  /**
+   * Split workspace state is materialized lazily. Old/single-pane state stays
+   * compact and migrates losslessly; the first split writes these three fields.
+   */
+  layout?: RightPanelLayoutNode;
+  panes?: Record<RightPanelPaneId, RightPanelPane>;
+  focusedPaneId?: RightPanelPaneId;
 }
 
 interface RightPanelStoreState {
@@ -76,6 +132,15 @@ interface RightPanelStoreState {
   closeOtherSurfaces: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurfacesToRight: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeAllSurfaces: (ref: ScopedThreadRef) => void;
+  splitSurface: (
+    ref: ScopedThreadRef,
+    surfaceId: string,
+    targetPaneId: RightPanelPaneId,
+    position: Exclude<RightPanelDropPosition, "center">,
+  ) => void;
+  moveSurface: (ref: ScopedThreadRef, surfaceId: string, targetPaneId: RightPanelPaneId) => void;
+  focusPane: (ref: ScopedThreadRef, paneId: RightPanelPaneId) => void;
+  setSplitRatio: (ref: ScopedThreadRef, splitId: string, ratio: number) => void;
   reconcileBrowserSurfaces: (ref: ScopedThreadRef, tabIds: readonly string[]) => void;
   reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   show: (ref: ScopedThreadRef) => void;
@@ -90,6 +155,397 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
   activeSurfaceId: null,
   surfaces: [],
 };
+
+let rightPanelLayoutId = 0;
+
+function nextLayoutId(prefix: "pane" | "split"): string {
+  rightPanelLayoutId += 1;
+  return `${prefix}:${Date.now().toString(36)}:${rightPanelLayoutId.toString(36)}`;
+}
+
+type RightPanelLayoutIdFactory = (prefix: "pane" | "split") => string;
+
+function clampSplitRatio(ratio: number): number {
+  if (!Number.isFinite(ratio)) return 0.5;
+  return Math.max(0.15, Math.min(0.85, ratio));
+}
+
+function paneNode(paneId: RightPanelPaneId): RightPanelLayoutNode {
+  return { type: "pane", paneId };
+}
+
+function collectLayoutPaneIds(node: RightPanelLayoutNode): RightPanelPaneId[] {
+  if (node.type === "pane") return [node.paneId];
+  return [...collectLayoutPaneIds(node.first), ...collectLayoutPaneIds(node.second)];
+}
+
+function mapLayoutNode(
+  node: RightPanelLayoutNode,
+  mapper: (node: RightPanelLayoutNode) => RightPanelLayoutNode,
+): RightPanelLayoutNode {
+  if (node.type === "pane") return mapper(node);
+  return mapper({
+    ...node,
+    ratio: clampSplitRatio(node.ratio),
+    first: mapLayoutNode(node.first, mapper),
+    second: mapLayoutNode(node.second, mapper),
+  });
+}
+
+function replacePaneNode(
+  node: RightPanelLayoutNode,
+  paneId: RightPanelPaneId,
+  replacement: RightPanelLayoutNode,
+): RightPanelLayoutNode {
+  return mapLayoutNode(node, (candidate) =>
+    candidate.type === "pane" && candidate.paneId === paneId ? replacement : candidate,
+  );
+}
+
+function removePaneNode(
+  node: RightPanelLayoutNode,
+  paneId: RightPanelPaneId,
+): RightPanelLayoutNode | null {
+  if (node.type === "pane") return node.paneId === paneId ? null : node;
+  const first = removePaneNode(node.first, paneId);
+  const second = removePaneNode(node.second, paneId);
+  if (!first) return second;
+  if (!second) return first;
+  return { ...node, ratio: clampSplitRatio(node.ratio), first, second };
+}
+
+function updateSplitRatio(
+  node: RightPanelLayoutNode,
+  splitId: string,
+  ratio: number,
+): RightPanelLayoutNode {
+  if (node.type === "pane") return node;
+  return {
+    ...node,
+    ratio: node.id === splitId ? clampSplitRatio(ratio) : clampSplitRatio(node.ratio),
+    first: updateSplitRatio(node.first, splitId, ratio),
+    second: updateSplitRatio(node.second, splitId, ratio),
+  };
+}
+
+function paneContainingSurface(
+  panes: Readonly<Record<RightPanelPaneId, RightPanelPane>>,
+  surfaceId: string | null,
+): RightPanelPaneId | null {
+  if (!surfaceId) return null;
+  return Object.values(panes).find((pane) => pane.surfaceIds.includes(surfaceId))?.id ?? null;
+}
+
+export function selectThreadRightPanelWorkspace(
+  threadState: ThreadRightPanelState,
+): RightPanelWorkspaceState {
+  if (threadState.layout && threadState.panes && threadState.focusedPaneId) {
+    return {
+      layout: threadState.layout,
+      panes: threadState.panes,
+      focusedPaneId: threadState.focusedPaneId,
+    };
+  }
+  return {
+    layout: paneNode(RIGHT_PANEL_ROOT_PANE_ID),
+    panes: {
+      [RIGHT_PANEL_ROOT_PANE_ID]: {
+        id: RIGHT_PANEL_ROOT_PANE_ID,
+        surfaceIds: threadState.surfaces.map((surface) => surface.id),
+        activeSurfaceId: threadState.activeSurfaceId,
+      },
+    },
+    focusedPaneId: RIGHT_PANEL_ROOT_PANE_ID,
+  };
+}
+
+function materializeWorkspace(threadState: ThreadRightPanelState): ThreadRightPanelState {
+  const workspace = selectThreadRightPanelWorkspace(threadState);
+  return {
+    ...threadState,
+    layout: workspace.layout,
+    panes: workspace.panes,
+    focusedPaneId: workspace.focusedPaneId,
+  };
+}
+
+function reconcileMaterializedWorkspace(threadState: ThreadRightPanelState): ThreadRightPanelState {
+  if (!threadState.layout || !threadState.panes || !threadState.focusedPaneId) {
+    return threadState;
+  }
+
+  const validSurfaceIds = new Set<string>(threadState.surfaces.map((surface) => surface.id));
+  const layoutPaneIds = collectLayoutPaneIds(threadState.layout);
+  const seenSurfaceIds = new Set<string>();
+  const panes: Record<RightPanelPaneId, RightPanelPane> = {};
+
+  for (const paneId of layoutPaneIds.slice(0, RIGHT_PANEL_MAX_PANES)) {
+    const source = threadState.panes[paneId];
+    const surfaceIds = (source?.surfaceIds ?? []).filter((surfaceId) => {
+      if (!validSurfaceIds.has(surfaceId) || seenSurfaceIds.has(surfaceId)) return false;
+      seenSurfaceIds.add(surfaceId);
+      return true;
+    });
+    panes[paneId] = {
+      id: paneId,
+      surfaceIds,
+      activeSurfaceId:
+        source?.activeSurfaceId && surfaceIds.includes(source.activeSurfaceId)
+          ? source.activeSurfaceId
+          : (surfaceIds[0] ?? null),
+    };
+  }
+
+  let layout = threadState.layout;
+  for (const paneId of layoutPaneIds) {
+    if (!panes[paneId] || panes[paneId].surfaceIds.length === 0) {
+      if (Object.keys(panes).filter((id) => panes[id]!.surfaceIds.length > 0).length > 0) {
+        layout = removePaneNode(layout, paneId) ?? paneNode(RIGHT_PANEL_ROOT_PANE_ID);
+        delete panes[paneId];
+      }
+    }
+  }
+
+  let remainingPaneIds = collectLayoutPaneIds(layout).filter((paneId) => panes[paneId]);
+  if (remainingPaneIds.length === 0) {
+    panes[RIGHT_PANEL_ROOT_PANE_ID] = {
+      id: RIGHT_PANEL_ROOT_PANE_ID,
+      surfaceIds: [],
+      activeSurfaceId: null,
+    };
+    layout = paneNode(RIGHT_PANEL_ROOT_PANE_ID);
+    remainingPaneIds = [RIGHT_PANEL_ROOT_PANE_ID];
+  }
+
+  const focusedPaneId = panes[threadState.focusedPaneId]
+    ? threadState.focusedPaneId
+    : (paneContainingSurface(panes, threadState.activeSurfaceId) ?? remainingPaneIds[0]!);
+
+  for (const surface of threadState.surfaces) {
+    if (seenSurfaceIds.has(surface.id)) continue;
+    panes[focusedPaneId]!.surfaceIds.push(surface.id);
+    seenSurfaceIds.add(surface.id);
+  }
+
+  const globalActivePaneId = paneContainingSurface(panes, threadState.activeSurfaceId);
+  const resolvedFocusedPaneId = globalActivePaneId ?? focusedPaneId;
+  const focusedPane = panes[resolvedFocusedPaneId]!;
+  const activeSurfaceId =
+    threadState.activeSurfaceId && focusedPane.surfaceIds.includes(threadState.activeSurfaceId)
+      ? threadState.activeSurfaceId
+      : focusedPane.activeSurfaceId;
+  focusedPane.activeSurfaceId = activeSurfaceId;
+
+  return {
+    ...threadState,
+    activeSurfaceId,
+    layout,
+    panes,
+    focusedPaneId: resolvedFocusedPaneId,
+  };
+}
+
+function splitWorkspaceSurface(
+  threadState: ThreadRightPanelState,
+  surfaceId: string,
+  targetPaneId: RightPanelPaneId,
+  position: Exclude<RightPanelDropPosition, "center">,
+  createLayoutId: RightPanelLayoutIdFactory,
+): ThreadRightPanelState {
+  const materialized = materializeWorkspace(threadState);
+  const layout = materialized.layout!;
+  const panes = Object.fromEntries(
+    Object.entries(materialized.panes!).map(([paneId, pane]) => [
+      paneId,
+      { ...pane, surfaceIds: [...pane.surfaceIds] },
+    ]),
+  );
+  const sourcePaneId = paneContainingSurface(panes, surfaceId);
+  const targetPane = panes[targetPaneId];
+  if (!sourcePaneId || !targetPane) return threadState;
+
+  const sourcePane = panes[sourcePaneId]!;
+  if (sourcePaneId === targetPaneId && sourcePane.surfaceIds.length <= 1) {
+    return threadState;
+  }
+  const projectedPaneCount = Object.keys(panes).length + (sourcePane.surfaceIds.length > 1 ? 1 : 0);
+  if (projectedPaneCount > RIGHT_PANEL_MAX_PANES) return threadState;
+
+  sourcePane.surfaceIds = sourcePane.surfaceIds.filter((id) => id !== surfaceId);
+  if (sourcePane.activeSurfaceId === surfaceId) {
+    sourcePane.activeSurfaceId = sourcePane.surfaceIds[0] ?? null;
+  }
+
+  let nextLayout = layout;
+  if (sourcePane.surfaceIds.length === 0) {
+    delete panes[sourcePaneId];
+    nextLayout = removePaneNode(nextLayout, sourcePaneId) ?? paneNode(targetPaneId);
+  }
+
+  if (!panes[targetPaneId]) return threadState;
+  const newPaneId = createLayoutId("pane");
+  const newPane: RightPanelPane = {
+    id: newPaneId,
+    surfaceIds: [surfaceId],
+    activeSurfaceId: surfaceId,
+  };
+  panes[newPaneId] = newPane;
+
+  const newPaneNode = paneNode(newPaneId);
+  const targetNode = paneNode(targetPaneId);
+  const placeNewFirst = position === "top" || position === "left";
+  const splitNode: RightPanelLayoutNode = {
+    type: "split",
+    id: createLayoutId("split"),
+    axis: position === "left" || position === "right" ? "horizontal" : "vertical",
+    ratio: 0.5,
+    first: placeNewFirst ? newPaneNode : targetNode,
+    second: placeNewFirst ? targetNode : newPaneNode,
+  };
+
+  return reconcileMaterializedWorkspace({
+    ...materialized,
+    isOpen: true,
+    activeSurfaceId: surfaceId,
+    layout: replacePaneNode(nextLayout, targetPaneId, splitNode),
+    panes,
+    focusedPaneId: newPaneId,
+  });
+}
+
+function splitWorkspaceAtRoot(
+  threadState: ThreadRightPanelState,
+  surfaceId: string,
+  position: Exclude<RightPanelDropPosition, "center">,
+  createLayoutId: RightPanelLayoutIdFactory,
+): ThreadRightPanelState {
+  const materialized = materializeWorkspace(threadState);
+  const panes = Object.fromEntries(
+    Object.entries(materialized.panes!).map(([paneId, pane]) => [
+      paneId,
+      { ...pane, surfaceIds: [...pane.surfaceIds] },
+    ]),
+  );
+  const sourcePaneId = paneContainingSurface(panes, surfaceId);
+  if (!sourcePaneId || materialized.surfaces.length <= 1) return threadState;
+
+  const sourcePane = panes[sourcePaneId]!;
+  const projectedPaneCount = Object.keys(panes).length + (sourcePane.surfaceIds.length > 1 ? 1 : 0);
+  if (projectedPaneCount > RIGHT_PANEL_MAX_PANES) return threadState;
+
+  sourcePane.surfaceIds = sourcePane.surfaceIds.filter((id) => id !== surfaceId);
+  if (sourcePane.activeSurfaceId === surfaceId) {
+    sourcePane.activeSurfaceId = sourcePane.surfaceIds[0] ?? null;
+  }
+
+  let remainingLayout = materialized.layout!;
+  if (sourcePane.surfaceIds.length === 0) {
+    delete panes[sourcePaneId];
+    const collapsedLayout = removePaneNode(remainingLayout, sourcePaneId);
+    if (!collapsedLayout) return threadState;
+    remainingLayout = collapsedLayout;
+  }
+
+  const newPaneId = createLayoutId("pane");
+  panes[newPaneId] = {
+    id: newPaneId,
+    surfaceIds: [surfaceId],
+    activeSurfaceId: surfaceId,
+  };
+  const placeNewFirst = position === "top" || position === "left";
+  const splitNode: RightPanelLayoutNode = {
+    type: "split",
+    id: createLayoutId("split"),
+    axis: position === "left" || position === "right" ? "horizontal" : "vertical",
+    ratio: 0.5,
+    first: placeNewFirst ? paneNode(newPaneId) : remainingLayout,
+    second: placeNewFirst ? remainingLayout : paneNode(newPaneId),
+  };
+
+  return reconcileMaterializedWorkspace({
+    ...materialized,
+    isOpen: true,
+    activeSurfaceId: surfaceId,
+    layout: splitNode,
+    panes,
+    focusedPaneId: newPaneId,
+  });
+}
+
+function moveWorkspaceSurface(
+  threadState: ThreadRightPanelState,
+  surfaceId: string,
+  targetPaneId: RightPanelPaneId,
+): ThreadRightPanelState {
+  const materialized = materializeWorkspace(threadState);
+  const panes = Object.fromEntries(
+    Object.entries(materialized.panes!).map(([paneId, pane]) => [
+      paneId,
+      { ...pane, surfaceIds: [...pane.surfaceIds] },
+    ]),
+  );
+  const sourcePaneId = paneContainingSurface(panes, surfaceId);
+  const targetPane = panes[targetPaneId];
+  if (!sourcePaneId || !targetPane) return threadState;
+
+  if (sourcePaneId === targetPaneId) {
+    if (materialized.activeSurfaceId === surfaceId && materialized.focusedPaneId === targetPaneId) {
+      return threadState;
+    }
+    targetPane.activeSurfaceId = surfaceId;
+    return {
+      ...materialized,
+      isOpen: true,
+      activeSurfaceId: surfaceId,
+      panes,
+      focusedPaneId: targetPaneId,
+    };
+  }
+
+  const sourcePane = panes[sourcePaneId]!;
+  sourcePane.surfaceIds = sourcePane.surfaceIds.filter((id) => id !== surfaceId);
+  if (sourcePane.activeSurfaceId === surfaceId) {
+    sourcePane.activeSurfaceId = sourcePane.surfaceIds[0] ?? null;
+  }
+  targetPane.surfaceIds = [...targetPane.surfaceIds.filter((id) => id !== surfaceId), surfaceId];
+  targetPane.activeSurfaceId = surfaceId;
+
+  let layout = materialized.layout!;
+  if (sourcePane.surfaceIds.length === 0) {
+    delete panes[sourcePaneId];
+    layout = removePaneNode(layout, sourcePaneId) ?? paneNode(targetPaneId);
+  }
+
+  return reconcileMaterializedWorkspace({
+    ...materialized,
+    isOpen: true,
+    activeSurfaceId: surfaceId,
+    layout,
+    panes,
+    focusedPaneId: targetPaneId,
+  });
+}
+
+export function projectRightPanelDrop(
+  threadState: ThreadRightPanelState,
+  surfaceId: string,
+  intent: RightPanelDropIntent,
+  createLayoutId: RightPanelLayoutIdFactory = nextLayoutId,
+): ThreadRightPanelState {
+  if (intent.type === "move") {
+    return moveWorkspaceSurface(threadState, surfaceId, intent.targetPaneId);
+  }
+  if (intent.target === "workspace") {
+    return splitWorkspaceAtRoot(threadState, surfaceId, intent.position, createLayoutId);
+  }
+  return splitWorkspaceSurface(
+    threadState,
+    surfaceId,
+    intent.targetPaneId,
+    intent.position,
+    createLayoutId,
+  );
+}
 
 const singletonSurface = (
   kind: Exclude<RightPanelKind, "file" | "preview" | "terminal">,
@@ -136,6 +592,7 @@ const upsertSurface = (
   surface: RightPanelSurface,
   activate = true,
 ): ThreadRightPanelState => ({
+  ...current,
   isOpen: true,
   surfaces: current.surfaces.some((entry) => entry.id === surface.id)
     ? current.surfaces
@@ -149,7 +606,8 @@ const updateThread = (
   updater: (current: ThreadRightPanelState) => ThreadRightPanelState,
 ): Record<string, ThreadRightPanelState> => {
   const current = byThreadKey[threadKey] ?? EMPTY_THREAD_STATE;
-  const next = updater(current);
+  const updated = updater(current);
+  const next = current.layout || updated.layout ? reconcileMaterializedWorkspace(updated) : updated;
   if (!next.isOpen && next.activeSurfaceId === null && next.surfaces.length === 0) {
     if (!(threadKey in byThreadKey)) return byThreadKey;
     const { [threadKey]: _removed, ...rest } = byThreadKey;
@@ -287,6 +745,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               (existing?.revealRequestId ?? 0) + 1,
             );
             return {
+              ...current,
               isOpen: true,
               activeSurfaceId: surface.id,
               surfaces: existing
@@ -438,6 +897,55 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               ? current
               : { ...current, isOpen: false, surfaces: [], activeSurfaceId: null },
           ),
+        })),
+      splitSurface: (ref, surfaceId, targetPaneId, position) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            projectRightPanelDrop(
+              current,
+              surfaceId,
+              targetPaneId === RIGHT_PANEL_WORKSPACE_DROP_ID
+                ? { type: "split", target: "workspace", position }
+                : {
+                    type: "split",
+                    target: "pane",
+                    targetPaneId,
+                    position,
+                  },
+            ),
+          ),
+        })),
+      moveSurface: (ref, surfaceId, targetPaneId) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            projectRightPanelDrop(current, surfaceId, {
+              type: "move",
+              targetPaneId,
+              destination: "pane",
+            }),
+          ),
+        })),
+      focusPane: (ref, paneId) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            const materialized = materializeWorkspace(current);
+            const pane = materialized.panes?.[paneId];
+            if (!pane) return current;
+            return {
+              ...materialized,
+              isOpen: true,
+              focusedPaneId: paneId,
+              activeSurfaceId: pane.activeSurfaceId,
+            };
+          }),
+        })),
+      setSplitRatio: (ref, splitId, ratio) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            if (!current.layout) return current;
+            const layout = updateSplitRatio(current.layout, splitId, ratio);
+            return layout === current.layout ? current : { ...current, layout };
+          }),
         })),
       reconcileBrowserSurfaces: (ref, tabIds) =>
         set((state) => ({

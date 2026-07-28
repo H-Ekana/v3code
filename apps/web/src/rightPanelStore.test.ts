@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   migratePersistedRightPanelState,
+  RIGHT_PANEL_MAX_PANES,
+  RIGHT_PANEL_WORKSPACE_DROP_ID,
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
+  selectThreadRightPanelWorkspace,
   selectThreadRightPanelState,
   useRightPanelStore,
 } from "./rightPanelStore";
@@ -445,5 +448,115 @@ describe("rightPanelStore", () => {
         (surface) => surface.id,
       ),
     ).toEqual(["terminal:term-1", "browser:tab-b", "browser:tab-c"]);
+  });
+
+  it("builds mixed recursive splits for three simultaneously visible surfaces", () => {
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    useRightPanelStore.getState().openTerminal(refA, "term-2");
+    useRightPanelStore.getState().openTerminal(refA, "term-3");
+
+    useRightPanelStore.getState().splitSurface(refA, "terminal:term-2", "pane:root", "right");
+    useRightPanelStore.getState().splitSurface(refA, "terminal:term-3", "pane:root", "bottom");
+
+    const workspace = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    expect(Object.keys(workspace.panes)).toHaveLength(3);
+    expect(workspace.layout.type).toBe("split");
+    if (workspace.layout.type !== "split") return;
+    expect(workspace.layout.axis).toBe("horizontal");
+    expect(workspace.layout.first.type).toBe("split");
+    if (workspace.layout.first.type !== "split") return;
+    expect(workspace.layout.first.axis).toBe("vertical");
+  });
+
+  it("wraps the collapsed remainder at the workspace edge for full-span rearrangement", () => {
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    useRightPanelStore.getState().openTerminal(refA, "term-2");
+    useRightPanelStore.getState().splitSurface(refA, "terminal:term-2", "pane:root", "bottom");
+
+    useRightPanelStore
+      .getState()
+      .splitSurface(refA, "terminal:term-2", RIGHT_PANEL_WORKSPACE_DROP_ID, "right");
+
+    const workspace = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    expect(workspace.layout.type).toBe("split");
+    if (workspace.layout.type !== "split") return;
+    expect(workspace.layout.axis).toBe("horizontal");
+    expect(workspace.layout.first.type).toBe("pane");
+    expect(workspace.layout.second.type).toBe("pane");
+    if (workspace.layout.first.type !== "pane") return;
+    if (workspace.layout.second.type !== "pane") return;
+    expect(workspace.panes[workspace.layout.first.paneId]?.surfaceIds).toEqual(["terminal:term-1"]);
+    expect(workspace.panes[workspace.layout.second.paneId]?.surfaceIds).toEqual([
+      "terminal:term-2",
+    ]);
+  });
+
+  it("collapses an empty split branch when its last surface moves into another pane", () => {
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    useRightPanelStore.getState().openTerminal(refA, "term-2");
+    useRightPanelStore.getState().splitSurface(refA, "terminal:term-2", "pane:root", "right");
+
+    const splitWorkspace = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    const otherPaneId = Object.keys(splitWorkspace.panes).find((paneId) => paneId !== "pane:root");
+    expect(otherPaneId).toBeDefined();
+    if (!otherPaneId) return;
+
+    useRightPanelStore.getState().moveSurface(refA, "terminal:term-2", "pane:root");
+
+    const collapsed = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    expect(collapsed.layout).toEqual({ type: "pane", paneId: "pane:root" });
+    expect(Object.keys(collapsed.panes)).toEqual(["pane:root"]);
+    expect(collapsed.panes["pane:root"]?.surfaceIds).toEqual([
+      "terminal:term-1",
+      "terminal:term-2",
+    ]);
+  });
+
+  it("caps recursive workspaces at the supported pane count", () => {
+    for (let index = 1; index <= RIGHT_PANEL_MAX_PANES + 1; index += 1) {
+      useRightPanelStore.getState().openTerminal(refA, `term-${index}`);
+    }
+    for (let index = 2; index <= RIGHT_PANEL_MAX_PANES + 1; index += 1) {
+      useRightPanelStore
+        .getState()
+        .splitSurface(refA, `terminal:term-${index}`, "pane:root", "bottom");
+    }
+
+    const workspace = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    expect(Object.keys(workspace.panes)).toHaveLength(RIGHT_PANEL_MAX_PANES);
+    expect(workspace.panes["pane:root"]?.surfaceIds).toContain(
+      `terminal:term-${RIGHT_PANEL_MAX_PANES + 1}`,
+    );
+  });
+
+  it("clamps persisted splitter ratios to keep every pane reachable", () => {
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    useRightPanelStore.getState().openTerminal(refA, "term-2");
+    useRightPanelStore.getState().splitSurface(refA, "terminal:term-2", "pane:root", "right");
+    const workspace = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    expect(workspace.layout.type).toBe("split");
+    if (workspace.layout.type !== "split") return;
+
+    useRightPanelStore.getState().setSplitRatio(refA, workspace.layout.id, 0.99);
+
+    const resized = selectThreadRightPanelWorkspace(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA),
+    );
+    expect(resized.layout.type).toBe("split");
+    if (resized.layout.type === "split") {
+      expect(resized.layout.ratio).toBe(0.85);
+    }
   });
 });
