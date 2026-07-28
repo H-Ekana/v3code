@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vite-plus/test";
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   ProviderDriverKind,
   type ProviderOptionDescriptor,
@@ -6,6 +9,7 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import {
+  deriveComposerReasoningTier,
   getComposerPromptInjectionState,
   getComposerProviderState,
   renderProviderTraitsMenuContent,
@@ -55,9 +59,11 @@ function selections(
   return entries.map(([id, value]) => ({ id, value }));
 }
 
-const ULTRATHINK_FRAME_CLASSES = {
-  composerFrameClassName: "ultrathink-frame",
-  composerSurfaceClassName: "shadow-[0_0_0_1px_rgba(255,255,255,0.07)_inset]",
+// The ultrathink tier surfaces the reasoning-tier attribute plus the shared
+// illuminated provider glyph. The frame treatment itself lives entirely in
+// `styles/special-states.css`, keyed on `data-reasoning-tier`.
+const ULTRATHINK_REASONING_STATE = {
+  reasoningTier: "ultrathink",
   modelPickerIconClassName: "ultrathink-chroma",
 } as const;
 
@@ -180,7 +186,7 @@ describe("getComposerProviderState", () => {
     });
   });
 
-  it("adds ultrathink class names when the prompt triggers a promptInjectedValues descriptor", () => {
+  it("surfaces the ultrathink tier when the prompt triggers a promptInjectedValues descriptor", () => {
     const state = getComposerProviderState({
       provider: PROVIDER,
       model: MODEL,
@@ -205,11 +211,38 @@ describe("getComposerProviderState", () => {
       provider: PROVIDER,
       promptEffort: "medium",
       modelOptionsForDispatch: selections(["effort", "medium"]),
-      ...ULTRATHINK_FRAME_CLASSES,
+      ...ULTRATHINK_REASONING_STATE,
     });
   });
 
-  it("does not add ultrathink class names when the descriptor has no promptInjectedValues", () => {
+  it("styles ultrathink through the rim alone, never an inline surface shadow", () => {
+    const state = getComposerProviderState({
+      provider: PROVIDER,
+      model: MODEL,
+      models: modelWith([
+        selectDescriptor(
+          "effort",
+          [
+            { id: "high", label: "High", isDefault: true },
+            { id: "ultrathink", label: "Ultrathink" },
+          ],
+          ["ultrathink"],
+        ),
+      ]),
+      promptInjectionState: getComposerPromptInjectionState("Ultrathink:\nGo"),
+      modelOptions: undefined,
+    });
+
+    // The inner composer surface also carries the drag-over `shadow-[…]`
+    // utility, and only one `box-shadow` can win. Emitting a second shadow here
+    // silently dropped one of them, so the state must not claim that property.
+    expect(state).not.toHaveProperty("composerSurfaceClassName");
+    // Both remaining classes are owned by `styles/special-states.css`; no
+    // inline color literals leak into the returned state.
+    expect(JSON.stringify(state)).not.toMatch(/rgba?\(|#[0-9a-fA-F]{3}/);
+  });
+
+  it("stays untiered when the descriptor has no promptInjectedValues", () => {
     const state = getComposerProviderState({
       provider: PROVIDER,
       model: MODEL,
@@ -222,9 +255,112 @@ describe("getComposerProviderState", () => {
       modelOptions: undefined,
     });
 
-    expect(state).not.toHaveProperty("composerFrameClassName");
+    expect(state).not.toHaveProperty("reasoningTier");
     expect(state).not.toHaveProperty("composerSurfaceClassName");
     expect(state).not.toHaveProperty("modelPickerIconClassName");
+  });
+
+  it("derives each ladder tier from the selected effort value", () => {
+    const tierFor = (effortId: string): string | undefined =>
+      getComposerProviderState({
+        provider: PROVIDER,
+        model: MODEL,
+        models: modelWith([
+          selectDescriptor("effort", [
+            { id: "high", label: "High", isDefault: true },
+            { id: effortId, label: effortId },
+          ]),
+        ]),
+        modelOptions: selections(["effort", effortId]),
+      }).reasoningTier;
+
+    expect(tierFor("xhigh")).toBe("xhigh");
+    expect(tierFor("max")).toBe("max");
+    // Amended 2026-07-28: Codex "ultra" is the ultracode flood tier, not max.
+    expect(tierFor("ultra")).toBe("ultracode");
+    expect(tierFor("ultracode")).toBe("ultracode");
+    expect(tierFor("ultrathink")).toBe("ultrathink");
+    expect(tierFor("high")).toBeUndefined();
+    expect(tierFor("medium")).toBeUndefined();
+  });
+});
+
+describe("deriveComposerReasoningTier", () => {
+  it("maps every extreme effort onto a tier and everything else onto none", () => {
+    const tier = (effortValue: string | null, ultrathinkActive = false) =>
+      deriveComposerReasoningTier({ effortValue, ultrathinkActive });
+
+    // Prompt injection wins even while a lesser value is selected.
+    expect(tier("medium", true)).toBe("ultrathink");
+    // Directly selected ultrathink resolves the same way.
+    expect(tier("ultrathink")).toBe("ultrathink");
+    expect(tier("ultracode")).toBe("ultracode");
+    expect(tier("max")).toBe("max");
+    // Codex "ultra" maps onto the ultracode flood tier (amended 2026-07-28).
+    expect(tier("ultra")).toBe("ultracode");
+    expect(tier("xhigh")).toBe("xhigh");
+    expect(tier("high")).toBeUndefined();
+    expect(tier(null)).toBeUndefined();
+  });
+});
+
+describe("data-reasoning-tier application (client render)", () => {
+  let container: HTMLDivElement;
+  let root: ReturnType<typeof createRoot>;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  // Mirrors ChatComposer's frame attribute expression against the real DOM, so
+  // the derivation and the attribute wiring are verified together — no
+  // renderToStaticMarkup string matching.
+  function ReasoningFrame({ effortId }: { effortId: string }) {
+    const state = getComposerProviderState({
+      provider: PROVIDER,
+      model: MODEL,
+      models: modelWith([
+        selectDescriptor("effort", [
+          { id: "high", label: "High", isDefault: true },
+          { id: effortId, label: effortId },
+        ]),
+      ]),
+      modelOptions: selections(["effort", effortId]),
+    });
+    return (
+      <div
+        data-testid="frame"
+        {...(state.reasoningTier ? { "data-reasoning-tier": state.reasoningTier } : {})}
+      />
+    );
+  }
+
+  function frame(): HTMLElement {
+    const node = container.querySelector<HTMLElement>("[data-testid='frame']");
+    if (!node) throw new Error("frame not rendered");
+    return node;
+  }
+
+  it("stamps the tier attribute onto the frame for an extreme effort", () => {
+    act(() => root.render(<ReasoningFrame effortId="ultracode" />));
+    expect(frame().getAttribute("data-reasoning-tier")).toBe("ultracode");
+  });
+
+  it("stamps ultrathink for the top tier", () => {
+    act(() => root.render(<ReasoningFrame effortId="ultrathink" />));
+    expect(frame().getAttribute("data-reasoning-tier")).toBe("ultrathink");
+  });
+
+  it("leaves the attribute off entirely for an ordinary effort", () => {
+    act(() => root.render(<ReasoningFrame effortId="high" />));
+    expect(frame().hasAttribute("data-reasoning-tier")).toBe(false);
   });
 });
 

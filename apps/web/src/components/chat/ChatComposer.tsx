@@ -83,6 +83,7 @@ import { type ElementContextDraft } from "../../lib/elementContext";
 import { ComposerPendingElementContexts } from "./ComposerPendingElementContexts";
 import { ComposerPendingReviewComments } from "./ComposerPendingReviewComments";
 import { ComposerPreviewAnnotationCards } from "./ComposerPreviewAnnotationCards";
+import { ComposerConversationReferences } from "./ComposerConversationReferences";
 import {
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
@@ -91,9 +92,16 @@ import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../Compos
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
-import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
+import {
+  CompactComposerControlsMenu,
+  RuntimeModeGlyph,
+  runtimeModeConfig,
+  runtimeModeOptions,
+  useRuntimeModeAutoGlint,
+} from "./CompactComposerControlsMenu";
 import {
   COMPOSER_SEND_CELEBRATION_DURATION_MS,
+  type ComposerInterruptState,
   ComposerPrimaryActions,
 } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
@@ -102,6 +110,7 @@ import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
+  type ComposerReasoningTier,
   getComposerPromptInjectionState,
   getComposerProviderState,
   renderProviderTraitsMenuContent,
@@ -174,18 +183,7 @@ import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
-import {
-  BotIcon,
-  CircleAlertIcon,
-  ListTodoIcon,
-  PencilRulerIcon,
-  type LucideIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  SparklesIcon,
-  XIcon,
-} from "lucide-react";
+import { BotIcon, CircleAlertIcon, ListTodoIcon, PencilRulerIcon, XIcon } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderDisplayName, getProviderInteractionModeToggle } from "../../providerModels";
 import {
@@ -212,36 +210,19 @@ import { formatProviderSkillDisplayName } from "../../providerSkillPresentation"
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
+import type { ConversationReference } from "../../conversationReference";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    icon: PenLineIcon,
-  },
-  auto: {
-    label: "Auto",
-    description: "An AI reviewer approves routine actions; risky ones still ask.",
-    icon: SparklesIcon,
-  },
-  "full-access": {
-    label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    icon: LockOpenIcon,
-  },
-};
+/*
+ * How long a reasoning-tier→none downgrade holds its transient
+ * `data-reasoning-tier-exit` state so the CSS exit choreography (cups/ring
+ * retract, flood drain) can finish. Kept just above the `--reasoning-exit`
+ * duration in `styles/special-states.css` (560ms) — the small buffer covers the
+ * layout-effect commit delay before the animation starts.
+ */
+const REASONING_EXIT_MS = 640;
 
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="popover-popup"]',
   '[data-slot="menu-popup"]',
@@ -294,7 +275,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   onTogglePlanSidebar: () => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
-  const RuntimeModeIcon = runtimeModeOption.icon;
+  const autoGlinting = useRuntimeModeAutoGlint(props.runtimeMode);
   const interactionModeTooltip =
     props.interactionMode === "plan"
       ? "Plan mode — click to return to normal build mode"
@@ -352,24 +333,40 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
               <SelectTrigger
                 variant="ghost"
                 size="sm"
+                data-runtime-mode={props.runtimeMode}
+                // Auto rests at the same weight as its neighbours; only the
+                // glyph stays illuminated. The motion work had promoted the
+                // label to `text-foreground/95`, which made Auto the loudest
+                // control in the row at rest — "the star alone is special
+                // enough".
                 className="font-medium text-muted-foreground/80 hover:text-foreground/95"
-                aria-label="Runtime mode"
+                aria-label={`Access mode: ${runtimeModeOption.label}`}
               />
             }
           >
-            <RuntimeModeIcon className="size-4" />
+            <RuntimeModeGlyph
+              mode={props.runtimeMode}
+              selected
+              glinting={autoGlinting}
+              className="size-4"
+            />
             <SelectValue>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false}>
             {runtimeModeOptions.map((mode) => {
               const option = runtimeModeConfig[mode];
-              const OptionIcon = option.icon;
+              const selected = props.runtimeMode === mode;
               return (
                 <SelectItem key={mode} value={mode} hideIndicator className="min-w-64 py-2">
                   <div className="flex min-w-0 items-center gap-3">
                     <div className="grid min-w-0 flex-1 gap-0.5">
                       <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                        <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                        <RuntimeModeGlyph
+                          mode={mode}
+                          selected={selected}
+                          glinting={autoGlinting}
+                          className={cn("size-3.5", !selected && "text-muted-foreground")}
+                        />
                         {option.label}
                       </span>
                       <span className="text-muted-foreground text-xs leading-4">
@@ -436,6 +433,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
     isComplete: boolean;
   } | null;
   isRunning: boolean;
+  interruptState: ComposerInterruptState;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -474,6 +472,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         compact={props.compact}
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
+        interruptState={props.interruptState}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
@@ -517,6 +516,9 @@ export interface ChatComposerHandle {
   }) => void;
   /** Start the send-button celebration after a message submission is accepted. */
   triggerSendCelebration: () => void;
+  /** The live composer glass surface, shared with the just-sent bubble for the
+   *  send-morph View Transition. Null before mount. */
+  getSendMorphSurface: () => HTMLElement | null;
   /** Insert a terminal context from the terminal drawer. */
   addTerminalContext: (selection: TerminalContextSelection) => void;
   /** Get the current prompt/effort/model state for use in send. */
@@ -527,6 +529,7 @@ export interface ChatComposerHandle {
     elementContexts: ElementContextDraft[];
     previewAnnotations: PreviewAnnotationPayload[];
     reviewComments: ReviewCommentContext[];
+    conversationReferences: ConversationReference[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
@@ -561,6 +564,7 @@ export interface ChatComposerProps {
   phase: SessionPhase;
   isConnecting: boolean;
   isSendBusy: boolean;
+  interruptState?: ComposerInterruptState;
   isPreparingWorktree: boolean;
   environmentUnavailable: {
     readonly label: string;
@@ -674,6 +678,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     phase,
     isConnecting,
     isSendBusy,
+    interruptState = "idle",
     isPreparingWorktree,
     environmentUnavailable,
     activePendingApproval,
@@ -740,6 +745,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerElementContexts = composerDraft.elementContexts;
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
+  const composerConversationReferences = composerDraft.conversationReferences;
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
@@ -763,6 +769,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const removeComposerDraftReviewComment = useComposerDraftStore(
     (store) => store.removeReviewComment,
+  );
+  const removeComposerDraftConversationReference = useComposerDraftStore(
+    (store) => store.removeConversationReference,
   );
   const clearComposerDraftPersistedAttachments = useComposerDraftStore(
     (store) => store.clearPersistedAttachments,
@@ -1046,7 +1055,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const composerFormRef = useRef<HTMLFormElement>(null);
+  const composerFrameRef = useRef<HTMLDivElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
+  // Remembers the tier across renders so (a) the origin-anchored spread is
+  // measured exactly once, on the transition *into* a flood tier, and (b) the
+  // direction-aware transitions can surface the tier we came from. Both refs are
+  // only updated in a post-commit layout effect, so reading them during render
+  // yields the PREVIOUS commit's value — a stable `data-reasoning-tier-prev` that
+  // does not churn on unrelated re-renders (see `prevReasoningTier` below).
+  const committedReasoningTierRef = useRef<ComposerReasoningTier | undefined>(undefined);
+  const committedPrevReasoningTierRef = useRef<ComposerReasoningTier | undefined>(undefined);
+  const reasoningExitTimerRef = useRef<number | null>(null);
+  const reasoningDrainTimerRef = useRef<number | null>(null);
   const composerSelectLockRef = useRef(false);
   const composerMenuOpenRef = useRef(false);
   const composerMenuItemsRef = useRef<ComposerCommandItem[]>([]);
@@ -1067,6 +1087,148 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const stashInFlightRef = useRef<Set<string>>(new Set());
 
   // ------------------------------------------------------------------
+  // Reasoning-tier spread origin
+  // ------------------------------------------------------------------
+  // The flood-tier "oil spill" (ultracode and ultrathink) POURS from the
+  // thinking-level control rather than crossfading in. The pour's clip-path
+  // origin is measured once, on the transition *into* a flood tier: we read the
+  // thinking-level control's centre relative to the composer frame and publish it
+  // as `--spread-origin-x/y` on the frame for `special-states.css` to consume.
+  // Runs in a layout effect so the vars are set before the spread animation's
+  // first paint.
+  const reasoningTier = composerProviderState.reasoningTier;
+  // The tier we came from, resolved for THIS render. It only differs from the
+  // committed tier on the very render where the tier changed, and is otherwise
+  // held stable (so the CSS `(tier, prev)` variant keeps matching for the whole
+  // life of a tier rather than flipping on unrelated re-renders). Surfaced as
+  // `data-reasoning-tier-prev` so `special-states.css` can play direction-aware
+  // (reverse) choreography.
+  const prevReasoningTier =
+    reasoningTier === committedReasoningTierRef.current
+      ? committedPrevReasoningTierRef.current
+      : committedReasoningTierRef.current;
+  // On a downgrade to no tier there is no element left to animate, so hold a
+  // transient exit tier (`data-reasoning-tier-exit`) for the CSS exit duration
+  // (module-level `REASONING_EXIT_MS`, kept in step with `--reasoning-exit`) —
+  // ChatComposer keeps painting the frame's ::before/child long enough for the
+  // drain/retract choreography to finish.
+  const [reasoningExitTier, setReasoningExitTier] = useState<ComposerReasoningTier | undefined>(
+    undefined,
+  );
+  // A flood tier receding UNDERNEATH an incoming ring tier (flood→max/xhigh). Held
+  // transiently (like the exit state) so `special-states.css` still has the
+  // `.reasoning-pour` layers to drain before the ring/cups build in — Amendment 6
+  // ruling 6 ("the flood drains back to the pill FIRST, THEN the ring animates").
+  const [reasoningDrainTier, setReasoningDrainTier] = useState<ComposerReasoningTier | undefined>(
+    undefined,
+  );
+  useLayoutEffect(() => {
+    const previousTier = committedReasoningTierRef.current;
+    if (previousTier === reasoningTier) {
+      return;
+    }
+    committedPrevReasoningTierRef.current = previousTier;
+    committedReasoningTierRef.current = reasoningTier;
+
+    const isFloodTier = (tier: ComposerReasoningTier | undefined): boolean =>
+      tier === "ultracode" || tier === "ultrathink";
+    const isRingTier = (tier: ComposerReasoningTier | undefined): boolean =>
+      tier === "xhigh" || tier === "max";
+
+    // tier → none: hold the just-left tier as a transient exit state so its exit
+    // animation has an element to run on. Entering any tier cancels a pending
+    // exit (a fresh treatment supersedes the fade-out).
+    if (reasoningExitTimerRef.current !== null) {
+      window.clearTimeout(reasoningExitTimerRef.current);
+      reasoningExitTimerRef.current = null;
+    }
+    if (!reasoningTier && previousTier) {
+      setReasoningExitTier(previousTier);
+      reasoningExitTimerRef.current = window.setTimeout(() => {
+        setReasoningExitTier(undefined);
+        reasoningExitTimerRef.current = null;
+      }, REASONING_EXIT_MS);
+    } else if (reasoningExitTier !== undefined) {
+      setReasoningExitTier(undefined);
+    }
+
+    // flood → ring: hold the just-left flood tier as a transient DRAIN state so the
+    // pour layers can recede before the ring/cups build in (delayed by the same
+    // duration in CSS). Any other transition clears a pending drain.
+    if (reasoningDrainTimerRef.current !== null) {
+      window.clearTimeout(reasoningDrainTimerRef.current);
+      reasoningDrainTimerRef.current = null;
+    }
+    if (isFloodTier(previousTier) && isRingTier(reasoningTier)) {
+      setReasoningDrainTier(previousTier);
+      reasoningDrainTimerRef.current = window.setTimeout(() => {
+        setReasoningDrainTier(undefined);
+        reasoningDrainTimerRef.current = null;
+      }, REASONING_EXIT_MS);
+    } else if (reasoningDrainTier !== undefined) {
+      setReasoningDrainTier(undefined);
+    }
+
+    // Pour-origin measurement — only on the transition *into* a flood tier. The
+    // origin is left set afterwards so a later flood→none exit drains back toward
+    // the same measured pill position.
+    const frame = composerFrameRef.current;
+    const isPourTier = reasoningTier === "ultracode" || reasoningTier === "ultrathink";
+    if (!frame || !isPourTier) {
+      return;
+    }
+    const frameRect = frame.getBoundingClientRect();
+    if (frameRect.width === 0 || frameRect.height === 0) {
+      return;
+    }
+    // Default origin: bottom-centre of the frame (where the controls live), used
+    // whenever the thinking-level control is not rendered (compact footer).
+    let originX = frameRect.width / 2;
+    let originY = frameRect.height;
+    const originMarker = frame.querySelector<HTMLElement>("[data-composer-reasoning-origin]");
+    const originControl = originMarker?.querySelector<HTMLElement>("button") ?? originMarker;
+    const controlRect = originControl?.getBoundingClientRect();
+    if (controlRect && controlRect.width > 0 && controlRect.height > 0) {
+      originX = controlRect.left - frameRect.left + controlRect.width / 2;
+      originY = controlRect.top - frameRect.top + controlRect.height / 2;
+    }
+    // The just-covering clip radius: origin → farthest frame corner. The pour
+    // keyframes make border contact / ripple relative to this, so the reflection
+    // is pixel-true for any frame geometry (a fixed percentage radius resolves
+    // against the diagonal/√2 reference and overshoots for centred origins,
+    // which made the old ripple invisible).
+    const coverRadius = Math.max(
+      Math.hypot(originX, originY),
+      Math.hypot(frameRect.width - originX, originY),
+      Math.hypot(originX, frameRect.height - originY),
+      Math.hypot(frameRect.width - originX, frameRect.height - originY),
+    );
+    frame.style.setProperty("--spread-origin-x", `${originX}px`);
+    frame.style.setProperty("--spread-origin-y", `${originY}px`);
+    frame.style.setProperty("--spread-cover-r", `${Math.ceil(coverRadius)}px`);
+  }, [reasoningTier, reasoningExitTier, reasoningDrainTier]);
+
+  // The three-layer "oil spill" pour (ultracode/ultrathink) is painted onto
+  // aria-hidden `.reasoning-pour` children rather than a frame background (the
+  // frame is a full-bleed tint layer). They must also be present while a flood
+  // recedes — a downgrade to none (`reasoningExitTier`) or a flood→ring drain
+  // (`reasoningDrainTier`) — so the drain choreography has elements to run on.
+  // Both flood tiers share ONE fill (Amendment 6.2), so `pourKey` maps every
+  // flood context to the same stable key: a direct ultracode↔ultrathink switch
+  // neither remounts nor restarts the pour — the settled liquid simply stays
+  // (this is what makes the old grey-flash bug class structurally impossible).
+  const isFloodReasoningTier = (tier: ComposerReasoningTier | undefined): boolean =>
+    tier === "ultracode" || tier === "ultrathink";
+  const showReasoningPourLayers =
+    isFloodReasoningTier(reasoningTier) ||
+    isFloodReasoningTier(reasoningExitTier) ||
+    reasoningDrainTier !== undefined;
+  const reasoningPourKeySource = reasoningTier ?? reasoningExitTier ?? reasoningDrainTier;
+  const reasoningPourKey = isFloodReasoningTier(reasoningPourKeySource)
+    ? "flood"
+    : (reasoningPourKeySource ?? "none");
+
+  // ------------------------------------------------------------------
   // Derived: composer send state
   // ------------------------------------------------------------------
   const composerSendState = useMemo(
@@ -1078,13 +1240,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         elementContextCount:
           composerElementContexts.length +
           composerPreviewAnnotations.length +
-          composerReviewComments.length,
+          composerReviewComments.length +
+          composerConversationReferences.length,
       }),
     [
       composerElementContexts.length,
       composerImages.length,
       composerPreviewAnnotations.length,
       composerReviewComments.length,
+      composerConversationReferences.length,
       composerTerminalContexts,
       prompt,
     ],
@@ -2648,6 +2812,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         );
       },
       triggerSendCelebration,
+      getSendMorphSurface: () => composerSurfaceRef.current,
       addTerminalContext: (selection: TerminalContextSelection) => {
         if (!activeThread) return;
         const snapshot = composerEditorRef.current?.readSnapshot() ?? {
@@ -2690,6 +2855,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         elementContexts: composerElementContextsRef.current,
         previewAnnotations: composerPreviewAnnotations,
         reviewComments: composerReviewComments,
+        conversationReferences: composerConversationReferences,
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -2711,6 +2877,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerElementContextsRef,
       composerPreviewAnnotations,
       composerReviewComments,
+      composerConversationReferences,
       isConnecting,
       isComposerApprovalState,
       pendingUserInputs.length,
@@ -2739,10 +2906,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       data-chat-composer-form="true"
     >
       <div
-        className={cn(
-          "group rounded-[22px] bg-[linear-gradient(135deg,color-mix(in_srgb,var(--primary)_16%,var(--border)),var(--border)_52%,color-mix(in_srgb,var(--primary)_9%,var(--border)))] p-px shadow-[0_12px_40px_-32px_color-mix(in_srgb,var(--primary)_65%,transparent)] transition-[background-color,box-shadow] duration-200 ease-out focus-within:shadow-[0_18px_48px_-30px_color-mix(in_srgb,var(--primary)_78%,transparent)] motion-reduce:transition-none",
-          composerProviderState.composerFrameClassName,
-        )}
+        ref={composerFrameRef}
+        {...(reasoningTier ? { "data-reasoning-tier": reasoningTier } : {})}
+        {...(prevReasoningTier ? { "data-reasoning-tier-prev": prevReasoningTier } : {})}
+        {...(!reasoningTier && reasoningExitTier
+          ? { "data-reasoning-tier-exit": reasoningExitTier }
+          : {})}
+        {...(reasoningDrainTier ? { "data-reasoning-tier-drain": reasoningDrainTier } : {})}
+        className="group rounded-[22px] bg-[linear-gradient(135deg,color-mix(in_srgb,var(--primary)_16%,var(--border)),var(--border)_52%,color-mix(in_srgb,var(--primary)_9%,var(--border)))] p-px shadow-[0_12px_40px_-32px_color-mix(in_srgb,var(--primary)_65%,transparent)] transition-[background-color,box-shadow] duration-200 ease-out focus-within:shadow-[0_18px_48px_-30px_color-mix(in_srgb,var(--primary)_78%,transparent)] motion-reduce:transition-none"
         onDragEnter={onComposerDragEnter}
         onDragOver={onComposerDragOver}
         onDragLeave={onComposerDragLeave}
@@ -2752,6 +2923,62 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onDragLeaveCapture={onComposerMentionDragLeaveCapture}
         onDropCapture={composerMentionDragHandlers.onDrop}
       >
+        {/* Three-layer staggered pour for the flood tiers (Amendment 6 ruling 3).
+            Aria-hidden `.reasoning-pour` children carry the shared flood fill
+            (the frame itself is a full-bleed tint layer and must not hold a
+            background). `--under`/`--mid`/`--top` are the three concentric pour
+            wavefronts. Kept mounted through flood→none exits and flood→ring
+            drains so the recede has elements to animate; the flood-stable key
+            keeps a flood↔flood switch from remounting them. Styled in
+            special-states.css. */}
+        {showReasoningPourLayers ? (
+          <>
+            <span
+              key={`reasoning-pour-under-${reasoningPourKey}`}
+              className="reasoning-pour reasoning-pour--under"
+              aria-hidden="true"
+            />
+            <span
+              key={`reasoning-pour-mid-${reasoningPourKey}`}
+              className="reasoning-pour reasoning-pour--mid"
+              aria-hidden="true"
+            />
+            <span
+              key={`reasoning-pour-top-${reasoningPourKey}`}
+              className="reasoning-pour reasoning-pour--top"
+              aria-hidden="true"
+            />
+          </>
+        ) : null}
+        {/* Flood-tier sparkles (Amendment 6.2): white star spans popping along
+            the left/right/bottom edges of BOTH Ultra tiers. Positions, laps and
+            fanned-out delays live in special-states.css. */}
+        {isFloodReasoningTier(reasoningTier) ? (
+          <span className="reasoning-sparkles" aria-hidden="true">
+            {Array.from({ length: 20 }, (_, sparkleIndex) => (
+              <span key={sparkleIndex} className="reasoning-sparkle" />
+            ))}
+          </span>
+        ) : null}
+        {/* max's glow flash layer (Amendment 6.15): a static symmetric shadow
+            whose opacity flashes bright at tier entry then settles — the
+            shadow itself never animates. Kept through the exit for its fade. */}
+        {reasoningTier === "max" ||
+        reasoningExitTier === "max" ||
+        (isFloodReasoningTier(reasoningTier) && prevReasoningTier === "max") ? (
+          <span className="reasoning-glow" aria-hidden="true" />
+        ) : null}
+        {/* Outburst spark-lines (Amendment 6.7): white dashes firing OFF the
+            composer into the surrounding app. Separate host from the sparkles
+            because this one must NOT clip (the marks sit outside the frame).
+            Ultracode shows six, ultrathink all ten — split in CSS. */}
+        {isFloodReasoningTier(reasoningTier) ? (
+          <span className="reasoning-outbursts" aria-hidden="true">
+            {Array.from({ length: 10 }, (_, outburstIndex) => (
+              <span key={outburstIndex} className="reasoning-outburst" />
+            ))}
+          </span>
+        ) : null}
         <div
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
@@ -2981,6 +3208,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 />
               </ComposerCommandMenuLayer>
             )}
+
+            {!isComposerCollapsedMobile &&
+              !isComposerApprovalState &&
+              pendingUserInputs.length === 0 &&
+              composerConversationReferences.length > 0 && (
+                <ComposerConversationReferences
+                  references={composerConversationReferences}
+                  onRemove={(referenceId) =>
+                    removeComposerDraftConversationReference(composerDraftTarget, referenceId)
+                  }
+                  className="mb-3"
+                />
+              )}
 
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
@@ -3250,7 +3490,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     {providerTraitsPicker ? (
                       <>
                         <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                        {providerTraitsPicker}
+                        {/* `display: contents` so this stays transparent to the
+                            footer's flex layout; it only marks the thinking-level
+                            control as the flood-tier pour's origin (ultracode and
+                            ultrathink). */}
+                        <span data-composer-reasoning-origin="true" className="contents">
+                          {providerTraitsPicker}
+                        </span>
                       </>
                     ) : null}
                     <ComposerFooterModeControls
@@ -3284,6 +3530,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   canCompactContext={activeThreadCanCompactContext}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
+                  interruptState={interruptState}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isSendBusy}

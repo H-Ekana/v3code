@@ -27,11 +27,32 @@ export type ComposerProviderStateInput = {
 
 export type ComposerPromptInjectionState = "none" | "ultrathink";
 
+/**
+ * The reasoning-intensity ladder surfaced on the composer frame as
+ * `data-reasoning-tier`. One recipe, four tiers, escalating from a static rim
+ * (`xhigh`) up to the full "oil spill" (`ultrathink`). See
+ * `docs/project/nightly-motion-polish-reasoning-tiers.md`. Absent when the
+ * selected effort is an ordinary level.
+ */
+export type ComposerReasoningTier = "xhigh" | "max" | "ultracode" | "ultrathink";
+
 export type ComposerProviderState = {
   provider: ProviderDriverKind;
   promptEffort: string | null;
   modelOptionsForDispatch: ReadonlyArray<ProviderOptionSelection> | undefined;
-  composerFrameClassName?: string;
+  /**
+   * Reasoning tier for the composer frame's `data-reasoning-tier` attribute.
+   * `ChatComposer` applies it verbatim and the whole treatment lives in
+   * `styles/special-states.css`, keyed on this attribute.
+   */
+  reasoningTier?: ComposerReasoningTier;
+  /**
+   * Reserved for a provider state that needs to restyle the inner composer
+   * surface. No state populates it today: `ultrathink` used to add a permanent
+   * inset hairline on top of its rim, which both duplicated the rim's job and
+   * collided with the drag-over `shadow-[…]` utility on the same element (only
+   * one `box-shadow` can win). The rim alone carries the state.
+   */
   composerSurfaceClassName?: string;
   modelPickerIconClassName?: string;
 };
@@ -52,6 +73,33 @@ export function getComposerPromptInjectionState(prompt: string): ComposerPromptI
   return isClaudeUltrathinkPrompt(prompt) ? "ultrathink" : "none";
 }
 
+/**
+ * The ladder — one recipe, four tiers — keyed on the primary select
+ * descriptor's *value* so it is provider-agnostic by construction. Per
+ * `docs/project/nightly-motion-polish-reasoning-tiers.md`:
+ *
+ *   tier := "ultrathink"  if prompt-injection active OR effort value == "ultrathink"
+ *        |  "ultracode"   if effort value in {"ultracode", "ultra"}
+ *        |  "max"         if effort value == "max"
+ *        |  "xhigh"       if effort value == "xhigh"
+ *        |  (absent)      otherwise
+ *
+ * Amended after user review 2026-07-28: Codex "ultra" is the equivalent of the
+ * Claude "ultracode" flood tier ("ultra should be the same as ultracode"), so it
+ * maps onto `ultracode`, not `max`.
+ */
+export function deriveComposerReasoningTier(input: {
+  effortValue: string | null;
+  ultrathinkActive: boolean;
+}): ComposerReasoningTier | undefined {
+  const { effortValue, ultrathinkActive } = input;
+  if (ultrathinkActive || effortValue === "ultrathink") return "ultrathink";
+  if (effortValue === "ultracode" || effortValue === "ultra") return "ultracode";
+  if (effortValue === "max") return "max";
+  if (effortValue === "xhigh") return "xhigh";
+  return undefined;
+}
+
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {
   const { provider, model, models, modelOptions, promptInjectionState = "none" } = input;
   const caps = getProviderModelCapabilities(models, model, provider);
@@ -65,15 +113,22 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
   const ultrathinkActive =
     (primarySelectDescriptor?.promptInjectedValues?.length ?? 0) > 0 &&
     promptInjectionState === "ultrathink";
+  const reasoningTier = deriveComposerReasoningTier({
+    effortValue: promptEffort,
+    ultrathinkActive,
+  });
 
   return {
     provider,
     promptEffort,
     modelOptionsForDispatch: buildProviderOptionSelectionsFromDescriptors(descriptors),
-    ...(ultrathinkActive
+    // The reasoning tier drives the composer frame's `data-reasoning-tier`
+    // attribute; every treatment lives in `styles/special-states.css`. The
+    // illuminated provider glyph is shared by all four tiers (it is the base
+    // "this is a reasoning state" cue), so the chroma class rides along too.
+    ...(reasoningTier
       ? {
-          composerFrameClassName: "ultrathink-frame",
-          composerSurfaceClassName: "shadow-[0_0_0_1px_rgba(255,255,255,0.07)_inset]",
+          reasoningTier,
           modelPickerIconClassName: "ultrathink-chroma",
         }
       : {}),

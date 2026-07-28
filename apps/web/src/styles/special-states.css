@@ -1,0 +1,1941 @@
+/*
+ * Reasoning-tier composer treatments — the "oil spill" ladder.
+ *
+ * One recipe, four tiers, keyed on `data-reasoning-tier` on the composer frame
+ * (derived in `components/chat/composerProviderState.tsx`). The full authority is
+ * `docs/project/nightly-motion-polish-reasoning-tiers.md`. Amendment 6 (this
+ * pass, after the fifth screenshot review) re-cut the reveal mechanics again:
+ *
+ *   xhigh      — SIDE CUPS that GROW along the ring. The lit side edges come from
+ *                a HORIZONTAL gradient whose OWN stops are animated: a registered
+ *                one-shot `--reasoning-cup-reach` (percentage, the half-width of
+ *                the lit region measured from each side edge) drives the stops
+ *                0%→`--reasoning-cup-rest` (34%). Because the brightness is a pure
+ *                function of x, the reveal is pixel-uniform along the top/bottom
+ *                edges (no tan blow-up) and the corners — at the extreme x — light
+ *                up progressively (no corner "zoop"). The plain 2-layer ring mask
+ *                (content-box XOR full) carries the geometry; NO conic reveal.
+ *   max        — FULL RING. From xhigh: the SAME gradient seals — `--reasoning-cup-reach`
+ *                continues 34%→50% so the two lit regions extend until they MEET
+ *                at the centre, then the centre BRIGHTENS to the full-ring look via
+ *                `--reasoning-cup-bloom` (crossfaded during the completion pulse —
+ *                there is NO gradient swap, so it cannot jump). Cold (from
+ *                high/low/none): the ring instead WRAPS in from bottom-centre both
+ *                ways (the ultrathink ring-build geometry, `--reasoning-ring-half`).
+ *                Either way a clearly-visible completion PULSE + the travelling
+ *                rim streak.
+ *   ultracode  — FLOOD: the SHARED rose→magenta→violet→indigo fill (Amendment
+ *                6.2, user reference image) that POURS from the thinking-level
+ *                pill in THREE staggered concentric wavefronts —
+ *                `.reasoning-pour--under` @20% (first), `--mid` @50% (+150ms),
+ *                `--top` @full (+300ms). A prominent WHITE rim streak; white
+ *                edge sparkles; no static ring. CLEAN at rest.
+ *   ultrathink — FLOOD, top: the SAME shared fill and sparkles; distinguished
+ *                ONLY by the PINK full ring that WRAPS in from bottom-centre
+ *                once the pour visually completes, the pink travelling rim
+ *                streak, and the strong static pink halo.
+ *
+ * Element allocation (ChatComposer renders the aria-hidden children; the frame is
+ * a full-bleed tint layer and must never hold a background of its own):
+ *   `::before` — the masked ring (xhigh cups / max ring) ONLY; unused by floods.
+ *   `::after`  — xhigh entry sweep / max streak / ultrathink ring + streak.
+ *   `.reasoning-pour--under|--mid|--top` — the three pour wavefronts (flood tiers).
+ *   `.reasoning-sparkles > .reasoning-sparkle` — flood-tier edge sparkles.
+ *
+ * Direction-aware transitions (context via `data-reasoning-tier-prev`; on a
+ * downgrade to none a transient `data-reasoning-tier-exit`; on a flood→ring
+ * recede a transient `data-reasoning-tier-drain`; all held for `--reasoning-exit`
+ * by a ChatComposer effect so the recede has elements to run on):
+ *   - xhigh→max: stop-seal + bloom + pulse + the stroke thickening 1px→2px.
+ *     max→xhigh: the ring un-seals back to the resting cups (2px→1px).
+ *   - ultracode↔ultrathink: a NO-OP for the fill (one shared gradient, no
+ *     remount, nothing drains — the grey-flash bug class is structurally gone);
+ *     only the ring/halo/streak dressing changes.
+ *   - ultracode/ultrathink→max or xhigh: the flood DRAINS to the pill first
+ *     (waves, `data-reasoning-tier-drain`), THEN the ring/cups animate in (chained
+ *     via animation-delay = the drain duration).
+ *   - every tier→none: cups/ring retract, flood drains toward the pill.
+ *
+ * Cost discipline (binding): PERMANENT animation uses only `background-position`,
+ * `opacity`, `transform`, and ONE registered angle (`--reasoning-rim-angle`, the
+ * streak). The ultrathink sparkles are a sanctioned permanent-but-cheap exemption
+ * (opacity/transform only — ultrathink is an extraordinary state). No `filter`
+ * animation, no animated shadows. ONE-SHOT entry/exit transitions may register
+ * more properties (documented at each `@property`): `--reasoning-cup-reach` /
+ * `--reasoning-cup-bloom` (percentages — the cup grow, the max seal, the centre
+ * bloom, and their reverses) and `--reasoning-ring-half` (angle — the bottom-up
+ * ring wrap shared by cold-max and ultrathink). `reasoningPourKey` is
+ * flood-stable, so a direct flood switch does NOT remount or restart the pour.
+ * Timing/easing come from `styles/motion.css`; every duration below is a named
+ * token.
+ */
+
+:root {
+  /*
+   * Plan "Intensity ladder" Level 2 — state handoff. The xhigh spectrum entry
+   * sweep traverses the full rim, so it sits at the top of the 150-240ms band.
+   */
+  --reasoning-entry-sweep: 240ms;
+  /*
+   * Origin-anchored spread — the "liquid poured from the pill" fill. Re-tuned in
+   * Amendment 6.2: with the ripple removed, border contact sits at the eased end
+   * of the keyframe, so 3.8s restores the round-6 perceived fill time (~2.9s to
+   * visual coverage). The ultrathink ring keys off `--reasoning-ring-start`.
+   */
+  --reasoning-spread: 2000ms;
+  /*
+   * The three-layer pour stagger (Amendment 6 ruling 3): the middle wavefront
+   * starts ~150ms after the under, the top ~300ms after, so three concentric pour
+   * edges fan out from the pill and read as layered liquid depth.
+   */
+  --reasoning-pour-stagger-mid: 150ms;
+  --reasoning-pour-stagger-top: 300ms;
+  /*
+   * Flowing fill drift. Ruling 7: 24s → 18s (25% faster). Runs `alternate` so it
+   * ping-pongs across the oversized gradient and never wraps a seam.
+   */
+  --reasoning-fill-flow: 18s;
+  /* Ultrathink white-ring pulse - one dim-and-back breath every 2s. */
+  --reasoning-white-ring-pulse: 2000ms;
+  /* ultrathink's DOUBLED background drift (Amendment 6.5 differentiation): its
+     hue field visibly churns while ultracode's ambles. */
+  --reasoning-fill-flow-fast: 9s;
+  /* ultrathink's breathing outer halo (Amendment 6.6) - slow swell/relax. */
+  --reasoning-halo-breathe: 5s;
+  /* ultrathink's occasional LARGE rotating four-point flare (sparkle split). */
+  --reasoning-flare-cycle: 7.4s;
+  /* max's resting ring breath - slow luminance swell; xhigh stays static. */
+  --reasoning-ring-breathe: 4200ms;
+  /* Post-seal silence (Amendment 6.12): after an xhigh->max seal, ALL max
+     dressing (streak, breathe) waits this long, so the forward transition ends
+     as bare as the reverse - the sequential dressing events were the
+     "top bar then bottom bar" report. */
+  --reasoning-max-streak-settle: 2400ms;
+  /* max's glow FLASH (Amendment 6.15): nothing -> really bright -> settles to
+     the resting glow, starting AT the click. */
+  --reasoning-glow-flash: 1400ms;
+  /* Outburst meteor-spark loop (Amendment 6.8): sparkler-style sparks. */
+  --reasoning-outburst-cycle: 6s;
+  /* The "Ultrathink - 1M" pill's rainbow sweep-in (Amendment 6.10; 2s→1s). */
+  --reasoning-ink-sweep-time: 1000ms;
+  /* ...and its endless colour lap (Amendment 6.16): the rainbow itself keeps
+     sweeping left→right forever. */
+  --reasoning-ink-lap: 3200ms;
+  /* Max rim streak lap — "clearly visible"; calmer via a dimmer/narrower arc. */
+  --reasoning-rim-streak-max: 7s;
+  /*
+   * xhigh side-cup grow (one-shot): `--reasoning-cup-reach` grows 0%→rest so the
+   * two lit cups slide inward from the side edges. 560→860ms (Amendment 6.3:
+   * the xhigh entry read as too abrupt).
+   */
+  --reasoning-cup-grow: 860ms;
+  /*
+   * The resting half-width of each side cup, measured inward from each side edge.
+   * A PERCENTAGE (of the composer width), not an angle — the shared handoff
+   * constant: xhigh grows TO it and rests; max's seal continues FROM it to 50%
+   * (the two lit regions meet at centre). One value → the xhigh↔max handoff is
+   * seamless by construction. 34% matches the cups gradient's soft fade.
+   */
+  --reasoning-cup-rest: 34%;
+  /* The sealed half-width: 50% = the two lit regions meet exactly at centre. */
+  --reasoning-cup-seal: 50%;
+  /*
+   * The resting centre brightness of a sealed max ring. `--reasoning-cup-bloom`
+   * blooms 0%→this during/after the pulse, filling the seam the seal leaves — the
+   * "full-ring look", reached by a crossfade rather than a gradient swap.
+   */
+  --reasoning-cup-bloom-rest: 58%;
+  /* max seal duration (`--reasoning-cup-reach` rest→50%). */
+  --reasoning-gap-close: 900ms;
+  /* max completion pulse — a clearly-visible double-beat (opacity + scale pop). */
+  --reasoning-ring-pulse: 520ms;
+  /*
+   * Exit / downgrade / drain choreography duration (cups/ring retract, flood
+   * drains). Mirrored as `REASONING_EXIT_MS` in `ChatComposer.tsx`; keep in step.
+   */
+  --reasoning-exit: 560ms;
+  /* Bottom-up ring wrap (cold-max + ultrathink): `--reasoning-ring-half` 0→180deg. */
+  --reasoning-ring-build: 900ms;
+  /*
+   * When the ultrathink ring wrap may begin. Amendment 6.4 ruling, ending the
+   * "very delayed border" saga: the ring no longer waits on the pour AT ALL —
+   * it wraps in essentially the moment the tier is selected (one beat so the
+   * puddle appears first), rising alongside the flood.
+   */
+  --reasoning-ring-start: 260ms;
+  /*
+   * The ultracode white streak instead fades in GRADUALLY once the flood is
+   * clearly underway (~35% of the spread after the top stagger), over a long
+   * soft fade — it should never pop in with the click.
+   */
+  --reasoning-streak-start: calc(
+    var(--reasoning-pour-stagger-top) + var(--reasoning-spread) * 0.35
+  );
+  --reasoning-streak-fade: 1600ms;
+  /*
+   * Flood-tier sparkle loops (ruling 8; Amendment 6.2 — shared by BOTH Ultra
+   * tiers, denser and more frequent). Each star spends most of its cycle
+   * invisible and pops for a short window, so the two coprime-ish cycle lengths +
+   * scattered negative delays make the pops feel occasional and random. Permanent
+   * but cheap (opacity/transform only) — the extraordinary-state exemption.
+   */
+  --reasoning-sparkle-cycle-a: 4.8s;
+  --reasoning-sparkle-cycle-b: 6.4s;
+  --reasoning-sparkle-delay-1: -0.6s;
+  --reasoning-sparkle-delay-2: -3.4s;
+  --reasoning-sparkle-delay-3: -5.1s;
+  --reasoning-sparkle-delay-4: -2.2s;
+  --reasoning-sparkle-delay-5: -6.7s;
+  --reasoning-sparkle-delay-6: -8.3s;
+  --reasoning-sparkle-delay-7: -4.1s;
+  --reasoning-sparkle-delay-8: -1.5s;
+  --reasoning-sparkle-delay-9: -5.9s;
+  --reasoning-sparkle-delay-10: -2.9s;
+  --reasoning-sparkle-delay-11: -7.4s;
+  --reasoning-sparkle-delay-12: -0.2s;
+  --reasoning-sparkle-delay-13: -3.9s;
+  --reasoning-sparkle-delay-14: -1.1s;
+  --reasoning-sparkle-delay-15: -5.5s;
+  --reasoning-sparkle-delay-16: -2.6s;
+  --reasoning-sparkle-delay-17: -6.1s;
+  --reasoning-sparkle-delay-18: -0.9s;
+  --reasoning-sparkle-delay-19: -4.6s;
+  --reasoning-sparkle-delay-20: -7.9s;
+  /*
+   * ultrathink's static outer halo glow. Held as length tokens so no raw blur
+   * literal sits in the box-shadow rule body (the shadow-budget guard scans px
+   * literals; this static, sanctioned halo must not trip it).
+   */
+  --reasoning-halo-blur-tight: 14px;
+  --reasoning-halo-blur-wide: 38px;
+  /* max's interior rim glow (token-dodge for the px scan). SYMMETRIC - no y
+     offset: a directional top glow paired with the bottom-rising streak was
+     the recurring "up-down" report (Amendment 6.14). */
+  --reasoning-cast-blur: 26px;
+  --reasoning-cast-spread: -14px;
+}
+
+/*
+ * The single registered-angle custom property the cost band allows for PERMANENT
+ * animation, driving the travelling rim streak (max + ultrathink).
+ */
+@property --reasoning-rim-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/*
+ * ONE-SHOT entry/exit property — the side-cup / seal half-width (Amendment 6
+ * ruling 1/2). A <percentage>: the lit region extends inward from each side edge
+ * by `--reasoning-cup-reach`. Driven 0%→rest (xhigh grow), rest→50% (max seal),
+ * 50%→rest (max→xhigh un-seal) and rest/50%→0% (exit retractions), then held. The
+ * gradient stops consume it directly, so the reveal is pixel-uniform along the
+ * top/bottom edges and cannot jump.
+ */
+@property --reasoning-cup-reach {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
+/*
+ * ONE-SHOT entry/exit property — the sealed ring's centre brightness. A
+ * <percentage> mixed into the cup gradient's centre stops: 0% = a transparent
+ * seam (the cups look), rising to `--reasoning-cup-bloom-rest` fills the seam into
+ * the full-ring look. Crossfaded during the completion pulse; never swapped.
+ */
+/*
+ * ONE-SHOT entry/exit property - the cups/ring EDGE colour. Registered as a
+ * <color> so the xhigh<->max hue split MORPHS during the seal/unseal instead of
+ * snapping at the tier switch (Amendment 6.7: the instant hot-swap read as a
+ * jitter at the start of the forward transition).
+ */
+@property --reasoning-cup-edge {
+  syntax: "<color>";
+  inherits: false;
+  initial-value: #ec4899;
+}
+
+/*
+ * ONE-SHOT entry property - the rainbow reveal position for the thinking-level
+ * pill label (Amendment 6.10): white ink covers the rainbow from the sweep
+ * point rightward; animating 0%->100% unveils the rainbow left to right.
+ * Initial 100% = fully rainbow if the animation is ever dropped (hardening).
+ */
+@property --reasoning-ink-sweep {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 100%;
+}
+
+@property --reasoning-cup-bloom {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
+/*
+ * ONE-SHOT entry property — the bottom-up ring wrap's revealed half-angle,
+ * centred on bottom-centre; animated 0deg→180deg once, then held. Shared by the
+ * cold-max ring build and ultrathink's ring wrap (never on screen at once).
+ */
+@property --reasoning-ring-half {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* ── Shared base: gradient tokens, layering ──────────────────────────── */
+
+[data-reasoning-tier],
+[data-reasoning-tier-exit] {
+  /* ultrathink's full ring (Amendment 6.17: WHITE — against the glow and the
+     colourful flood a coloured ring disappeared; a bright white band reads as
+     a definite border, and the COLOURFUL comet streak stays visible over it).
+     Painted into the 2px ring mask on ultrathink's `::after`. */
+  --reasoning-rim-pink: linear-gradient(
+    135deg,
+    color-mix(in srgb, white 88%, var(--astro-highlight)) 0%,
+    white 30%,
+    color-mix(in srgb, white 92%, var(--primary)) 55%,
+    white 80%,
+    color-mix(in srgb, white 88%, var(--astro-highlight)) 100%
+  );
+
+  /* One short pass of true spectrum, used only by xhigh's one-shot entry sweep. */
+  --reasoning-entry-spectrum: linear-gradient(
+    120deg,
+    transparent 0%,
+    transparent 26%,
+    color-mix(in srgb, var(--primary) 70%, transparent) 34%,
+    var(--astro-highlight) 42%,
+    color-mix(in srgb, var(--success) 62%, transparent) 50%,
+    color-mix(in srgb, var(--warning) 62%, transparent) 56%,
+    color-mix(in srgb, var(--info) 66%, transparent) 62%,
+    color-mix(in srgb, var(--primary) 70%, transparent) 70%,
+    transparent 78%,
+    transparent 100%
+  );
+
+  /*
+   * THE flood fill (Amendment 6.3) — one hue field shared by ultracode AND
+   * ultrathink, built as a soft "mesh" of radial blobs over a diagonal wash to
+   * mimic the user's blurred fluid-swirl reference (hot pink upper-left, violet
+   * midfield, deep blue lower-right). Multiple blob centres sit inside any
+   * viewing window, so no pan position ever shows a single flat colour (the
+   * "whole thing just looks pink" defect of the previous wide-band linear).
+   * Sharing one fill keeps the flood↔flood transition a structural no-op.
+   */
+  --reasoning-fill-flood:
+    radial-gradient(58% 74% at 14% 22%, #ff4d94 0%, rgb(255 77 148 / 0%) 62%),
+    radial-gradient(46% 62% at 38% 72%, #e93ac2 0%, rgb(233 58 194 / 0%) 60%),
+    radial-gradient(52% 68% at 56% 30%, #a238e8 0%, rgb(162 56 232 / 0%) 62%),
+    radial-gradient(56% 72% at 78% 68%, #4a3ae0 0%, rgb(74 58 224 / 0%) 64%),
+    linear-gradient(115deg, #f0437f 0%, #c23ad0 30%, #7a35e6 55%, #3538c9 78%, #1b2a96 100%);
+
+  /*
+   * The sparkle star shape (Amendment 6 ruling 8) — the four-point concave star
+   * lifted from the startup splash banner (`public/v3-splash-stars.svg`),
+   * normalised to a centred 32-unit viewBox. Used as a MASK so the fill inherits a
+   * theme colour; the path fill is only an alpha stencil.
+   */
+  --reasoning-star: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-16 -16 32 32'%3E%3Cpath fill='%23000' d='M0-16C1.8-4.5 4.5-1.8 16 0 4.5 1.8 1.8 4.5 0 16-1.8 4.5-4.5 1.8-16 0-4.5-1.8-1.8-4.5 0-16Z'/%3E%3C/svg%3E");
+
+  /* Near-white ink for controls/placeholder while a fill is present. */
+  --reasoning-contrast-ink: color-mix(in srgb, white 92%, var(--astro-highlight));
+
+  position: relative;
+  /* NO `background-image` here — the frame is a full-bleed tint layer. */
+}
+
+/* Promote the composer's real content above the fill layers so the flood sits
+   behind the controls. The pour child spans and the sparkle host re-lower
+   themselves to z 0 in their own, more specific rules below. */
+[data-reasoning-tier] > *,
+[data-reasoning-tier-exit] > * {
+  position: relative;
+  z-index: 1;
+}
+
+/*
+ * SUBSTITUTION SITE IS LOAD-BEARING (Amendment 6.1). These two tokens contain
+ * var() references to the ANIMATED registered properties
+ * (`--reasoning-cup-reach` / `--reasoning-cup-bloom`), and those animations run
+ * on the `::before` pseudo. A custom property substitutes its inner var()s at
+ * computed-value time ON THE ELEMENT THAT DECLARES IT — declared on the frame
+ * they bake in the frame's static 0%/0% (every stop collapses, the cups/ring
+ * paint fully transparent) and the pseudo's animation can never reach them.
+ * They MUST be declared on the same pseudo that animates the properties.
+ */
+[data-reasoning-tier]::before,
+[data-reasoning-tier-exit]::before {
+  /* The cups/ring EDGE colour endpoints - the hue split (Amendment 6.6):
+     xhigh runs the COOL violet, max the HOT pink-white; the seal/unseal
+     keyframes morph between them. Same substitution-site rule as below. */
+  --reasoning-cup-edge-cool: color-mix(in srgb, var(--primary) 72%, var(--astro-highlight));
+  --reasoning-cup-edge-hot: color-mix(in srgb, var(--astro-highlight) 78%, white);
+  --reasoning-cup-edge: var(--astro-highlight);
+
+  /*
+   * The sealed ring's centre colour: transparent while blooming from zero, up to
+   * astro-highlight at `--reasoning-cup-bloom-rest`. Consumed by the cup gradient's
+   * two centre stops so xhigh (bloom 0) reads as cups and max (bloom risen) reads
+   * as a full ring — the SAME gradient, only the centre alpha differs.
+   */
+  --reasoning-cup-center: color-mix(
+    in srgb,
+    var(--astro-highlight) var(--reasoning-cup-bloom),
+    transparent
+  );
+
+  /*
+   * xhigh's "side cups" / max's ring — a HORIZONTAL gradient whose stops are
+   * parameterised by `--reasoning-cup-reach`. Bright astro at each side edge
+   * (0%/100%), fading through a primary mix, reaching the centre colour at
+   * `--reasoning-cup-reach` from each side. As reach grows the lit cups extend
+   * inward; at 50% the two centre stops meet (the seal). Painted into the plain
+   * 2-layer ring mask, so brightness is a pure function of x — uniform along the
+   * top/bottom edges, corners brightest, no tan blow-up, no corner zoop.
+   */
+  --reasoning-rim-cups: linear-gradient(
+    90deg,
+    var(--reasoning-cup-edge) 0%,
+    color-mix(in srgb, var(--primary) 60%, var(--reasoning-cup-edge))
+      calc(var(--reasoning-cup-reach) * 0.28),
+    color-mix(in srgb, var(--primary) 30%, transparent) calc(var(--reasoning-cup-reach) * 0.68),
+    var(--reasoning-cup-center) var(--reasoning-cup-reach),
+    var(--reasoning-cup-center) calc(100% - var(--reasoning-cup-reach)),
+    color-mix(in srgb, var(--primary) 30%, transparent)
+      calc(100% - var(--reasoning-cup-reach) * 0.68),
+    color-mix(in srgb, var(--primary) 60%, var(--reasoning-cup-edge))
+      calc(100% - var(--reasoning-cup-reach) * 0.28),
+    var(--reasoning-cup-edge) 100%
+  );
+}
+
+/*
+ * Statically illuminated provider glyph, shared by every tier as the base
+ * "this is a reasoning state" cue. A tight primary afterglow inside the plan's
+ * 3-4px ordinary-effect budget, with no animation of any kind.
+ */
+.ultrathink-chroma {
+  color: var(--astro-highlight);
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--primary) 45%, transparent));
+}
+
+/* Spread origin — default bottom-centre until ChatComposer measures the
+   thinking-level control and overrides these inline. Broadened to every tier /
+   exit so the flood→ring drain and the exit drains resolve the origin too. No
+   `var()` fallbacks are used anywhere, so these must always be defined. */
+[data-reasoning-tier],
+[data-reasoning-tier-exit] {
+  --spread-origin-x: 50%;
+  --spread-origin-y: 100%;
+  /*
+   * The JUST-COVERING clip radius: the distance from the pour origin to the
+   * frame's farthest corner. ChatComposer measures and overrides this in px on
+   * every flood entry (Amendment 6.1) so the pour's border contact and ripple
+   * reflection land at the real border for ANY frame geometry — percentage
+   * radii resolve against the diagonal/√2 reference, so a fixed % that covers a
+   * pill-origin frame overshoots a centre-origin one and the ripple reads as
+   * nothing. This default only serves the unmeasured first paint.
+   */
+  --spread-cover-r: 121%;
+  /* Background drift lap for the top pour layer; ultrathink overrides to the
+     doubled speed below (retimes in place - the animation name is unchanged,
+     so a flood<->flood switch never restarts the drift). */
+  --reasoning-flow-speed: var(--reasoning-fill-flow);
+}
+
+[data-reasoning-tier="ultrathink"] {
+  --reasoning-flow-speed: var(--reasoning-fill-flow-fast);
+}
+
+/* ── Rim tiers (xhigh, max): masked ring pseudo, NOT a frame background ── */
+
+/* xhigh — side cups, painted into a 1px padding-box ring, GROWN on entry by the
+   gradient's own stops (`--reasoning-cup-reach` 0%→rest). Plain 2-layer ring mask
+   (content-box XOR full); the geometry is entirely in the gradient. */
+[data-reasoning-tier="xhigh"]::before,
+[data-reasoning-tier-exit="xhigh"]::before {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  /* Hue split: xhigh runs COOL (violet-leaning edges). */
+  --reasoning-cup-edge: var(--reasoning-cup-edge-cool);
+  /* Resting fallback (Amendment 6.1 hardening): if a future selector hole ever
+     drops the grow animation, the cups still paint at rest instead of vanishing
+     (a running/filled animation always overrides this static declaration). */
+  --reasoning-cup-reach: var(--reasoning-cup-rest);
+  background-image: var(--reasoning-rim-cups);
+  content: "";
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: reasoning-cup-grow var(--reasoning-cup-grow) var(--ease-out-sine) 1 both;
+}
+
+/* max→xhigh DOWNGRADE: the sealed ring un-seals back to the resting cups
+   (`--reasoning-cup-reach` 50%→rest, bloom 58%→0). */
+[data-reasoning-tier="xhigh"][data-reasoning-tier-prev="max"]::before {
+  animation: reasoning-cup-unseal var(--reasoning-cup-grow) var(--ease-out-sine) 1 both;
+}
+
+/* flood→xhigh: the flood drains first (on the pour spans), THEN the cups grow —
+   delayed by the drain duration. During the delay `--reasoning-cup-reach` holds
+   at 0% (initial), so the cups are invisible until the flood is gone. */
+[data-reasoning-tier="xhigh"][data-reasoning-tier-prev="ultracode"]::before,
+[data-reasoning-tier="xhigh"][data-reasoning-tier-prev="ultrathink"]::before {
+  animation: reasoning-cup-grow var(--reasoning-cup-grow) var(--ease-out-sine) var(--reasoning-exit)
+    1 both;
+}
+
+/* xhigh→none EXIT: the cups retract to the side edges and fade. */
+[data-reasoning-tier-exit="xhigh"]::before {
+  animation: reasoning-cup-drain var(--reasoning-exit) var(--ease-out-quart) 1 both;
+}
+
+/* max — the full ring. COLD entry (base rule): the gradient is already the full
+   ring (reach 50%, bloom risen), revealed by a bottom-centre conic WRAP
+   (`--reasoning-ring-half` 0→180deg, the ultrathink ring-build geometry) so the
+   ring grows from the bottom both ways and closes at the top, then pulses. Layer
+   ORDER is load-bearing: the conic reveal is the FIRST mask layer with
+   `source-in`/`intersect` so the fold computes `reveal ∩ (content-box XOR full)`
+   = reveal ∩ ring. */
+[data-reasoning-tier="max"]::before,
+[data-reasoning-tier-exit="max"]::before {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  /* Amendment 6.2: the sealed max ring is a full 2px stroke (xhigh stays 1px);
+     the xhigh→max seal keyframes animate the padding 1px→2px smoothly (the ring
+     mask is padding-derived, so thickness grows with it). */
+  padding: 2px;
+  border-radius: inherit;
+  /* Hue split: max runs HOT (pink-white edges). */
+  --reasoning-cup-edge: var(--reasoning-cup-edge-hot);
+  --reasoning-cup-reach: var(--reasoning-cup-seal);
+  --reasoning-cup-bloom: var(--reasoning-cup-bloom-rest);
+  /* Resting fallback (Amendment 6.1 hardening): a fully-revealed ring if the
+     build animation is ever dropped; while the build runs, its backwards fill
+     (`both`) holds 0deg through the delay, so this never pre-reveals. */
+  --reasoning-ring-half: 180deg;
+  background-image: var(--reasoning-rim-cups);
+  content: "";
+  pointer-events: none;
+  -webkit-mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: source-in, xor;
+  mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: intersect, exclude;
+  animation:
+    reasoning-ring-build var(--reasoning-ring-build) var(--ease-out-sine) 1 both,
+    reasoning-ring-pulse var(--reasoning-ring-pulse) var(--ease-out-quart)
+      var(--reasoning-ring-build) 1 both,
+    reasoning-ring-breathe var(--reasoning-ring-breathe) var(--ease-out-sine)
+      calc(var(--reasoning-ring-build) + var(--reasoning-ring-pulse)) infinite alternate;
+}
+
+/* xhigh→max UP: the SEAL. The gradient's stops continue rest→50% (the two lit
+   regions meet) and the centre BLOOMS 0→rest, then the pulse. Plain 2-layer ring
+   mask (no conic wrap) so the seal is purely the gradient extending — seamless
+   from xhigh's resting cups by construction. */
+[data-reasoning-tier="max"][data-reasoning-tier-prev="xhigh"]::before {
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation:
+    reasoning-cup-seal var(--reasoning-gap-close) var(--ease-out-sine) 1 both,
+    reasoning-ring-pulse var(--reasoning-ring-pulse) var(--ease-out-quart)
+      var(--reasoning-gap-close) 1 both,
+    reasoning-ring-breathe var(--reasoning-ring-breathe) var(--ease-out-sine)
+      calc(
+        var(--reasoning-gap-close) + var(--reasoning-ring-pulse) +
+          var(--reasoning-max-streak-settle)
+      )
+      infinite alternate;
+}
+
+/* flood→max: the flood drains first (spans), THEN the bottom-up ring wrap +
+   pulse, delayed by the drain duration. During the delay `--reasoning-ring-half`
+   holds at 0deg, so the ring is invisible until the flood is gone. */
+[data-reasoning-tier="max"][data-reasoning-tier-prev="ultracode"]::before,
+[data-reasoning-tier="max"][data-reasoning-tier-prev="ultrathink"]::before {
+  animation:
+    reasoning-ring-build var(--reasoning-ring-build) var(--ease-out-sine) var(--reasoning-exit) 1
+      both,
+    reasoning-ring-pulse var(--reasoning-ring-pulse) var(--ease-out-quart)
+      calc(var(--reasoning-exit) + var(--reasoning-ring-build)) 1 both,
+    reasoning-ring-breathe var(--reasoning-ring-breathe) var(--ease-out-sine)
+      calc(var(--reasoning-exit) + var(--reasoning-ring-build) + var(--reasoning-ring-pulse))
+      infinite alternate;
+}
+
+/* max→none EXIT: the ring UN-WRAPS — opens at top-centre and recedes down
+   both sides to die at bottom-centre (the exact reverse of the build), sized
+   to the exit window (Amendment 6.16). */
+[data-reasoning-tier-exit="max"]::before {
+  animation: reasoning-ring-unbuild var(--reasoning-exit) var(--ease-out-quart) 1 both;
+}
+
+/* ultrathink→ULTRACODE: the WHITE ring closes exactly the way it opened —
+   un-wrapping from top-centre back down to bottom-centre — hosted on
+   ultracode's free `::before` while the shared fill stands (Amendment 6.19).
+   2px stroke and the white ring gradient, matching the ring it replaces. */
+[data-reasoning-tier="ultracode"][data-reasoning-tier-prev="ultrathink"]::before {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding: 2px;
+  border-radius: inherit;
+  --reasoning-ring-half: 180deg;
+  background: var(--reasoning-rim-pink);
+  content: "";
+  pointer-events: none;
+  -webkit-mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: source-in, xor;
+  mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: intersect, exclude;
+  animation: reasoning-ring-unbuild var(--reasoning-ring-build) var(--ease-out-sine) 1 both;
+}
+
+/* max→ULTRACODE: the ring must not vanish at the attr switch — ultracode's
+   `::before` is free, so it hosts the departing max ring for the un-wrap
+   while the flood pours beneath it; the fill-forward hold keeps it invisible
+   afterwards (the persisting prev attr is harmless). max→ultrathink cannot do
+   this (ultrathink's `::before` is the breathing halo). */
+[data-reasoning-tier="ultracode"][data-reasoning-tier-prev="max"]::before {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  padding: 2px;
+  border-radius: inherit;
+  --reasoning-cup-edge: var(--reasoning-cup-edge-hot);
+  --reasoning-cup-reach: var(--reasoning-cup-seal);
+  --reasoning-cup-bloom: var(--reasoning-cup-bloom-rest);
+  --reasoning-ring-half: 180deg;
+  background-image: var(--reasoning-rim-cups);
+  content: "";
+  pointer-events: none;
+  -webkit-mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: source-in, xor;
+  mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: intersect, exclude;
+  animation: reasoning-ring-unbuild var(--reasoning-ring-build) var(--ease-out-sine) 1 both;
+}
+
+/* ── Flood tiers: per-context fill / opacity vars ─────────────────────── */
+
+/* Every flood context — both tiers, either flood draining under an incoming
+   ring, and both flood→none exits — paints the ONE shared flood fill at the one
+   shared weight (Amendment 6.2: no per-hue machinery, no substrate). */
+[data-reasoning-tier="ultracode"],
+[data-reasoning-tier="ultrathink"],
+[data-reasoning-tier="max"][data-reasoning-tier-drain],
+[data-reasoning-tier="xhigh"][data-reasoning-tier-drain],
+[data-reasoning-tier-exit="ultracode"],
+[data-reasoning-tier-exit="ultrathink"] {
+  --reasoning-pour-fill: var(--reasoning-fill-flood);
+  --reasoning-pour-opacity: 0.74;
+  --reasoning-fill-tone: linear-gradient(transparent, transparent);
+}
+
+/* Tone split (Amendment 6.6, user ruling): ULTRACODE runs DEEP and dark,
+   ULTRATHINK runs BRIGHT - an overlay tone layer + a weight split on the same
+   shared fill, so the cross-flood no-op is preserved (only dressing changes). */
+[data-reasoning-tier="ultracode"],
+[data-reasoning-tier-exit="ultracode"] {
+  --reasoning-fill-tone: linear-gradient(rgb(12 8 34 / 42%), rgb(18 10 44 / 28%));
+  --reasoning-pour-opacity: 0.6;
+}
+
+[data-reasoning-tier="ultrathink"],
+[data-reasoning-tier-exit="ultrathink"] {
+  --reasoning-fill-tone: linear-gradient(rgb(24 12 48 / 20%), rgb(20 10 44 / 14%));
+  --reasoning-pour-opacity: 0.9;
+}
+
+/* ── Pour child spans (`--base`, `--under`, `--mid`, `--top`) ─────────── */
+
+/* Shared geometry. ChatComposer renders these aria-hidden spans whenever a flood
+   tier is involved (entering, exiting, or draining under an incoming ring). More
+   specific than the `> *` z-index:1 promotion so they sit behind the content. */
+[data-reasoning-tier] > .reasoning-pour,
+[data-reasoning-tier-exit] > .reasoning-pour {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background-image: var(--reasoning-fill-tone), var(--reasoning-pour-fill);
+  /* One size/position pair repeats across every mesh layer. 200% keeps roughly
+     half the hue field inside the window (several blob centres at once); the
+     50% 50% base position is the midfield — the wander keyframes stay in the
+     35-65% band so the view never parks in a single-hue corner. */
+  background-size: 200% 200%;
+  background-position: 50% 50%;
+  opacity: 0;
+  pointer-events: none;
+  clip-path: circle(
+    calc(var(--spread-cover-r) + 3px) at var(--spread-origin-x) var(--spread-origin-y)
+  );
+}
+
+/* Per-wavefront resting weights (ruling 3): under dim, mid mid, top full. */
+[data-reasoning-tier] > .reasoning-pour--under,
+[data-reasoning-tier-exit] > .reasoning-pour--under {
+  --reasoning-layer-opacity: 0.2;
+}
+
+[data-reasoning-tier] > .reasoning-pour--mid,
+[data-reasoning-tier-exit] > .reasoning-pour--mid {
+  --reasoning-layer-opacity: 0.5;
+}
+
+[data-reasoning-tier] > .reasoning-pour--top,
+[data-reasoning-tier-exit] > .reasoning-pour--top {
+  --reasoning-layer-opacity: var(--reasoning-pour-opacity);
+}
+
+/* POUR (any ring/none→flood entry): the three wavefronts pour the shared fill,
+   staggered; the top wavefront also carries the flow drift (it is the fullest
+   visible layer). A flood↔flood switch changes NOTHING here — same fill, same
+   settled animations, no remount (`reasoningPourKey` is flood-stable). */
+[data-reasoning-tier="ultracode"] > .reasoning-pour--under,
+[data-reasoning-tier="ultrathink"] > .reasoning-pour--under {
+  animation: reasoning-pour var(--reasoning-spread) var(--ease-in-swell) 1 both;
+}
+
+[data-reasoning-tier="ultracode"] > .reasoning-pour--mid,
+[data-reasoning-tier="ultrathink"] > .reasoning-pour--mid {
+  animation: reasoning-pour var(--reasoning-spread) var(--ease-in-swell)
+    var(--reasoning-pour-stagger-mid) 1 both;
+}
+
+[data-reasoning-tier="ultracode"] > .reasoning-pour--top,
+[data-reasoning-tier="ultrathink"] > .reasoning-pour--top {
+  animation:
+    reasoning-pour var(--reasoning-spread) var(--ease-in-swell) var(--reasoning-pour-stagger-top) 1
+      both,
+    reasoning-fill-flow var(--reasoning-flow-speed) linear infinite alternate;
+}
+
+/* DRAIN (flood→ring + flood→none exit): the wavefronts recede to the pill.
+   Higher-specificity (tier+drain) / exit selectors override the cold pour
+   above. NO flood↔flood drain exists any more — the shared fill stays put. */
+[data-reasoning-tier="max"][data-reasoning-tier-drain] > .reasoning-pour,
+[data-reasoning-tier="xhigh"][data-reasoning-tier-drain] > .reasoning-pour,
+[data-reasoning-tier-exit] > .reasoning-pour {
+  animation: reasoning-drain var(--reasoning-exit) var(--ease-out-quart) 1 both;
+}
+
+/* max - the glow, max's signature vs xhigh (Amendment 6.15). A dedicated
+   layer (ChatComposer renders `.reasoning-glow` for max) with a STATIC
+   symmetric shadow whose OPACITY flashes: nothing -> really bright -> settles
+   at the resting glow, starting the moment the tier is picked. Symmetric on
+   every axis, so it can never re-create the up-down report. */
+[data-reasoning-tier="max"] > .reasoning-glow,
+[data-reasoning-tier-exit="max"] > .reasoning-glow,
+[data-reasoning-tier="ultracode"][data-reasoning-tier-prev="max"] > .reasoning-glow {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 var(--reasoning-halo-blur-tight) color-mix(in srgb, var(--primary) 48%, transparent),
+    inset 0 0 var(--reasoning-cast-blur) var(--reasoning-cast-spread)
+      color-mix(in srgb, var(--astro-highlight) 62%, transparent);
+  opacity: 0.45;
+  pointer-events: none;
+  transition: opacity var(--reasoning-exit) var(--ease-out-quart);
+}
+
+[data-reasoning-tier="max"] > .reasoning-glow {
+  animation: reasoning-glow-flash var(--reasoning-glow-flash) var(--ease-out-sine) 1 both;
+}
+
+[data-reasoning-tier-exit="max"] > .reasoning-glow,
+[data-reasoning-tier="ultracode"][data-reasoning-tier-prev="max"] > .reasoning-glow {
+  opacity: 0;
+}
+
+/* ── ultrathink halo (static) ─────────────────────────────────────────── */
+
+/* Breathing halo (Amendment 6.6): the flood tiers' ::before is otherwise
+   unused, so ultrathink borrows it as a dedicated glow layer whose OPACITY
+   breathes over the static box-shadow - the shadow itself never animates. */
+[data-reasoning-tier="ultrathink"]::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 var(--reasoning-halo-blur-tight) color-mix(in srgb, var(--astro-highlight) 62%, transparent),
+    0 0 var(--reasoning-halo-blur-wide) color-mix(in srgb, var(--astro-highlight) 44%, transparent);
+  content: "";
+  opacity: 0.35;
+  pointer-events: none;
+  animation: reasoning-halo-breathe var(--reasoning-halo-breathe) var(--ease-out-sine) infinite
+    alternate;
+}
+
+/* The strong static outer PINK halo. Two box-shadow layers; static by mandate.
+   Blur radii come from length tokens so no raw blur literal sits in this body. */
+[data-reasoning-tier="ultrathink"],
+[data-reasoning-tier-exit="ultrathink"] {
+  box-shadow:
+    0 0 var(--reasoning-halo-blur-tight) color-mix(in srgb, var(--astro-highlight) 46%, transparent),
+    0 0 var(--reasoning-halo-blur-wide) color-mix(in srgb, var(--astro-highlight) 30%, transparent);
+}
+
+/* ── Flood-tier sparkles (ruling 8; Amendment 6.2 — both Ultra tiers) ── */
+
+/* A dedicated aria-hidden host rendered for BOTH flood tiers; sits over the
+   flood but under the content (z 0), so pops never land on the editor text. */
+[data-reasoning-tier="ultracode"] > .reasoning-sparkles,
+[data-reasoning-tier="ultrathink"] > .reasoning-sparkles {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* Each star: the splash star shape as a mask, tinted WHITE, popping in/out on a
+   staggered loop (opacity + transform only). */
+[data-reasoning-tier="ultracode"] .reasoning-sparkle,
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  background-color: color-mix(in srgb, white 94%, var(--astro-highlight));
+  opacity: 0;
+  pointer-events: none;
+  -webkit-mask: var(--reasoning-star) center / contain no-repeat;
+  mask: var(--reasoning-star) center / contain no-repeat;
+  animation: reasoning-sparkle-pop var(--reasoning-sparkle-cycle-a) var(--ease-out-sine)
+    var(--reasoning-sparkle-delay-1) infinite;
+}
+
+/* Scatter positions along the LEFT, RIGHT and BOTTOM edges only (never the
+   centre-top where the prompt text sits), with alternating cycle lengths and
+   scattered phase offsets so the pops feel occasional and unsynchronised. */
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(1),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(1) {
+  left: 5%;
+  top: 38%;
+  width: 12px;
+  height: 12px;
+  animation-delay: var(--reasoning-sparkle-delay-1);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(2),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(2) {
+  left: 12%;
+  top: 82%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-2);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(3),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(3) {
+  left: 94%;
+  top: 44%;
+  width: 12px;
+  height: 12px;
+  animation-delay: var(--reasoning-sparkle-delay-3);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(4),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(4) {
+  left: 88%;
+  top: 80%;
+  width: 8px;
+  height: 8px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-4);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(5),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(5) {
+  left: 27%;
+  top: 92%;
+  width: 10px;
+  height: 10px;
+  animation-delay: var(--reasoning-sparkle-delay-5);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(6),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(6) {
+  left: 73%;
+  top: 91%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-6);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(7),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(7) {
+  left: 50%;
+  top: 94%;
+  width: 8px;
+  height: 8px;
+  animation-delay: var(--reasoning-sparkle-delay-7);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(8),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(8) {
+  left: 26%;
+  top: 48%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-8);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(9),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(9) {
+  left: 18%;
+  top: 90%;
+  width: 8px;
+  height: 8px;
+  animation-delay: var(--reasoning-sparkle-delay-9);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(10),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(10) {
+  left: 96%;
+  top: 68%;
+  width: 10px;
+  height: 10px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-10);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(11),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(11) {
+  left: 62%;
+  top: 93%;
+  width: 8px;
+  height: 8px;
+  animation-delay: var(--reasoning-sparkle-delay-11);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(12),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(12) {
+  left: 38%;
+  top: 90%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-12);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(13),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(13) {
+  left: 30%;
+  top: 62%;
+  width: 10px;
+  height: 10px;
+  animation-delay: var(--reasoning-sparkle-delay-13);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(14),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(14) {
+  left: 66%;
+  top: 58%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-14);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(15),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(15) {
+  left: 45%;
+  top: 91%;
+  width: 8px;
+  height: 8px;
+  animation-delay: var(--reasoning-sparkle-delay-15);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(16),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(16) {
+  left: 38%;
+  top: 74%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-16);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(17),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(17) {
+  left: 60%;
+  top: 78%;
+  width: 8px;
+  height: 8px;
+  animation-delay: var(--reasoning-sparkle-delay-17);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(18),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(18) {
+  left: 57%;
+  top: 95%;
+  width: 10px;
+  height: 10px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-18);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(19),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(19) {
+  left: 46%;
+  top: 64%;
+  width: 8px;
+  height: 8px;
+  animation-delay: var(--reasoning-sparkle-delay-19);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-sparkle:nth-child(20),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(20) {
+  left: 82%;
+  top: 93%;
+  width: 9px;
+  height: 9px;
+  animation-duration: var(--reasoning-sparkle-cycle-b);
+  animation-delay: var(--reasoning-sparkle-delay-20);
+}
+
+/* Ultrathink-only ceremonial flares (sparkle split): two stars become LARGE
+   slow four-point flares that rotate while they fade; ultracode keeps only the
+   small white twinkles. */
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(5),
+[data-reasoning-tier="ultrathink"] .reasoning-sparkle:nth-child(10) {
+  width: 20px;
+  height: 20px;
+  animation-name: reasoning-flare-pop;
+  animation-duration: var(--reasoning-flare-cycle);
+}
+
+/* THE one rainbow survivor (Amendment 6.10, user ruling): only the
+   thinking-level pill label ("Ultrathink - 1M") runs BRIGHT rainbow, and it
+   FILLS left-to-right over 2s - a white top layer recedes as the registered
+   sweep grows, unveiling the saturated rainbow beneath. Gradient declared on
+   the animating span itself (substitution site). The ultrathink dark-backing
+   rule above still supplies the drop-shadow. */
+[data-reasoning-tier="ultrathink"] [data-composer-reasoning-origin] button span:not(:has(*)) {
+  background-image:
+    linear-gradient(
+      90deg,
+      rgb(255 255 255 / 0%) 0%,
+      rgb(255 255 255 / 0%) var(--reasoning-ink-sweep),
+      var(--reasoning-contrast-ink) calc(var(--reasoning-ink-sweep) + 4%),
+      var(--reasoning-contrast-ink) 100%
+    ),
+    linear-gradient(
+      90deg,
+      #ff2d78 0%,
+      #ffb62e 17%,
+      #f8f83a 33%,
+      #4dff6a 50%,
+      #35c8ff 66%,
+      #b44dff 83%,
+      #ff2d78 100%
+    );
+  /* Cover layer static; rainbow layer 3x-wide and seamlessly tiled (first and
+     last stops match) so the endless lap never shows a seam. */
+  background-size:
+    100% 100%,
+    300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /* The pill keeps its own dark backing (Amendment 6.15: the general
+     ultrathink text backing was removed; without this the rainbow washes out
+     on the bright field). */
+  filter: drop-shadow(0 0 1px rgb(14 6 32 / 95%)) drop-shadow(0 0 2px rgb(14 6 32 / 85%));
+  animation:
+    reasoning-ink-sweep var(--reasoning-ink-sweep-time) linear 1 both,
+    reasoning-ink-lap var(--reasoning-ink-lap) linear infinite;
+}
+
+/* ── Outburst spark-lines (Amendment 6.7) ─────────────────────────────── */
+
+/* Little white dashes that fire OFF the composer into the app - anime speed
+   lines around the frame edge. The host must NOT clip (the marks live outside
+   the frame bounds). Ultracode shows the first six; ultrathink runs all ten. */
+[data-reasoning-tier="ultracode"] > .reasoning-outbursts,
+[data-reasoning-tier="ultrathink"] > .reasoning-outbursts {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Each spark is a METEOR (Amendment 6.11 restructure): the SPAN is a
+   flight container — it rotates and translates but NEVER scales, so its
+   pseudos survive the tail collapse. `::before` is the white tail fading to
+   the coloured head tip (collapses toward the head on its own); `::after` is
+   the endpoint EXPLOSION — a bigger RAINBOW splash star. Every spark's HEAD
+   (the box's right end, the transform origin) is anchored exactly ON the
+   frame edge and flies OUTWARD into the void; the tail-vs-displacement
+   profile keeps the trail from ever reaching deeper than its launch point,
+   so nothing paints across the composer interior. */
+[data-reasoning-tier="ultracode"] .reasoning-outburst,
+[data-reasoning-tier="ultrathink"] .reasoning-outburst {
+  --outburst-angle: 0deg;
+  --outburst-fling: 88px;
+  --outburst-head: #ff4d94;
+  position: absolute;
+  width: 72px;
+  height: 2px;
+  transform-origin: 100% 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: reasoning-meteor-fly var(--reasoning-outburst-cycle) var(--ease-out-quart) infinite;
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst::before,
+[data-reasoning-tier="ultrathink"] .reasoning-outburst::before {
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0%) 0%,
+    rgb(255 255 255 / 85%) 55%,
+    var(--outburst-head) 100%
+  );
+  content: "";
+  transform-origin: 100% 50%;
+  animation: reasoning-meteor-tail var(--reasoning-outburst-cycle) var(--ease-out-quart) infinite;
+  animation-delay: inherit;
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst::after,
+[data-reasoning-tier="ultrathink"] .reasoning-outburst::after {
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  margin-top: -8px;
+  background: linear-gradient(
+    135deg,
+    #ff2d78 0%,
+    #ffb62e 28%,
+    #4dff6a 52%,
+    #35c8ff 74%,
+    #b44dff 100%
+  );
+  content: "";
+  opacity: 0;
+  -webkit-mask: var(--reasoning-star) center / contain no-repeat;
+  mask: var(--reasoning-star) center / contain no-repeat;
+  animation: reasoning-meteor-pop var(--reasoning-outburst-cycle) var(--ease-out-quart) infinite;
+  animation-delay: inherit;
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(1),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(1) {
+  left: -72px;
+  top: 18%;
+  --outburst-angle: -160deg;
+  --outburst-head: #ff4d94;
+  animation-delay: var(--reasoning-sparkle-delay-1);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(2),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(2) {
+  left: -72px;
+  top: 64%;
+  --outburst-angle: 160deg;
+  --outburst-head: #a63cf5;
+  animation-delay: var(--reasoning-sparkle-delay-2);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(3),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(3) {
+  right: 0;
+  top: 22%;
+  --outburst-angle: -20deg;
+  --outburst-head: #3f6aff;
+  animation-delay: var(--reasoning-sparkle-delay-3);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(4),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(4) {
+  right: 0;
+  top: 70%;
+  --outburst-angle: 20deg;
+  --outburst-head: #ff4d94;
+  animation-delay: var(--reasoning-sparkle-delay-4);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(5),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(5) {
+  left: calc(10% - 72px);
+  top: -1px;
+  --outburst-angle: -110deg;
+  --outburst-head: #a63cf5;
+  animation-delay: var(--reasoning-sparkle-delay-5);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(6),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(6) {
+  right: calc(12% - 72px);
+  top: -1px;
+  --outburst-angle: -70deg;
+  --outburst-head: #3f6aff;
+  animation-delay: var(--reasoning-sparkle-delay-6);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(7),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(7) {
+  left: calc(24% - 72px);
+  bottom: -1px;
+  --outburst-angle: 110deg;
+  --outburst-head: #ff4d94;
+  animation-delay: var(--reasoning-sparkle-delay-7);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(8),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(8) {
+  right: calc(26% - 72px);
+  bottom: -1px;
+  --outburst-angle: 70deg;
+  --outburst-head: #a63cf5;
+  animation-delay: var(--reasoning-sparkle-delay-8);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(9),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(9) {
+  left: -72px;
+  top: 42%;
+  --outburst-angle: 180deg;
+  --outburst-head: #3f6aff;
+  animation-delay: var(--reasoning-sparkle-delay-9);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(10),
+[data-reasoning-tier="ultrathink"] .reasoning-outburst:nth-child(10) {
+  right: 0;
+  top: 46%;
+  --outburst-angle: 0deg;
+  --outburst-head: #ff4d94;
+  animation-delay: var(--reasoning-sparkle-delay-10);
+}
+
+[data-reasoning-tier="ultracode"] .reasoning-outburst:nth-child(n + 7) {
+  display: none;
+}
+
+/* ── Rim motion (::after), masked to the border ring ─────────────────── */
+
+/* xhigh: one spectrum entry sweep on tier entry. */
+[data-reasoning-tier="xhigh"]::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background-image: var(--reasoning-entry-spectrum);
+  background-size: 300% 100%;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: reasoning-entry-sweep var(--reasoning-entry-sweep) var(--ease-out-quart) 1 both;
+}
+
+/* max — the "clearly visible" travelling streak over the 1px ring. It fades in
+   (`reasoning-rim-appear`) and its lap begins only once the ring is built/sealed;
+   the delay is context-dependent via `--reasoning-streak-delay`. */
+[data-reasoning-tier="max"]::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  --reasoning-streak-delay: var(--reasoning-ring-build);
+  background: conic-gradient(
+    from calc(var(--reasoning-rim-angle) + 180deg),
+    transparent 0deg 230deg,
+    color-mix(in srgb, var(--astro-highlight) 50%, transparent) 300deg,
+    color-mix(in srgb, var(--astro-highlight) 82%, transparent) 342deg,
+    color-mix(in srgb, var(--astro-highlight) 60%, transparent) 352deg,
+    transparent 360deg
+  );
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation:
+    reasoning-rim-appear var(--reasoning-streak-fade) var(--ease-out-sine)
+      var(--reasoning-streak-delay) 1 both,
+    reasoning-rim-streak var(--reasoning-rim-streak-max) linear var(--reasoning-streak-delay)
+      infinite both;
+}
+
+/* Context delays for the max streak: after the seal (from xhigh) or after the
+   drain + ring build (from a flood). Cold entry uses the base = ring build. */
+[data-reasoning-tier="max"][data-reasoning-tier-prev="xhigh"]::after {
+  --reasoning-streak-delay: calc(var(--reasoning-gap-close) + var(--reasoning-max-streak-settle));
+}
+
+[data-reasoning-tier="max"][data-reasoning-tier-prev="ultracode"]::after,
+[data-reasoning-tier="max"][data-reasoning-tier-prev="ultrathink"]::after {
+  --reasoning-streak-delay: calc(var(--reasoning-exit) + var(--reasoning-ring-build));
+}
+
+/* ultracode — a PROMINENT WHITE streak of light travelling the rim over the
+   flood (Amendment 6.2; previously ultracode had no rim motion at all). No
+   static ring — just the moving light. It fades in once the pour visually
+   completes (`--reasoning-ring-start`) and laps forever. */
+[data-reasoning-tier="ultracode"]::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  /* 2px stroke (Amendment 6.3: +1px — the 1px streak read as too thin). */
+  padding: 2px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--reasoning-rim-angle),
+    transparent 0deg 216deg,
+    rgb(255 255 255 / 45%) 296deg,
+    rgb(255 255 255 / 96%) 340deg,
+    rgb(255 255 255 / 55%) 352deg,
+    transparent 360deg
+  );
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation:
+    reasoning-streak-appear var(--reasoning-streak-fade) var(--ease-out-sine)
+      var(--reasoning-streak-start) 1 both,
+    reasoning-rim-streak var(--reasoning-rim-streak-max) linear var(--reasoning-streak-start)
+      infinite both;
+}
+
+/* ultrathink — the PINK full ring (2px) that WRAPS in from bottom-centre AND the
+   travelling streak, on one pseudo (its `::before` is free; the flood lives on
+   the pour spans). The conic reveal (`--reasoning-ring-half`, from 180deg) must be
+   the FIRST mask layer with `intersect, exclude` (reveal ∩ ring). The wrap runs
+   after the pour; the streak follows the wrap. */
+[data-reasoning-tier="ultrathink"]::after,
+[data-reasoning-tier-exit="ultrathink"]::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding: 2px;
+  border-radius: inherit;
+  /* Resting fallback (Amendment 6.1 hardening) — see the max ring note. While
+     the build runs, its backwards fill holds 0deg through the delay. */
+  --reasoning-ring-half: 180deg;
+  /* Streak removed (Amendment 6.18 trial): just the white ring, PULSING on a
+     2s period once the wrap completes. */
+  background: var(--reasoning-rim-pink);
+  content: "";
+  pointer-events: none;
+  -webkit-mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: source-in, xor;
+  mask:
+    conic-gradient(
+      from 180deg,
+      #000 0deg,
+      #000 var(--reasoning-ring-half),
+      transparent var(--reasoning-ring-half),
+      transparent calc(360deg - var(--reasoning-ring-half)),
+      #000 calc(360deg - var(--reasoning-ring-half)),
+      #000 360deg
+    ),
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: intersect, exclude;
+  animation:
+    reasoning-ring-build var(--reasoning-ring-build) var(--ease-out-sine)
+      var(--reasoning-ring-start) 1 both,
+    reasoning-white-ring-pulse var(--reasoning-white-ring-pulse) var(--ease-out-sine)
+      calc(var(--reasoning-ring-start) + var(--reasoning-ring-build)) infinite;
+}
+
+/* ultrathink→none EXIT: the white ring closes the way it opened, sized to the
+   exit window. */
+[data-reasoning-tier-exit="ultrathink"]::after {
+  animation: reasoning-ring-unbuild var(--reasoning-exit) var(--ease-out-quart) 1 both;
+}
+
+/* ── Contrast rule — light text over any fill ────────────────────────── */
+
+[data-reasoning-tier="ultracode"] [data-chat-composer-footer],
+[data-reasoning-tier="ultrathink"] [data-chat-composer-footer] {
+  color: var(--reasoning-contrast-ink);
+}
+
+[data-reasoning-tier="ultracode"] [data-chat-composer-footer] :where(button, span, a, svg),
+[data-reasoning-tier="ultrathink"] [data-chat-composer-footer] :where(button, span, a, svg) {
+  color: var(--reasoning-contrast-ink);
+}
+
+[data-reasoning-tier="ultracode"] [data-composer-placeholder],
+[data-reasoning-tier="ultrathink"] [data-composer-placeholder] {
+  color: color-mix(in srgb, var(--reasoning-contrast-ink) 82%, transparent);
+}
+
+/* ── Keyframes ──────────────────────────────────────────────────────── */
+
+@keyframes reasoning-entry-sweep {
+  from {
+    opacity: 1;
+    background-position: 0% 50%;
+  }
+
+  to {
+    opacity: 0;
+    background-position: 100% 50%;
+  }
+}
+
+/* Fill drift (Amendment 6.3) — the flood WANDERS around the hue field: up,
+   down, left, right along the mid-diagonal band, positions clamped to 35-65%
+   so the window never parks in the all-pink or all-blue corners. Runs
+   `alternate`, so the path retraces seamlessly. `background-position` only;
+   the single pair repeats across every mesh layer. */
+@keyframes reasoning-fill-flow {
+  from {
+    background-position: 38% 42%;
+  }
+
+  22% {
+    background-position: 58% 36%;
+  }
+
+  44% {
+    background-position: 64% 62%;
+  }
+
+  66% {
+    background-position: 42% 65%;
+  }
+
+  84% {
+    background-position: 35% 50%;
+  }
+
+  to {
+    background-position: 60% 48%;
+  }
+}
+
+/*
+ * The pour. Starts at a small NONZERO puddle at the pill origin and grows to the
+ * MEASURED just-covering radius (`--spread-cover-r`, px from ChatComposer) in one
+ * eased motion — no ripple (Amendment 6.2 ruling: the clip-circle "reflection"
+ * read as the colour disc contracting, so it was cut; a plain settle is right).
+ * The `to` opacity reads the per-wavefront `--reasoning-layer-opacity` (under
+ * 0.2, mid 0.5, top full), so the staggered layers settle at their own weights.
+ */
+@keyframes reasoning-pour {
+  from {
+    clip-path: circle(3% at var(--spread-origin-x) var(--spread-origin-y));
+    opacity: 0.14;
+  }
+
+  68% {
+    opacity: var(--reasoning-layer-opacity);
+  }
+
+  to {
+    clip-path: circle(
+      calc(var(--spread-cover-r) + 3px) at var(--spread-origin-x) var(--spread-origin-y)
+    );
+    opacity: var(--reasoning-layer-opacity);
+  }
+}
+
+/* Flood drain — the pour clip run in reverse (cross-flood down-shift, flood→ring
+   drain, and every flood→none exit). Recedes to the pill and fades. */
+@keyframes reasoning-drain {
+  from {
+    clip-path: circle(
+      calc(var(--spread-cover-r) + 3px) at var(--spread-origin-x) var(--spread-origin-y)
+    );
+    opacity: var(--reasoning-layer-opacity);
+  }
+
+  to {
+    clip-path: circle(3% at var(--spread-origin-x) var(--spread-origin-y));
+    opacity: 0;
+  }
+}
+
+@keyframes reasoning-rim-streak {
+  from {
+    --reasoning-rim-angle: 0deg;
+  }
+
+  to {
+    --reasoning-rim-angle: 360deg;
+  }
+}
+
+@keyframes reasoning-rim-appear {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 0.85;
+  }
+}
+
+/* Identical body, DEDICATED name for the ultracode streak fade. Load-bearing:
+   max's streak also animates `reasoning-rim-appear`, and CSS does not restart
+   an animation whose name survives a style change — with a shared name, a
+   max->ultracode switch carried the FINISHED fade over and the white streak
+   popped in instantly (Amendment 6.5). A fresh name always restarts. */
+@keyframes reasoning-streak-appear {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 0.85;
+  }
+}
+
+/* xhigh side-cup grow — the gradient's own stops extend 0%→rest, so the two lit
+   cups slide inward from the side edges. At 0% the lit region has zero width (no
+   pop); holds at rest. */
+@keyframes reasoning-cup-grow {
+  from {
+    --reasoning-cup-reach: 0%;
+  }
+
+  to {
+    --reasoning-cup-reach: var(--reasoning-cup-rest);
+  }
+}
+
+/* max→xhigh reverse un-seal — reach 50%→rest, centre bloom 58%→0: the full ring
+   opens back into the resting cups. */
+@keyframes reasoning-cup-unseal {
+  from {
+    --reasoning-cup-reach: var(--reasoning-cup-seal);
+    --reasoning-cup-bloom: var(--reasoning-cup-bloom-rest);
+    --reasoning-cup-edge: var(--reasoning-cup-edge-hot);
+    padding: 2px;
+  }
+
+  to {
+    --reasoning-cup-reach: var(--reasoning-cup-rest);
+    --reasoning-cup-bloom: 0%;
+    --reasoning-cup-edge: var(--reasoning-cup-edge-cool);
+    padding: 1px;
+  }
+}
+
+/* xhigh→none exit — the cups retract to the side edges and fade. */
+@keyframes reasoning-cup-drain {
+  from {
+    --reasoning-cup-reach: var(--reasoning-cup-rest);
+    opacity: 1;
+  }
+
+  to {
+    --reasoning-cup-reach: 0%;
+    opacity: 0;
+  }
+}
+
+/* xhigh→max seal — the gradient's stops continue rest→50% (lit regions meet at
+   centre) while the centre BLOOMS 0→rest, so the ring closes and brightens to the
+   full-ring look with no gradient swap and no jump. */
+@keyframes reasoning-cup-seal {
+  from {
+    --reasoning-cup-reach: var(--reasoning-cup-rest);
+    --reasoning-cup-bloom: 0%;
+    --reasoning-cup-edge: var(--reasoning-cup-edge-cool);
+    padding: 1px;
+  }
+
+  to {
+    --reasoning-cup-reach: var(--reasoning-cup-seal);
+    --reasoning-cup-bloom: var(--reasoning-cup-bloom-rest);
+    --reasoning-cup-edge: var(--reasoning-cup-edge-hot);
+    padding: 2px;
+  }
+}
+
+/* The ring UN-WRAP — reverse of `reasoning-ring-build`: the revealed span
+   shrinks from full back toward bottom-centre, so the ring visually opens at
+   the top and recedes down both sides. */
+@keyframes reasoning-ring-unbuild {
+  from {
+    --reasoning-ring-half: 180deg;
+  }
+
+  to {
+    --reasoning-ring-half: 0deg;
+  }
+}
+
+/* max completion pulse — a clearly-visible DOUBLE-BEAT: the ring pops to full
+   twice, each beat with a small `transform: scale` bloom (NOT an animated
+   box-shadow). Reads as "the ring sealed". */
+@keyframes reasoning-ring-pulse {
+  from {
+    opacity: 0.85;
+  }
+
+  45% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0.95;
+  }
+}
+
+/* Bottom-up ring wrap (cold-max + ultrathink) — the revealed half-angle grows
+   0deg (a hairline at bottom-centre) → 180deg (the full ring), so the ring wraps
+   in from the bottom both ways and closes at the top. */
+@keyframes reasoning-ring-build {
+  from {
+    --reasoning-ring-half: 0deg;
+  }
+
+  to {
+    --reasoning-ring-half: 180deg;
+  }
+}
+
+/* Ultrathink sparkle pop — a short bright pop then invisible for the rest of the
+   long cycle, so the star reads as an occasional twinkle. Opacity + transform. */
+@keyframes reasoning-sparkle-pop {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.4) rotate(-8deg);
+  }
+
+  3% {
+    opacity: 0.9;
+    transform: scale(1) rotate(0deg);
+  }
+
+  12% {
+    opacity: 0.85;
+    transform: scale(0.96) rotate(2deg);
+  }
+
+  16% {
+    opacity: 0;
+    transform: scale(0.55) rotate(6deg);
+  }
+}
+
+/* ultrathink halo breath - opacity only over a static shadow. */
+@keyframes reasoning-halo-breathe {
+  from {
+    opacity: 0.35;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* max resting ring breath - a slow luminance swell; runs alternate. */
+@keyframes reasoning-ring-breathe {
+  from {
+    opacity: 0.9;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* Ultrathink ceremonial flare - large, slow, rotating as it fades. */
+@keyframes reasoning-flare-pop {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.4) rotate(0deg);
+  }
+
+  4% {
+    opacity: 0.95;
+    transform: scale(1.12) rotate(10deg);
+  }
+
+  16% {
+    opacity: 0.8;
+    transform: scale(0.98) rotate(38deg);
+  }
+
+  22% {
+    opacity: 0;
+    transform: scale(0.5) rotate(52deg);
+  }
+}
+
+/* Meteor flight - the container launches from the edge anchor, flies its
+   head outward, HOLDS at the endpoint while the tail collapses and the pop
+   fires (the container must stay visible through the pop - its pseudos live
+   inside it), then resets invisibly. */
+@keyframes reasoning-meteor-fly {
+  0%,
+  100% {
+    opacity: 0;
+    transform: rotate(var(--outburst-angle)) translateX(0);
+  }
+
+  2% {
+    opacity: 1;
+    transform: rotate(var(--outburst-angle)) translateX(calc(var(--outburst-fling) * 0.12));
+  }
+
+  9% {
+    opacity: 1;
+    transform: rotate(var(--outburst-angle)) translateX(var(--outburst-fling));
+  }
+
+  19% {
+    opacity: 1;
+    transform: rotate(var(--outburst-angle)) translateX(var(--outburst-fling));
+  }
+
+  21% {
+    opacity: 0;
+    transform: rotate(var(--outburst-angle)) translateX(var(--outburst-fling));
+  }
+}
+
+/* Meteor tail - grows behind the flying head (never longer than the distance
+   flown, so it never reaches back inside the frame), then flows forward into
+   the endpoint. Scales around the head end. */
+@keyframes reasoning-meteor-tail {
+  0%,
+  100% {
+    transform: scaleX(0.02);
+  }
+
+  3% {
+    transform: scaleX(0.22);
+  }
+
+  9% {
+    transform: scaleX(1);
+  }
+
+  14% {
+    transform: scaleX(0.05);
+  }
+}
+
+/* Endpoint explosion - the RAINBOW splash star pops right where head and tail
+   converged. */
+@keyframes reasoning-meteor-pop {
+  0%,
+  13%,
+  100% {
+    opacity: 0;
+    transform: scale(0.3) rotate(0deg);
+  }
+
+  15% {
+    opacity: 1;
+    transform: scale(1) rotate(14deg);
+  }
+
+  19% {
+    opacity: 0;
+    transform: scale(1.45) rotate(26deg);
+  }
+}
+
+/* The pill-label rainbow unveiling - the white cover recedes rightward. */
+@keyframes reasoning-ink-sweep {
+  from {
+    --reasoning-ink-sweep: 0%;
+  }
+
+  to {
+    --reasoning-ink-sweep: 100%;
+  }
+}
+
+/* max glow flash - nothing, up to full bright, back down to the resting
+   weight; the shadow itself never animates, only this layer's opacity. */
+@keyframes reasoning-glow-flash {
+  from {
+    opacity: 0;
+  }
+
+  26% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0.45;
+  }
+}
+
+/* The pill rainbow's endless lap - one full tile width per cycle, seamless.
+   Layer order: cover stays parked, only the rainbow layer travels. */
+@keyframes reasoning-ink-lap {
+  from {
+    background-position:
+      0 0,
+      0% 0;
+  }
+
+  to {
+    background-position:
+      0 0,
+      -150% 0;
+  }
+}
+
+/* Ultrathink white-ring pulse - a full dim-and-return breath per cycle. */
+@keyframes reasoning-white-ring-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.72;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * Reduced motion is otherwise deferred by standing decision. Carried over
+   * unchanged: omit xhigh's one-shot entry sweep. The static rim and illuminated
+   * glyph still mark the state, so no meaning is carried by animation alone.
+   */
+  [data-reasoning-tier="xhigh"]::after {
+    animation: none;
+    opacity: 0;
+  }
+}

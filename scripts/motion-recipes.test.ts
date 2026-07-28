@@ -1,25 +1,26 @@
-import * as NodeFS from "node:fs";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as NodeURL from "node:url";
-
-import { describe, expect, it } from "vite-plus/test";
 
 /*
  * Contract guard for the shared interaction language in
  * `apps/web/src/styles/motion.css`.
  *
- * This lives at repo scope rather than inside `apps/web` for two reasons:
- * the web package forbids `node:` builtins (browser code must not reach for
- * them), and the unit pipeline resolves `?raw` CSS imports to an empty string
- * — which silently passes every assertion below. Reading the file directly is
- * the only way this guard actually guards anything.
+ * This lives at repo scope rather than inside `apps/web` for two reasons: the
+ * web package forbids `node:` builtins (browser code must not reach for them),
+ * and the unit pipeline resolves `?raw` CSS imports to an empty string — which
+ * silently passes every assertion below. Reading the file is the only way this
+ * guard actually guards anything, and repo-wide lint requires that read go
+ * through Effect's `FileSystem` rather than `node:fs`.
  *
  * Its job is to fail loudly when a later slice drifts the tokens, drops a
  * reduced-motion fallback, or creeps past the plan's intensity ceiling. See
  * `docs/project/nightly-interaction-motion-polish-plan.md`.
  */
-const source = NodeFS.readFileSync(
-  NodeURL.fileURLToPath(new URL("../apps/web/src/styles/motion.css", import.meta.url)),
-  "utf8",
+const MOTION_CSS = NodeURL.fileURLToPath(
+  new URL("../apps/web/src/styles/motion.css", import.meta.url),
 );
 
 /** Recipes that animate, and therefore owe a reduced-motion alternative. */
@@ -35,9 +36,14 @@ const ANIMATING_RECIPES = [
   "motion-completion",
 ];
 
-function reducedMotionBlock(): string {
+const readMotionCss = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  return yield* fs.readFileString(MOTION_CSS);
+});
+
+function reducedMotionBlock(source: string): string {
   const start = source.indexOf("@media (prefers-reduced-motion: reduce)");
-  expect(start).toBeGreaterThan(-1);
+  if (start === -1) throw new Error("no prefers-reduced-motion block");
 
   // Walk braces so nested rules stay inside the captured block.
   let depth = 0;
@@ -58,79 +64,101 @@ function captureGroup(pattern: RegExp, subject: string, label: string): string {
   return match[1];
 }
 
-describe("motion.css token contract", () => {
-  it("declares the plan's exact duration ladder", () => {
-    expect(source).toContain("--motion-press: 100ms;");
-    expect(source).toContain("--motion-hover: 140ms;");
-    expect(source).toContain("--motion-state: 200ms;");
-    expect(source).toContain("--motion-layout: 240ms;");
-    expect(source).toContain("--motion-accent: 300ms;");
-    expect(source).toContain("--motion-signature: 480ms;");
-  });
+it.layer(NodeServices.layer)("motion.css contract", (it) => {
+  it.effect("declares the plan's exact duration ladder", () =>
+    Effect.gen(function* () {
+      const source = yield* readMotionCss;
 
-  it("declares the plan's exact easing curves", () => {
-    expect(source).toContain("--ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);");
-    expect(source).toContain("--ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);");
-    expect(source).toContain("--ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);");
-  });
+      assert.include(source, "--motion-press: 100ms;");
+      assert.include(source, "--motion-hover: 140ms;");
+      assert.include(source, "--motion-state: 200ms;");
+      assert.include(source, "--motion-layout: 240ms;");
+      assert.include(source, "--motion-accent: 300ms;");
+      assert.include(source, "--motion-signature: 480ms;");
+    }),
+  );
 
-  it("orders the cross-portal layer roles without ties", () => {
-    const roles = ["sticky-chrome", "backdrop", "modal", "dropdown", "toast", "tooltip"];
-    const values = roles.map((role) =>
-      Number(captureGroup(new RegExp(`--layer-${role}: (\\d+);`), source, `--layer-${role}`)),
-    );
+  it.effect("declares the plan's exact easing curves", () =>
+    Effect.gen(function* () {
+      const source = yield* readMotionCss;
 
-    expect(values).toEqual([...values].sort((a, b) => a - b));
-    expect(new Set(values).size).toBe(values.length);
-  });
-});
+      assert.include(source, "--ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);");
+      assert.include(source, "--ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);");
+      assert.include(source, "--ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);");
+    }),
+  );
 
-describe("motion.css reduced-motion contract", () => {
-  it("gives every animating recipe a reduced-motion alternative", () => {
-    const block = reducedMotionBlock();
+  it.effect("orders the cross-portal layer roles without ties", () =>
+    Effect.gen(function* () {
+      const source = yield* readMotionCss;
+      const roles = ["sticky-chrome", "backdrop", "modal", "dropdown", "toast", "tooltip"];
+      const values = roles.map((role) =>
+        Number(captureGroup(new RegExp(`--layer-${role}: (\\d+);`), source, `--layer-${role}`)),
+      );
 
-    for (const recipe of ANIMATING_RECIPES) {
-      expect(block, `${recipe} has no reduced-motion branch`).toContain(`.${recipe}`);
-    }
-  });
+      assert.deepStrictEqual(
+        values,
+        [...values].sort((a, b) => a - b),
+      );
+      assert.strictEqual(new Set(values).size, values.length);
+    }),
+  );
 
-  it("preserves meaning instead of freezing animation mid-flight", () => {
-    const block = reducedMotionBlock();
+  it.effect("gives every animating recipe a reduced-motion alternative", () =>
+    Effect.gen(function* () {
+      const block = reducedMotionBlock(yield* readMotionCss);
 
-    // A frozen keyframe reads as a stuck spinner. The one-shot recipes
-    // crossfade instead, so nothing is left paused part-way through.
-    expect(block).toContain("motion-arrival-reduced");
-    expect(block).toContain("animation: none");
-  });
-});
+      for (const recipe of ANIMATING_RECIPES) {
+        assert.include(block, `.${recipe}`, `${recipe} has no reduced-motion branch`);
+      }
+    }),
+  );
 
-describe("motion.css intensity ceiling", () => {
-  it("keeps every glow within the plan's 6px bound", () => {
-    const shadows = source.match(/box-shadow:[^;]+;/g) ?? [];
-    expect(shadows.length).toBeGreaterThan(0);
+  it.effect("preserves meaning instead of freezing animation mid-flight", () =>
+    Effect.gen(function* () {
+      const block = reducedMotionBlock(yield* readMotionCss);
 
-    const oversized = shadows.flatMap((shadow) =>
-      (shadow.match(/(\d+(?:\.\d+)?)px/g) ?? [])
-        .map((length) => Number(length.replace("px", "")))
-        .filter((length) => length > 6)
-        .map((length) => `${length}px in "${shadow.replace(/\s+/g, " ")}"`),
-    );
+      // A frozen keyframe reads as a stuck spinner. The one-shot recipes
+      // crossfade instead, so nothing is left paused part-way through.
+      assert.include(block, "motion-arrival-reduced");
+      assert.include(block, "animation: none");
+    }),
+  );
 
-    expect(oversized).toEqual([]);
-  });
+  it.effect("keeps every glow within the plan's 6px bound", () =>
+    Effect.gen(function* () {
+      const source = yield* readMotionCss;
+      const shadows = source.match(/box-shadow:[^;]+;/g) ?? [];
+      assert.isAbove(shadows.length, 0);
 
-  it("keeps the press response inside Level 1 bounds", () => {
-    const press = captureGroup(
-      /\.motion-press:active[^{]*\{([^}]+)\}/,
-      source,
-      ".motion-press:active",
-    );
+      const oversized = shadows.flatMap((shadow) =>
+        (shadow.match(/(\d+(?:\.\d+)?)px/g) ?? [])
+          .map((length) => Number(length.replace("px", "")))
+          .filter((length) => length > 6)
+          .map((length) => `${length}px in "${shadow.replace(/\s+/g, " ")}"`),
+      );
 
-    const translate = Number(captureGroup(/translateY\((\d+(?:\.\d+)?)px\)/, press, "translateY"));
-    expect(translate).toBeLessThanOrEqual(2);
+      assert.deepStrictEqual(oversized, []);
+    }),
+  );
 
-    const scale = Number(captureGroup(/scale\((\d+(?:\.\d+)?)\)/, press, "scale"));
-    expect(scale).toBeGreaterThanOrEqual(0.98);
-    expect(scale).toBeLessThanOrEqual(1.02);
-  });
+  it.effect("keeps the press response inside Level 1 bounds", () =>
+    Effect.gen(function* () {
+      const source = yield* readMotionCss;
+      const press = captureGroup(
+        /\.motion-press:active[^{]*\{([^}]+)\}/,
+        source,
+        ".motion-press:active",
+      );
+
+      const translate = Number(
+        captureGroup(/translateY\((\d+(?:\.\d+)?)px\)/, press, "translateY"),
+      );
+      assert.isAtMost(translate, 2);
+
+      const scale = Number(captureGroup(/scale\((\d+(?:\.\d+)?)\)/, press, "scale"));
+      assert.isAtLeast(scale, 0.98);
+      assert.isAtMost(scale, 1.02);
+    }),
+  );
 });

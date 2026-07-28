@@ -8,6 +8,7 @@
 @import "./styles/feedback.css";
 @import "./styles/workbench.css";
 @import "./styles/files-diffs.css";
+@import "./styles/special-states.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
