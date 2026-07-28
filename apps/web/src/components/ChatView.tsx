@@ -48,7 +48,6 @@ import {
   type CSSProperties,
   lazy,
   memo,
-  startTransition,
   Suspense,
   useCallback,
   useEffect,
@@ -260,7 +259,6 @@ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import {
-  deferSendCleanup,
   mergeOptimisticUserMessages,
   retireSendMorph,
   runSendMorphTransition,
@@ -5145,33 +5143,22 @@ function ChatViewContent(props: ChatViewProps) {
     // No scroll here.
     const sendMorphSurface = composerRef.current?.getSendMorphSurface() ?? null;
     runSendMorphTransition(sendMorphSurface, outgoingMessageText, () => {
-      // The commit was one ~500ms synchronous block (optimistic render + Lexical
-      // teardown) landing on exactly the frames the flyer needs — the measured
-      // ~4fps send freeze. Split it: the optimistic mount renders interruptibly
-      // (startTransition) so flyer frames interleave, and the composer clear —
-      // invisible behind the flyer — waits until after the first painted frames
-      // (deferSendCleanup). The flyer's landing seek is time-based, so the
-      // transition-delayed bubble cannot trip the fallback.
-      startTransition(() => {
-        setOptimisticUserMessages((existing) => [
-          ...existing,
-          {
-            id: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-            turnId: null,
-            createdAt: messageCreatedAt,
-            updatedAt: messageCreatedAt,
-            streaming: false,
-          },
-        ]);
-      });
+      setOptimisticUserMessages((existing) => [
+        ...existing,
+        {
+          id: messageIdForSend,
+          role: "user",
+          text: outgoingMessageText,
+          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+          turnId: null,
+          createdAt: messageCreatedAt,
+          updatedAt: messageCreatedAt,
+          streaming: false,
+        },
+      ]);
       promptRef.current = "";
-      deferSendCleanup(() => {
-        clearComposerDraftContent(composerDraftTarget);
-        composerRef.current?.resetCursorState();
-      });
+      clearComposerDraftContent(composerDraftTarget);
+      composerRef.current?.resetCursorState();
     });
 
     let firstComposerImageName: string | null = null;
@@ -5651,25 +5638,19 @@ function ChatViewContent(props: ChatViewProps) {
       // is passed in explicitly, so clearing the composer inside the commit is
       // safe.
       runSendMorphTransition(sendMorphSurface, outgoingMessageText, () => {
-        // Same split as the main send path: interruptible optimistic mount,
-        // composer clear deferred behind the flyer's first painted frames.
-        startTransition(() => {
-          setOptimisticUserMessages((existing) => [
-            ...existing,
-            {
-              id: messageIdForSend,
-              role: "user",
-              text: outgoingMessageText,
-              turnId: null,
-              createdAt: messageCreatedAt,
-              updatedAt: messageCreatedAt,
-              streaming: false,
-            },
-          ]);
-        });
-        deferSendCleanup(() => {
-          clearComposer?.();
-        });
+        setOptimisticUserMessages((existing) => [
+          ...existing,
+          {
+            id: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            turnId: null,
+            createdAt: messageCreatedAt,
+            updatedAt: messageCreatedAt,
+            streaming: false,
+          },
+        ]);
+        clearComposer?.();
       });
 
       const settingsResult = await persistThreadSettingsForNextTurn({

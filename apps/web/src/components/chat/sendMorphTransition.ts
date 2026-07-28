@@ -54,13 +54,10 @@ const SEND_MORPH_TRAVEL_MS = 700;
 const SEND_MORPH_CROSSFADE_FRACTION = 0.6;
 /** If the bubble never lands, dissolve the flyer in place rather than strand it. */
 const SEND_MORPH_FALLBACK_FADE_MS = 180;
-/** Landing poll cap in WALL-CLOCK time, not frames. The send commit can stall
- *  the main thread for hundreds of ms; during a stall rAF produces almost no
- *  frames, so a frame-counted cap survived it — but a time cap must be long
- *  enough to ride out the stall PLUS an interruptible (`startTransition`)
- *  render of the optimistic bubble. The flyer covers the composer while it
- *  waits, so a generous cap costs nothing visually. */
-const SEND_MORPH_LAND_POLL_MAX_MS = 1500;
+/** Landing poll cap (~10 frames / ~160ms). Under the arrival TTL (260ms) so the
+ *  hook is always present while we look; imperceptible with the flyer covering
+ *  the composer. */
+const SEND_MORPH_LAND_POLL_MAX_FRAMES = 10;
 
 /** Cap the flyer's content so a very long draft never flies as a tall slab. */
 const SEND_MORPH_MAX_LINES = 6;
@@ -110,9 +107,7 @@ interface ActiveSendMorph {
   readonly startHeight: number;
   phase: SendMorphPhase;
   bubble: HTMLElement | null;
-  /** rAF timestamp of the first seeking frame (-1 until it runs; rAF
-   *  timestamps CAN legitimately be 0, so 0 is not a safe sentinel). */
-  seekStart: number;
+  seekFrames: number;
   /** The rAF timestamp at which the current timed phase (flying / fallback) began. */
   phaseStart: number;
   rafId: number | null;
@@ -230,7 +225,7 @@ export function runSendMorphTransition(
       startHeight: boxHeight,
       phase: "seeking",
       bubble: null,
-      seekStart: -1,
+      seekFrames: 0,
       phaseStart: 0,
       rafId: null,
     };
@@ -293,9 +288,8 @@ function advanceFlight(flight: ActiveSendMorph, now: number): boolean {
         beginFlight(flight, bubble, now);
         return false;
       }
-      if (flight.seekStart < 0) {
-        flight.seekStart = now;
-      } else if (now - flight.seekStart >= SEND_MORPH_LAND_POLL_MAX_MS) {
+      flight.seekFrames += 1;
+      if (flight.seekFrames >= SEND_MORPH_LAND_POLL_MAX_FRAMES) {
         beginFallback(flight, now);
       }
       return false;
@@ -379,27 +373,6 @@ function stepFlight(flight: ActiveSendMorph, now: number): boolean {
 function beginFallback(flight: ActiveSendMorph, now: number): void {
   flight.phase = "fallback";
   flight.phaseStart = now;
-}
-
-/**
- * Defer non-visual send cleanup (the Lexical composer clear + cursor reset) off
- * the send-critical frames. The clear is one of the heavy synchronous halves of
- * the send commit, and the flyer is covering the composer's text anyway — so
- * letting the flyer's first frames paint before the editor tears its state down
- * removes main-thread work from exactly the frames the flight needs. Two rAFs:
- * the first fires with the first painted frame, the second runs the work after
- * it. Falls back to running synchronously without rAF (headless/tests).
- */
-export function deferSendCleanup(work: () => void): void {
-  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-    work();
-    return;
-  }
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => {
-      work();
-    });
-  });
 }
 
 /**

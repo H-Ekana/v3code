@@ -104,11 +104,8 @@
   overflow: hidden;
   border-radius: 1rem;
   border: 1px solid color-mix(in srgb, var(--primary) 12%, transparent);
-  /* No backdrop-filter: a MOVING backdrop-blur re-samples and re-blurs the
-     backdrop on every frame of the flight — it was the flyer's lag. A more
-     opaque wash keeps the text readable without it; the per-frame work is now
-     transform/opacity only, fully compositable. */
-  background: color-mix(in srgb, var(--accent) 94%, transparent);
+  background: color-mix(in srgb, var(--accent) 82%, transparent);
+  backdrop-filter: blur(6px);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   box-shadow: 0 4px 6px color-mix(in srgb, var(--primary) 6%, transparent);
