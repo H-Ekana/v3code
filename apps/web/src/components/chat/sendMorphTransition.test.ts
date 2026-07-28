@@ -328,21 +328,15 @@ describe("runSendMorphTransition flyer flight", () => {
     const flyer = flyersInBody()[0]!;
     expect(flyersInBody()).toHaveLength(1);
 
-    // Exhaust the WALL-CLOCK landing poll cap (1500ms) without a bubble
-    // appearing. The cap is time-based, not frame-based, so a main-thread
-    // stall (few frames, lots of elapsed time) cannot silently trip it — the
-    // first seeking frame stamps the start, and a frame at +1500ms switches to
-    // the in-place fallback fade (phaseStart = 1500).
-    flushFrame(0); // stamps seekStart
-    flushFrame(700); // still seeking — under the cap
-    expect(flyer.style.opacity).toBe("");
-    flushFrame(1500); // cap reached → fallback begins
+    // Exhaust the landing poll cap (10 frames) without a bubble appearing; the
+    // 10th frame switches to the in-place fallback fade (phaseStart = 0).
+    for (let i = 0; i < 10; i += 1) flushFrame(0);
 
-    flushFrame(1590); // fallback t = 90/180 = 0.5
+    flushFrame(90); // fallback t = 90/180 = 0.5
     expect(flyer.style.opacity).toBe("0.5");
     // The bubble was never appended, so nothing was ever hidden.
 
-    flushFrame(1680); // fallback t = 1 → retire
+    flushFrame(180); // fallback t = 1 → retire
     expect(flyersInBody()).toHaveLength(0);
   });
 
