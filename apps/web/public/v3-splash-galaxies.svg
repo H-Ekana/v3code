@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" fill="none">
+  <!--
+    Four distant galaxies for the splash night sky. Deliberately static and dim: they are
+    set dressing that makes the sky read as deep space, not performers. Radial gradients
+    only - no <filter>, no animation - so this layer rasterises once and costs nothing.
+    Palette matches the rest of the boot art (#FFF9FF core, #B56FFF / #A77BFF / #F27BC6).
+  -->
+  <defs>
+    <radialGradient id="galaxy-core" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#FFF9FF" stop-opacity=".85"/>
+      <stop offset=".35" stop-color="#D9BFFF" stop-opacity=".4"/>
+      <stop offset=".7" stop-color="#B56FFF" stop-opacity=".14"/>
+      <stop offset="1" stop-color="#B56FFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="galaxy-halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#A77BFF" stop-opacity=".3"/>
+      <stop offset=".55" stop-color="#A77BFF" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#A77BFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="galaxy-halo-warm" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#F27BC6" stop-opacity=".24"/>
+      <stop offset=".6" stop-color="#F27BC6" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#F27BC6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Large tilted spiral, upper left -->
+  <g transform="translate(295 190) rotate(-27)" opacity=".55">
+    <ellipse rx="120" ry="34" fill="url(#galaxy-halo)"/>
+    <ellipse rx="66" ry="19" fill="url(#galaxy-halo-warm)" transform="rotate(14)"/>
+    <circle r="21" fill="url(#galaxy-core)"/>
+    <circle cx="-58" cy="7" r="1.1" fill="#FFF9FF" fill-opacity=".5"/>
+    <circle cx="44" cy="-9" r="1.3" fill="#FFF9FF" fill-opacity=".55"/>
+    <circle cx="86" cy="4" r="1" fill="#DB7AFF" fill-opacity=".45"/>
+  </g>
+
+  <!-- Small edge-on sliver, top middle-right -->
+  <g transform="translate(1065 105) rotate(12)" opacity=".42">
+    <ellipse rx="78" ry="12" fill="url(#galaxy-halo)"/>
+    <circle r="11" fill="url(#galaxy-core)"/>
+    <circle cx="-38" cy="2" r="1" fill="#FFF9FF" fill-opacity=".45"/>
+  </g>
+
+  <!-- Medium warm spiral, upper right -->
+  <g transform="translate(1370 300) rotate(-42)" opacity=".5">
+    <ellipse rx="92" ry="27" fill="url(#galaxy-halo-warm)"/>
+    <ellipse rx="52" ry="16" fill="url(#galaxy-halo)" transform="rotate(-16)"/>
+    <circle r="16" fill="url(#galaxy-core)"/>
+    <circle cx="52" cy="-6" r="1.2" fill="#FFF9FF" fill-opacity=".5"/>
+    <circle cx="-44" cy="9" r="1" fill="#DB7AFF" fill-opacity=".4"/>
+  </g>
+
+  <!-- Faint distant smudge, mid left -->
+  <g transform="translate(180 470) rotate(31)" opacity=".34">
+    <ellipse rx="58" ry="16" fill="url(#galaxy-halo)"/>
+    <circle r="9" fill="url(#galaxy-core)"/>
+  </g>
+</svg>

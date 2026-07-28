@@ -28,9 +28,15 @@ describe("SplashScreen", () => {
     expect(bootShellHtml).toContain("v3-splash-card");
     expect(reactMarkup).toContain("v3-splash-card");
     expect(bootShellHtml).toMatch(/<div id="root"><\/div>\s*<div\s+id="boot-shell"/);
+    // Exactly three foreground bands and NO rim/brightened copies. State rules keyed on the
+    // exiting attribute apply in a single frame, so any second treatment of the cloud art
+    // (bright rims, saturation pumps) pops on at T0 with no transition. The clouds keep one
+    // treatment for their whole life and leave via their animated fall + fade only.
     expect(
       bootShellHtml.match(/v3-splash-clouds-foreground v3-splash-clouds-foreground-/g),
     ).toHaveLength(3);
+    expect(bootShellHtml).not.toContain("v3-splash-cloud-rim");
+    expect(bootShellHtml).not.toMatch(/exiting"\] \.v3-splash-clouds/);
     expect(
       reactMarkup.match(/v3-splash-clouds-foreground v3-splash-clouds-foreground-/g),
     ).toHaveLength(3);
@@ -68,9 +74,13 @@ describe("SplashScreen", () => {
     expect(starsSvg).not.toContain('class="sky-overscan"');
     expect(starsSvg).toContain('id="meteor-tail"');
     expect(starsSvg).toContain("@keyframes meteor-origin-hide");
-    expect(starsSvg).toContain("@keyframes shooting-star-a");
-    expect(starsSvg).toContain("@keyframes shooting-star-b");
-    expect(starsSvg).toContain("@keyframes shooting-star-c");
+    for (const key of ["a", "b", "c"]) {
+      expect(starsSvg).toContain(`@keyframes shooting-star-${key}`);
+    }
+    // Three. A streak stays visible for 0.13 x its cycle — 1.0-1.8s against a ~1.6s hold —
+    // so meteors stack: six read as a shower rather than a night sky. Three staggered across
+    // the hold keeps one or two on screen at a time.
+    // Retune with: node scripts/tune-splash-meteors.mjs
     expect(starsSvg.match(/class="shooting-star shooting-star--/g)).toHaveLength(3);
     expect(bootShellHtml).toContain("@keyframes v3-cloud-mid-drift");
     expect(bootShellHtml).toContain("@keyframes v3-cloud-foreground-left-drift");
@@ -102,8 +112,12 @@ describe("SplashScreen", () => {
     expect(signalSvg).toContain("@keyframes signal-residue-fade");
     expect(signalSvg).toContain("840ms");
     expect(signalSvg).not.toContain("<animateMotion");
-    expect(signalSvg).not.toContain("stroke-dashoffset");
     expect(signalSvg).not.toContain("<filter");
+    // stroke-dashoffset is deliberately allowed: the constellation links draw themselves in
+    // (pathLength-normalised line-draw with a travelling spark). Its repaint cost is
+    // negligible on three thin sub-200px paths, unlike the SMIL and <filter> bans above.
+    expect(signalSvg).toContain('pathLength="1"');
+    expect(signalSvg).toContain("@keyframes signal-link-draw");
 
     for (const svg of [starsSvg, signalSvg]) {
       expect(svg).toContain("@media (prefers-reduced-motion: reduce)");

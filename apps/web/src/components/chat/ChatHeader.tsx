@@ -105,11 +105,19 @@ export const ChatHeader = memo(function ChatHeader({
                   />
                 }
               >
-                <ProjectFavicon
-                  environmentId={activeThreadEnvironmentId}
-                  cwd={activeProjectCwd ?? ""}
-                  className="size-3.5"
-                />
+                {/* Hidden while the startup splash runs: for a project like v3code this
+                    favicon IS the app mark, and a copy of it sitting in the header would
+                    preempt the splash logo's flight into the chrome. */}
+                <span
+                  className="inline-flex shrink-0 items-center transition-opacity duration-200"
+                  data-startup-brand-mark=""
+                >
+                  <ProjectFavicon
+                    environmentId={activeThreadEnvironmentId}
+                    cwd={activeProjectCwd ?? ""}
+                    className="size-3.5"
+                  />
+                </span>
                 <span className="max-w-40 truncate text-sm font-medium">{activeProjectName}</span>
               </TooltipTrigger>
               <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>

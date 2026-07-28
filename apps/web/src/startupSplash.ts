@@ -1,14 +1,28 @@
-export const STARTUP_SPLASH_HOLD_MS = 1_800;
+export const STARTUP_SPLASH_HOLD_MS = 1_600;
+/**
+ * The strike. Runs at the head of the parting rather than during the hold, so the impact is
+ * locked to the moment the choreography actually begins — the gate can fire late if the app
+ * is slow to commit, and a meteor scheduled against the hold would land on nothing.
+ */
+export const STARTUP_METEOR_MS = 560;
+/**
+ * When the sky starts to part — after the strike, and after the mark has begun its recoil.
+ * Act 3 deliberately waits: with the logo already travelling, the eye is free to follow the
+ * composer instead of splitting between them.
+ */
+export const STARTUP_PARTING_DELAY_MS = 900;
 /**
  * The parting is long because the clouds have to still be falling while the composer is
  * still rising — that overlap is the entire parallax effect. Interactivity is handed back
  * at the start of this window, not the end, so length here does not cost responsiveness.
  */
-export const STARTUP_SPLASH_EXIT_MS = 1_900;
-export const STARTUP_SPLASH_REDUCED_EXIT_MS = 180;
-/** Logo flight. Long enough that the slingshot and the arc read as separate beats. */
-export const STARTUP_LOGO_FLIGHT_MS = 1_250;
-export const STARTUP_LOGO_FLIGHT_DELAY_MS = 120;
+export const STARTUP_SPLASH_EXIT_MS = 2_500;
+/** 180ms of linear full-screen dissolve reads as a hard cut, which is its own jarring. */
+export const STARTUP_SPLASH_REDUCED_EXIT_MS = 300;
+/** Logo flight. Long enough that the recoil and the arc read as separate beats. */
+export const STARTUP_LOGO_FLIGHT_MS = 900;
+/** Starts on impact — the strike is what launches it. */
+export const STARTUP_LOGO_FLIGHT_DELAY_MS = STARTUP_METEOR_MS;
 /** Samples along the flight path. Enough that the arc reads as a curve, not a polyline. */
 const STARTUP_LOGO_FLIGHT_SAMPLES = 32;
 /**
@@ -93,23 +107,55 @@ function cubicBezierPoint(
 }
 
 /**
- * Maps elapsed time onto distance along the flight path.
- *
- * The first third of the duration covers less than a tenth of the path, so the mark
- * visibly loads up before it launches; everything after that decelerates into the sidebar
- * so it settles rather than stops. Baking the timing in here (instead of handing a bezier
- * to `easing`) keeps the arc and the pacing independently tunable.
+ * The strike, travelling down-and-left into the mark from the upper right. The head sits at
+ * the group's local origin, so the final zero transform lands it exactly on the logo, and
+ * `scaleX` applies along the direction of travel because it follows the rotation — that
+ * stretch is what reads as speed, not a blur.
  */
-export function easeStartupLogoSlingshot(t: number): number {
-  const anticipation = 0.32;
-  if (t < anticipation) {
-    const local = t / anticipation;
-    return 0.09 * local * local;
-  }
-  const local = (t - anticipation) / (1 - anticipation);
-  return 0.09 + 0.91 * (1 - (1 - local) ** 3);
+export function buildHeroMeteorKeyframes(): Keyframe[] {
+  const angle = "rotate(142deg)";
+  return [
+    { offset: 0, opacity: 0, transform: `translate(620px, -478px) ${angle} scaleX(0.3)` },
+    { offset: 0.1, opacity: 0.95, transform: `translate(548px, -422px) ${angle} scaleX(0.5)` },
+    { offset: 0.75, opacity: 0.92, transform: `translate(155px, -120px) ${angle} scaleX(1)` },
+    { offset: 0.94, opacity: 0.85, transform: `translate(0px, 0px) ${angle} scaleX(1.06)` },
+    { offset: 1, opacity: 0, transform: `translate(0px, 0px) ${angle} scaleX(1.06)` },
+  ];
 }
 
+/** Contact bloom, timed to the frame the head reaches the mark. */
+export function buildImpactBloomKeyframes(): Keyframe[] {
+  return [
+    { offset: 0, opacity: 0, transform: "scale(0.55)" },
+    { offset: 0.18, opacity: 0.85, transform: "scale(0.92)" },
+    { offset: 1, opacity: 0, transform: "scale(1.45)" },
+  ];
+}
+
+/** Share of the flight spent absorbing the meteor's impact before recovering. */
+const STARTUP_LOGO_RECOIL_FRACTION = 0.22;
+/** How far the strike drives the mark down, as a share of the distance it must climb. */
+const STARTUP_LOGO_RECOIL_DEPTH = 0.42;
+/** Minimum recoil in px, so the knock still reads on a short window. */
+const STARTUP_LOGO_RECOIL_MIN_PX = 150;
+
+/**
+ * The mark's flight, authored as two physically distinct strokes rather than one curve.
+ *
+ * A single cubic Bezier could not express this. Its dip is a *control point offset*, and a
+ * cubic only travels roughly a fifth of the way toward its controls — a 72px control offset
+ * produced a 15px excursion on a 900px viewport, which is invisible. Worse, the curve spent
+ * 87% of its horizontal distance in the first half of the duration, so the long tail of the
+ * animation was a near-vertical settle and the whole thing read as a diagonal drift.
+ *
+ * Authoring the strokes directly means a recoil distance is a real distance, and each stroke
+ * gets its own pacing:
+ *
+ *   1. RECOIL — the meteor's strike drives the mark down and slightly along the impact
+ *      vector. Fast, then decelerating: it is absorbing energy.
+ *   2. RECOVERY — a wide arc up and left into the sidebar, pacing chosen so the horizontal
+ *      travel is spread across the duration instead of front-loaded.
+ */
 export function buildStartupLogoFlightKeyframes(source: Rect, target: Rect): Keyframe[] {
   const sourceCenterX = source.left + source.width / 2;
   const sourceCenterY = source.top + source.height / 2;
@@ -119,35 +165,53 @@ export function buildStartupLogoFlightKeyframes(source: Rect, target: Rect): Key
   const deltaY = targetCenterY - sourceCenterY;
   const targetScale = Math.min(target.width / source.width, target.height / source.height);
 
-  // Slingshot: the mark sinks down and to the left, sweeps wide while still low, and only
-  // then climbs into the sidebar — a J, not a diagonal.
-  //
-  // The horizontal control weights are what make or break this. A cubic Bezier tracks its
-  // control points, so control values near the start (0.16 / 0.34 of the delta) keep the
-  // path hugging the origin and dump all the leftward travel into the final moments, which
-  // reads as a straight diagonal. Pushing the second control past the target's x
-  // (1.02) spends the horizontal distance early and leaves a near-vertical climb at the end.
-  const dip = Math.max(72, Math.abs(deltaY) * 0.16);
-  const controlOneX = sourceCenterX + deltaX * 0.38;
-  const controlOneY = sourceCenterY + dip;
-  const controlTwoX = sourceCenterX + deltaX * 1.02;
-  const controlTwoY = sourceCenterY + deltaY * 0.3;
+  // The meteor arrives from upper right, so its impact drives the mark down and a little
+  // left. This is a real px excursion, not a control-point hint.
+  const recoilY = Math.max(
+    STARTUP_LOGO_RECOIL_MIN_PX,
+    Math.abs(deltaY) * STARTUP_LOGO_RECOIL_DEPTH,
+  );
+  const recoilX = deltaX * 0.07;
+
+  // Recovery arc: leaves the low point heading left, then turns upward late, so the climb
+  // into the sidebar is the final gesture rather than the whole gesture.
+  const controlOneX = recoilX + deltaX * 0.42;
+  const controlOneY = recoilY + Math.abs(deltaY) * 0.06;
+  const controlTwoX = deltaX * 0.98;
+  const controlTwoY = deltaY * 0.34;
 
   const frames: Keyframe[] = [];
   for (let index = 0; index < STARTUP_LOGO_FLIGHT_SAMPLES; index += 1) {
     const offset = index / (STARTUP_LOGO_FLIGHT_SAMPLES - 1);
-    const progress = easeStartupLogoSlingshot(offset);
-    const x =
-      cubicBezierPoint(sourceCenterX, controlOneX, controlTwoX, targetCenterX, progress) -
-      sourceCenterX;
-    const y =
-      cubicBezierPoint(sourceCenterY, controlOneY, controlTwoY, targetCenterY, progress) -
-      sourceCenterY;
-    // Scale lags the travel so the mark is still large while it clears the dip, then
-    // shrinks hardest through the fast middle of the swing.
-    const scale = 1 + (targetScale - 1) * progress ** 1.35;
-    // Loose tilt that peaks mid-swing and unwinds as it lands.
-    const rotation = -9 * Math.sin(Math.PI * progress);
+    let x: number;
+    let y: number;
+    let travelled: number;
+
+    if (offset <= STARTUP_LOGO_RECOIL_FRACTION) {
+      // Struck: quick displacement that decelerates as the energy is absorbed.
+      const local = offset / STARTUP_LOGO_RECOIL_FRACTION;
+      const eased = 1 - (1 - local) ** 2;
+      x = recoilX * eased;
+      y = recoilY * eased;
+      travelled = 0;
+    } else {
+      const local = (offset - STARTUP_LOGO_RECOIL_FRACTION) / (1 - STARTUP_LOGO_RECOIL_FRACTION);
+      // Exponent below 1 would front-load; above ~2 would stall. 1.7 spreads the horizontal
+      // distance closely enough to even that the arc reads as an arc.
+      const eased = 1 - (1 - local) ** 1.7;
+      x = cubicBezierPoint(recoilX, controlOneX, controlTwoX, deltaX, eased);
+      y = cubicBezierPoint(recoilY, controlOneY, controlTwoY, deltaY, eased);
+      travelled = eased;
+    }
+
+    // Scale holds through the recoil — the mark is still full size while it is knocked down —
+    // then shrinks across the recovery.
+    const scale = 1 + (targetScale - 1) * travelled ** 1.25;
+    // Tilt peaks mid-recovery and unwinds slightly past level before settling. Both terms
+    // vanish at travelled = 1, so it still lands perfectly square.
+    const rotation =
+      -10 * Math.sin(Math.PI * travelled) +
+      2.4 * Math.sin(2 * Math.PI * travelled) * travelled ** 2;
 
     frames.push({
       offset,
@@ -192,20 +256,90 @@ function animateElement(
   }
 }
 
-function getCloudExitTransform(cloud: HTMLElement): string {
-  const horizontalDrift = cloud.classList.contains("v3-splash-clouds-foreground-left")
-    ? "-5vw"
-    : cloud.classList.contains("v3-splash-clouds-foreground-right")
-      ? "5vw"
-      : cloud.classList.contains("v3-splash-clouds-mid")
-        ? "-2vw"
-        : "0";
-  // Far enough that the band fully clears the viewport instead of stalling mid-screen.
-  const verticalDrift = cloud.classList.contains("v3-splash-clouds-mid") ? "48vh" : "78vh";
-  return `translate3d(${horizontalDrift}, ${verticalDrift}, 0) scale(1.1)`;
+type CloudBandMotion = {
+  readonly x: string;
+  readonly y: string;
+  readonly scale: number;
+  readonly delayMs: number;
+  readonly durationMs: number;
+  readonly easing: string;
+};
+
+/**
+ * Per-band depth. Nearer bands travel further, faster, and scale up more — a band that is
+ * about to pass the viewer accelerates and grows.
+ *
+ * This spread is the effect. Previously every foreground band moved 78vh with a ~14% spread
+ * in duration, which is one plane wearing three costumes: depth is read from *relative*
+ * velocity, so near-identical motion across layers reads as a single flat sheet. The ratio
+ * here is roughly 2.8x between the midground and the nearest foreground band, plus a scale
+ * gradient, which is an independent depth cue on its own.
+ */
+export function resolveCloudBandMotion(className: string): CloudBandMotion {
+  if (className.includes("v3-splash-clouds-mid")) {
+    // Far away: drifts, barely grows, and settles rather than falls.
+    return {
+      x: "-1.5vw",
+      y: "34vh",
+      scale: 1.04,
+      delayMs: 0,
+      durationMs: 1_320,
+      easing: "cubic-bezier(0.3, 0, 0.5, 1)",
+    };
+  }
+  if (className.includes("v3-splash-clouds-foreground-left")) {
+    return {
+      x: "-9vw",
+      y: "86vh",
+      scale: 1.16,
+      delayMs: 40,
+      durationMs: 1_200,
+      easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
+    };
+  }
+  if (className.includes("v3-splash-clouds-foreground-right")) {
+    return {
+      x: "9vw",
+      y: "88vh",
+      scale: 1.16,
+      delayMs: 90,
+      durationMs: 1_230,
+      easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
+    };
+  }
+  // Foreground centre: the nearest band, and the one the composer rises through.
+  return {
+    x: "0",
+    y: "96vh",
+    scale: 1.2,
+    delayMs: 20,
+    durationMs: 1_150,
+    easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
+  };
+}
+
+function getCloudExitTransform(motion: CloudBandMotion): string {
+  return `translate3d(${motion.x}, ${motion.y}, 0) scale(${motion.scale})`;
+}
+
+/**
+ * A `fill: forwards` animation keeps applying after it finishes, and it lives in the
+ * Animation cascade origin — which outranks author CSS permanently. The handoff animation on
+ * the sidebar mark therefore pinned it to `opacity: 1` forever, so every later rule intended
+ * to hide it during the hold was dead on arrival. Anything we drive with `forwards` on an
+ * element that outlives the splash has to be cancelled explicitly.
+ */
+function cancelStartupAnimations(element: HTMLElement | null): void {
+  if (!element || typeof element.getAnimations !== "function") {
+    return;
+  }
+  for (const animation of element.getAnimations()) {
+    animation.cancel();
+  }
 }
 
 function releaseApp(root: HTMLElement, logoTarget: HTMLElement | null): void {
+  cancelStartupAnimations(logoTarget);
   logoTarget?.style.removeProperty("opacity");
   root.inert = false;
   root.removeAttribute("aria-hidden");
@@ -225,6 +359,10 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
   const logoTarget = document.querySelector<HTMLElement>("[data-startup-logo-target]");
   const sourceRect = splashLogo?.getBoundingClientRect() ?? null;
   const targetRect = logoTarget?.getBoundingClientRect() ?? null;
+
+  // Clear anything a previous run (or a dev replay) left pinned on the mark before the CSS
+  // hold rule and the new handoff animation are supposed to take over.
+  cancelStartupAnimations(logoTarget);
 
   if (logoTarget && sourceRect && targetRect && !prefersReducedMotion) {
     logoTarget.style.opacity = "0";
@@ -249,6 +387,28 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
   }
 
   if (!prefersReducedMotion) {
+    // Act 1: the strike. Everything after this is a consequence of it.
+    animateElement(
+      document.querySelector<HTMLElement>(".v3-hero-meteor-body"),
+      buildHeroMeteorKeyframes(),
+      {
+        duration: STARTUP_METEOR_MS,
+        easing: "cubic-bezier(0.34, 0, 0.5, 1)",
+        fill: "forwards",
+      },
+    );
+    animateElement(
+      document.querySelector<HTMLElement>(".v3-splash-impact"),
+      buildImpactBloomKeyframes(),
+      {
+        delay: STARTUP_METEOR_MS - 40,
+        duration: 460,
+        easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+        fill: "forwards",
+      },
+    );
+
+    // Act 2: knocked loose by the impact, the mark recoils and departs.
     if (splashLogo && sourceRect && targetRect) {
       // Pacing is baked into the sampled keyframes, so the animation itself runs linear.
       animateElement(splashLogo, buildStartupLogoFlightKeyframes(sourceRect, targetRect), {
@@ -265,6 +425,7 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
           { opacity: 0, transform: "translate3d(0, -24px, 0) scale(0.72)" },
         ],
         {
+          delay: STARTUP_LOGO_FLIGHT_DELAY_MS,
           duration: 520,
           easing: "cubic-bezier(0.16, 1, 0.3, 1)",
           fill: "forwards",
@@ -272,39 +433,69 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
       );
     }
 
-    // Cross-fade the real sidebar mark up just as the flight lands on it.
+    // The handoff happens ON touchdown, never before it.
+    //
+    // This previously started 140ms early as a "cross-fade", which meant the sidebar mark
+    // faded up while the flying one was still visibly in transit — so the destination logo
+    // appeared before anything had arrived to deliver it, which is precisely the thing the
+    // flight is supposed to accomplish. The overlap is now a single 70ms swap at the landing
+    // frame: short enough to hide the difference between the two treatments, not long enough
+    // for both to read as present at once.
+    const handoffDelay = STARTUP_LOGO_FLIGHT_DELAY_MS + STARTUP_LOGO_FLIGHT_MS;
+    animateElement(splashLogo, [{ opacity: 1 }, { opacity: 0 }], {
+      delay: handoffDelay,
+      duration: 70,
+      easing: "linear",
+      fill: "forwards",
+    });
     animateElement(logoTarget, [{ opacity: 0 }, { opacity: 1 }], {
-      delay: STARTUP_LOGO_FLIGHT_DELAY_MS + STARTUP_LOGO_FLIGHT_MS - 140,
-      duration: 180,
+      delay: handoffDelay,
+      duration: 70,
       easing: "linear",
       fill: "forwards",
     });
 
+    // Act 3: the sky parts.
     // Spans both the shell (midground) and the foreground layer.
     const clouds = document.querySelectorAll<HTMLElement>(".v3-splash-cloud-layer");
-    clouds.forEach((cloud, index) => {
+    clouds.forEach((cloud) => {
       const cloudStyle = window.getComputedStyle(cloud);
+      const motion = resolveCloudBandMotion(cloud.className);
       animateElement(
         cloud,
         [
           { offset: 0, opacity: cloudStyle.opacity, transform: cloudStyle.transform },
           // Hold opacity through most of the fall. Fading as they drop is what made the
           // clouds read as "dissolving" instead of "falling past" whatever is rising.
-          { offset: 0.62, opacity: cloudStyle.opacity },
-          { offset: 1, opacity: 0, transform: getCloudExitTransform(cloud) },
+          { offset: 0.68, opacity: cloudStyle.opacity },
+          { offset: 1, opacity: 0, transform: getCloudExitTransform(motion) },
         ],
         {
-          delay: 80 + index * 70,
-          // Slow enough that the bands are still crossing the lower screen while the
-          // composer climbs through it. Faster than this and they have cleared out before
-          // the composer arrives, which is what made the rise read as "appearing".
-          duration: 1_500 + index * 70,
-          // Gravity, not a settle — the foreground has to keep falling past the composer.
-          easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
+          delay: STARTUP_PARTING_DELAY_MS + motion.delayMs,
+          duration: motion.durationMs,
+          easing: motion.easing,
           fill: "forwards",
         },
       );
     });
+
+    const galaxies = document.querySelector<HTMLElement>(".v3-splash-galaxies");
+    animateElement(
+      galaxies,
+      [
+        {
+          opacity: galaxies ? window.getComputedStyle(galaxies).opacity : "0",
+          transform: "scale(1)",
+        },
+        { opacity: 0, transform: "translate3d(-0.6vw, -0.4vh, 0) scale(1.02)" },
+      ],
+      {
+        delay: STARTUP_PARTING_DELAY_MS,
+        duration: 1_150,
+        easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+        fill: "forwards",
+      },
+    );
 
     const stars = document.querySelector<HTMLElement>(".v3-splash-stars");
     animateElement(
@@ -317,6 +508,7 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
         { opacity: 0, transform: "translate3d(-1.2vw, -0.8vh, 0) scale(1.035)" },
       ],
       {
+        delay: STARTUP_PARTING_DELAY_MS,
         duration: 1_050,
         easing: "cubic-bezier(0.16, 1, 0.3, 1)",
         fill: "forwards",
@@ -334,8 +526,55 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
         { opacity: 0, transform: "scale(1.08)" },
       ],
       {
+        delay: STARTUP_PARTING_DELAY_MS,
         duration: 900,
         easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+        fill: "forwards",
+      },
+    );
+
+    // The dust falls with the sky. The far field drifts down gently like the midground band;
+    // the near field drops much further and faster on the same gravity curve as the near cloud
+    // bands. Both hold their density through ~60% of the fall before fading, so they read as
+    // falling past the rising app rather than dissolving in place — the same trick the clouds
+    // use. These fields live inside the boot layers (not ancestors of the app), so animating
+    // their opacity here is safe.
+    const farMotes = document.querySelector<HTMLElement>(".v3-splash-motes-far");
+    animateElement(
+      farMotes,
+      [
+        {
+          offset: 0,
+          opacity: farMotes ? window.getComputedStyle(farMotes).opacity : "1",
+          transform: "translate3d(0, 0, 0)",
+        },
+        { offset: 0.6, opacity: farMotes ? window.getComputedStyle(farMotes).opacity : "1" },
+        { offset: 1, opacity: 0, transform: "translate3d(0, 30vh, 0)" },
+      ],
+      {
+        delay: STARTUP_PARTING_DELAY_MS,
+        duration: 1_200,
+        easing: "cubic-bezier(0.3, 0, 0.5, 1)",
+        fill: "forwards",
+      },
+    );
+
+    const nearMotes = document.querySelector<HTMLElement>(".v3-splash-motes-near");
+    animateElement(
+      nearMotes,
+      [
+        {
+          offset: 0,
+          opacity: nearMotes ? window.getComputedStyle(nearMotes).opacity : "1",
+          transform: "translate3d(0, 0, 0)",
+        },
+        { offset: 0.6, opacity: nearMotes ? window.getComputedStyle(nearMotes).opacity : "1" },
+        { offset: 1, opacity: 0, transform: "translate3d(0, 80vh, 0)" },
+      ],
+      {
+        delay: STARTUP_PARTING_DELAY_MS + 20,
+        duration: 900,
+        easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
         fill: "forwards",
       },
     );
@@ -348,6 +587,11 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
 function armStartupSplash(root: HTMLElement): StartupSplashGate {
   root.inert = true;
   root.setAttribute("aria-hidden", "true");
+
+  // Clear the previous run's handoff before the hold begins, not at exit. A finished
+  // `fill: forwards` animation outranks the CSS rule that hides the mark, so leaving it in
+  // place would pin the sidebar logo visible for the whole hold on any replay.
+  cancelStartupAnimations(document.querySelector<HTMLElement>("[data-startup-logo-target]"));
 
   return createStartupSplashGate({
     onExit: () => {

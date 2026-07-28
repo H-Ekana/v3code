@@ -1,71 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark" data-startup-splash="holding">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
-    />
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#161616" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#161616" />
-    <link rel="icon" href="/favicon.ico" sizes="48x48" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <!-- Boot art competes with the module graph on a genuine cold start. A cloud band that
-         decodes late is a visible hitch at the worst possible moment. -->
-    <link
-      rel="preload"
-      as="image"
-      href="/v3-splash-clouds-foreground-v2.webp"
-      fetchpriority="high"
-    />
-    <link
-      rel="preload"
-      as="image"
-      href="/v3-splash-clouds-midground-v2.webp"
-      fetchpriority="high"
-    />
-    <link rel="preload" as="image" href="/v3-splash-stars.svg" />
-    <link rel="preload" as="image" href="/v3-splash-galaxies.svg" />
-    <link rel="preload" as="image" href="/v3-splash-signal.svg" />
-    <script>
-      (() => {
-        const LIGHT_BACKGROUND = "#ffffff";
-        const DARK_BACKGROUND = "#161616";
-        const themeColorMeta = document.querySelector('meta[name="theme-color"]');
-        try {
-          const storedTheme = window.localStorage.getItem("t3code:theme");
-          const theme =
-            storedTheme === "light" || storedTheme === "dark" || storedTheme === "system"
-              ? storedTheme
-              : "system";
-          const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-          const isDark = theme === "dark" || (theme === "system" && prefersDark);
-          document.documentElement.classList.toggle("dark", isDark);
-          const chromeColor = isDark ? DARK_BACKGROUND : LIGHT_BACKGROUND;
-          document.documentElement.style.backgroundColor = chromeColor;
-          themeColorMeta?.setAttribute("content", chromeColor);
-        } catch {
-          document.documentElement.classList.add("dark");
-          document.documentElement.style.backgroundColor = DARK_BACKGROUND;
-          themeColorMeta?.setAttribute("content", DARK_BACKGROUND);
-        }
-      })();
-    </script>
-    <script>
-      (() => {
-        const sessionKey = "v3code:startup-splash-seen";
-        try {
-          const hasPlayed = window.sessionStorage.getItem(sessionKey) === "true";
-          document.documentElement.dataset.startupSplash = hasPlayed ? "bypass" : "holding";
-          if (!hasPlayed) {
-            window.sessionStorage.setItem(sessionKey, "true");
-          }
-        } catch {
-          document.documentElement.dataset.startupSplash = "holding";
-        }
-      })();
-    </script>
+    <title>Splash lab</title>
+    <link rel="stylesheet" href="./splash-lab-app.css" />
     <style>
       html,
       body,
@@ -801,28 +739,142 @@
           display: none;
         }
       }
+
+      /* Lab-only: stand in for the bits React would otherwise mount. */
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+      #lab-bar {
+        position: fixed;
+        z-index: 200;
+        right: 14px;
+        bottom: 14px;
+        display: flex;
+        gap: 8px;
+      }
+      #lab-bar button {
+        background: color-mix(in srgb, var(--primary) 22%, transparent);
+        color: var(--foreground);
+        border: 1px solid color-mix(in srgb, var(--primary) 40%, transparent);
+        border-radius: 10px;
+        padding: 9px 16px;
+        font: 500 13px/1 var(--font-sans, system-ui);
+        cursor: pointer;
+        backdrop-filter: blur(8px);
+      }
+      #lab-bar button:hover {
+        background: color-mix(in srgb, var(--primary) 34%, transparent);
+      }
     </style>
-    <title>V3 Code (Alpha)</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="group/sidebar-wrapper flex min-h-svh w-full" style="--sidebar-width: 16rem">
+        <div
+          class="group peer hidden text-sidebar-foreground md:block"
+          data-slot="sidebar"
+          data-side="left"
+          data-state="expanded"
+          data-variant="sidebar"
+          data-collapsible=""
+        >
+          <div class="relative w-(--sidebar-width) bg-transparent" data-slot="sidebar-gap"></div>
+          <div
+            data-app-sidebar=""
+            class="fixed inset-y-0 left-0 z-10 hidden h-svh w-(--sidebar-width) md:flex border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
+          >
+            <div data-slot="sidebar-inner" class="flex h-full w-full flex-col bg-sidebar">
+              <div
+                data-slot="sidebar-header"
+                class="@container/sidebar-header relative flex h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center px-3 py-0 md:px-0"
+              >
+                <a
+                  class="sidebar-brand relative z-10 ml-[var(--workspace-titlebar-content-left)] flex h-8 w-fit min-w-0 shrink-0 items-center gap-1.5 overflow-hidden rounded-md text-foreground"
+                  href="#"
+                >
+                  <img
+                    alt=""
+                    aria-hidden="true"
+                    class="size-6 shrink-0 rounded-md shadow-[0_0_0_1px_color-mix(in_srgb,var(--primary)_18%,transparent)]"
+                    data-startup-logo-target=""
+                    src="./apple-touch-icon.png"
+                  />
+                  <span class="truncate text-base font-medium tracking-tight text-muted-foreground"
+                    >Code</span
+                  >
+                </a>
+              </div>
+              <div class="flex-1 px-2 py-2 text-sidebar-muted-foreground text-sm">
+                <div class="px-2 py-1.5 opacity-60">Threads</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <main
+          data-slot="sidebar-inset"
+          class="relative flex min-w-0 w-full flex-1 flex-col bg-background surface-grain"
+        >
+          <div
+            data-chat-composer-overlay="hero"
+            class="pointer-events-none absolute inset-0 z-20 flex items-center"
+          >
+            <div class="chat-composer-horizontal-inset w-full">
+              <div class="pointer-events-auto relative z-10">
+                <div class="absolute inset-x-0 bottom-full z-0">
+                  <div class="pb-8" data-startup-headline-target="">
+                    <h1
+                      class="mx-auto w-full max-w-5xl text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl"
+                    >
+                      What should we build in <span class="text-foreground">Dash</span>?
+                    </h1>
+                  </div>
+                </div>
+                <div class="relative">
+                  <div
+                    data-startup-composer-target=""
+                    class="chat-composer-glass-shell relative mx-auto w-full max-w-3xl"
+                  >
+                    <div class="chat-composer-glass-host relative z-10 w-full rounded-[22px]">
+                      <div class="flex min-h-[104px] flex-col justify-between gap-3 px-4 py-3">
+                        <div class="text-muted-foreground/70 text-base">
+                          Plan, search, build anything
+                        </div>
+                        <div class="flex items-center justify-between">
+                          <div class="flex gap-2">
+                            <div class="size-7 rounded-lg bg-foreground/8"></div>
+                            <div class="size-7 rounded-lg bg-foreground/8"></div>
+                          </div>
+                          <div class="size-8 rounded-lg bg-primary/70"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
     <div id="boot-shell" class="v3-splash" role="status" aria-live="polite">
       <span class="v3-splash-status">V3 Code is starting</span>
       <img
         class="v3-splash-art v3-splash-galaxies"
-        src="/v3-splash-galaxies.svg"
+        src="./v3-splash-galaxies.svg"
         alt=""
         aria-hidden="true"
       />
       <img
         class="v3-splash-art v3-splash-stars"
-        src="/v3-splash-stars.svg"
+        src="./v3-splash-stars.svg"
         alt=""
         aria-hidden="true"
       />
       <img
         class="v3-splash-art v3-splash-signal"
-        src="/v3-splash-signal.svg"
+        src="./v3-splash-signal.svg"
         alt=""
         aria-hidden="true"
       />
@@ -859,7 +911,7 @@
       </svg>
       <img
         class="v3-splash-art v3-splash-cloud-layer v3-splash-clouds-mid"
-        src="/v3-splash-clouds-midground-v2.webp"
+        src="./v3-splash-clouds-midground-v2.webp"
         alt=""
         aria-hidden="true"
       />
@@ -892,19 +944,19 @@
       </svg>
       <img
         class="v3-splash-art v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-left"
-        src="/v3-splash-clouds-foreground-v2.webp"
+        src="./v3-splash-clouds-foreground-v2.webp"
         alt=""
         aria-hidden="true"
       />
       <img
         class="v3-splash-art v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-center"
-        src="/v3-splash-clouds-foreground-v2.webp"
+        src="./v3-splash-clouds-foreground-v2.webp"
         alt=""
         aria-hidden="true"
       />
       <img
         class="v3-splash-art v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-right"
-        src="/v3-splash-clouds-foreground-v2.webp"
+        src="./v3-splash-clouds-foreground-v2.webp"
         alt=""
         aria-hidden="true"
       />
@@ -950,9 +1002,10 @@
             <circle class="v3-hero-meteor-head" r="6.5" />
           </g>
         </svg>
-        <img class="v3-splash-logo" src="/apple-touch-icon.png" alt="" aria-hidden="true" />
+        <img class="v3-splash-logo" src="./apple-touch-icon.png" alt="" aria-hidden="true" />
       </div>
     </div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="lab-bar"><button id="lab-replay">Replay splash</button></div>
+    <script type="module" src="./splash-lab.js"></script>
   </body>
 </html>
