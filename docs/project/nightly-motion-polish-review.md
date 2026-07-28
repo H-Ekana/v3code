@@ -1,6 +1,11 @@
 # Interaction/motion polish — delegation, incident, and review log
 
-Companion to `nightly-interaction-motion-polish-plan.md`.
+**Historical.** This is the implementation-time record. It documents verification that later proved
+insufficient — every item here passed its checks and most were invisible in the running app. For
+current state start at [`nightly-motion-polish-session-log.md`](./nightly-motion-polish-session-log.md);
+for root causes see [`nightly-motion-polish-diagnosis.md`](./nightly-motion-polish-diagnosis.md).
+
+Companion to [`nightly-interaction-motion-polish-plan.md`](./nightly-interaction-motion-polish-plan.md).
 Working branch: **`main`** (this checkout is shared by several concurrent agents — see the
 "Branches" section of `AGENTS.md`; nobody switches or creates branches without explicit approval).
 Owner of this file: the orchestrating Claude session. Sub-agents must not edit it.
@@ -154,20 +159,274 @@ own file under `apps/web/src/styles/`, imported once from `index.css`.
 
 ## Wave plan
 
-| Wave | Agent                                                  | Plan items                                | Status                           |
-| ---- | ------------------------------------------------------ | ----------------------------------------- | -------------------------------- |
-| 1    | F — motion foundation & status recipes                 | 1, 3 (helpers), visual-cleanup            | running (`task-ms3k0p9e-suby04`) |
-| 1    | A — resize, color controls, wizard a11y                | 2, 12 (sidebar shell)                     | running (`task-ms3k2tpe-dj5k5v`) |
-| 2    | B — conversation stream & tool lifecycle               | 5, 6, 10                                  | not dispatched                   |
-| 2    | C — stop / approvals / auto mode                       | 7, 8, 9                                   | not dispatched                   |
-| 2    | D — agent lifecycle, thread settlement, sidebar status | 4, 11, 3 (consumers), 12 (project switch) | not dispatched                   |
-| 3    | E — command palette, settings nav, model picker        | 14, 15                                    | not dispatched                   |
-| 3    | G — toasts, banners, Git/publishing feedback           | 18, 19                                    | not dispatched                   |
-| 3    | H — right panel, tabs, terminal drawer                 | 13, 16                                    | not dispatched                   |
-| 3    | I — files and diffs                                    | 17                                        | not dispatched                   |
-| 4    | J — `ultrathink` + remaining visual cleanup            | Visual cleanup                            | not dispatched                   |
+| Wave | Agent                                                  | Plan items                                | Status                        |
+| ---- | ------------------------------------------------------ | ----------------------------------------- | ----------------------------- |
+| 1    | F — motion foundation & status recipes                 | 1, 3 (helpers), visual-cleanup            | **landed** (`4ba7666b1`)      |
+| 1    | A — resize, color controls, wizard a11y                | 2, 12 (sidebar shell)                     | **landed** (`aba9af04d`)      |
+| 2    | B — conversation stream & tool lifecycle               | 5, 6, 10                                  | running (Opus)                |
+| 2    | C — stop / approvals / auto mode                       | 7, 8, 9                                   | running (Opus)                |
+| 2    | D — agent lifecycle, thread settlement, sidebar status | 4, 11, 3 (consumers), 12 (project switch) | running (Opus)                |
+| 2    | E — command palette, settings nav, model picker        | 14, 15                                    | running (Opus)                |
+| 2    | G — toasts, banners, Git/publishing feedback           | 18, 19                                    | running (Opus)                |
+| 2    | I — files and diffs                                    | 17                                        | running (Opus)                |
+| 3    | H — right panel, tabs, terminal drawer                 | 13, 16                                    | blocked on C (`ChatView.tsx`) |
+| 3    | J — `ultrathink` + remaining visual cleanup            | Visual cleanup                            | not dispatched                |
+
+Wave 2 runs as Claude Opus subagents rather than detached Codex jobs, after agent F was silently
+aborted mid-verification (`KNOWN-ISSUES.md`, occurrence 3). Agent H is held back deliberately:
+items 13/16 and item 7 both need `ChatView.tsx`, so sequencing them avoids a same-file collision.
+
+### Wave 1 follow-up completed by the orchestrator
+
+Agent F died mid-verification and left two gaps, both now closed:
+
+- `ui/card.test.tsx` still asserted the inline `focus-within:ring-primary/10` and `duration-200`
+  classes that F had folded into the `motion-focus` recipe. Rewritten to assert the recipe, plus a
+  regression guard against re-inlining the styling the recipe owns.
+- **F's claimed stylesheet contract test did not exist on disk.** Rebuilt as
+  `scripts/motion-recipes.test.ts`: exact token/easing values, strictly ordered layer roles,
+  reduced-motion coverage for all 9 animating recipes, and two intensity-creep guards (no glow past
+  6px; press within 2px and 0.98–1.02 scale). It lives at repo scope because `apps/web` forbids
+  `node:` builtins and `?raw` CSS imports resolve to an empty string in the unit pipeline — verified
+  by probe: both `?raw` and `import.meta.glob` return length 0, so a naive in-package test would
+  pass against nothing. The file read goes through Effect's `FileSystem`, per the repo-wide
+  `nodeBuiltinImport` rule that also bans `node:fs` at root scope.
+- Agent A's contrast finding applied: `ui/input.tsx` placeholder is now full-strength
+  `muted-foreground` (was `/72` — ≈2.80:1 light, ≈3.15:1 dark, both below WCAG 4.5:1).
+
+## Final state — all 19 plan items implemented
+
+**493 tests passing** (479 across 31 `apps/web` files + 14 repo-scope contract tests),
+`apps/web` typecheck clean, lint clean, `vp build` succeeds in ~21s with all ten stylesheets present
+in the output CSS. Everything uncommitted.
+
+### The cross-agent break that only a combined sweep caught
+
+Every agent passed its own subset. Running all 31 files together surfaced **1 failure in 479**:
+
+`ModelListRow.test.tsx > does not amplify the selected row's existing glow` — agent E wrote it to
+pin the glow at `0_0_10px` (its item-15 guard: "preserve without increasing"). Agent J then
+deliberately tightened that glow to `0_0_3px` as its item-scoped cleanup, but **never ran
+`ModelListRow.test.tsx` despite editing `ModelListRow.tsx`**.
+
+Both agents were individually correct. The test was repaired to assert the _rule_ (every
+`shadow-[…]` radius ≤ 4px) rather than a literal, so further tightening stays legal and only
+re-inflation fails. Pinning a magic number is what made it brittle in the first place.
+
+**Lesson for future fan-outs:** an agent must run the existing tests of every file it edits, not only
+the tests it wrote. And the orchestrator must run the union of all touched suites — per-agent green
+does not imply combined green.
+
+### Agent H — workbench (items 13, 16) — **delivered, verified**
+
+45/45 on its three new suites. `setResizeEpoch` has exactly two occurrences (the `useState` and the
+single call inside the refit funnel), so a per-frame refit is structurally inexpressible.
+
+**Fixed a pre-existing performance bug outside its brief:** `TerminalViewport`'s fit effect had
+`drawerHeight` in its dependency array while `handleResizePointerMove` called `setDrawerHeight` on
+every pointer move — so dragging the drawer ran `fitAddon.fit()` _plus a `terminalResize` RPC per
+frame_. Exactly what the plan forbids, and it was already shipping.
+
+The clean-close gate requires five clauses at once (`cause`, `status`, `exitSignal`, `exitCode`,
+`hasRunningSubprocess`), and the `cause` distinction is **structural** — only two call sites route
+through `closeTerminalFromUser`; the viewport auto-close and background reconciliation call the raw
+prop and cannot reach the accent at all.
+
+Also caught that `interruptState={composerInterruptState}` needed to be on **two** `<MessagesTimeline>`
+call sites; the orchestrator had wired only one.
+
+Known false negative, reported not hidden: the `terminal.close` keybinding bypasses
+`closeTerminalFromUser`, so it misses the acknowledgment. Never fires it wrongly.
+
+### Agent J — visual cleanup — **delivered, verified**
+
+38 tests. `ultrathink` went from two permanent 10s infinite loops (a 7-stop rainbow border scroll
+plus an independent `hue-rotate(0→360deg)` on the glyph) to a static violet→pink rim with one 240ms
+entry sweep. Zero `hue-rotate` remains in source CSS.
+
+Found `.ultrathink-pill` and `.ultrathink-word` had **zero consumers repo-wide** — `.ultrathink-word`
+was the gradient-text rule the plan names, already dead. Fixed a latent bug where the ultrathink
+inset hairline shared an element with the drag-over `shadow-[…]` utility, so one `box-shadow` was
+silently losing; now regression-tested.
+
+**Surfaced the ripgrep NUL-byte trap** now documented in `AGENTS.md` — see below.
+
+### Orchestrator repairs
+
+- `ChatView.tsx:5971` — wired `interruptState` (agent B needed it, agent C owned the file).
+- `ui/card.test.tsx`, `scripts/motion-recipes.test.ts`, `ui/input.tsx` — completed agent F's
+  interrupted slice after it was silently aborted mid-verification.
+- `styles/a11y-controls.css` — agent A predated the token convention: removed three `var()`
+  fallbacks, one of which read `var(--motion-hover, 120ms)` **while the token is 140ms**. A concrete
+  instance of the stale-duplicate failure this convention exists to prevent.
+- `ModelListRow.test.tsx` — repaired the E/J cross-agent break above.
+
+### Tooling trap found and documented
+
+`ChatComposer.tsx` contains 6 deliberate NUL bytes. Ripgrep applies binary detection on **directory
+traversal** and stops at the first one — no warning, no stderr, exit code 0 — so directory-scoped
+audits silently miss everything past line 2058. Explicit-path searches work, which is why it hides
+so well. Written into `AGENTS.md` with a reproduction; it had already produced false negatives
+during this review.
+
+## Stylesheet discipline scorecard
+
+Four of the eight per-area stylesheets carry local timing values. The convention that emerged, and
+which every future slice must follow:
+
+- **No raw millisecond literals in rule bodies.** Where the plan's band has no ladder token (e.g.
+  160–180ms sits between `--motion-hover` 140ms and `--motion-state` 200ms), declare a named token
+  in `:root` with a comment citing the plan band it satisfies.
+- **No `var()` fallbacks.** `motion.css` is imported first so tokens always resolve; a fallback is an
+  untested stale copy of the value that makes an intensity grep read as tokenized when it is not.
+
+| Agent                       | Named tokens + plan citation | `var()` fallbacks | Needed a review round |
+| --------------------------- | ---------------------------- | ----------------- | --------------------- |
+| G — `feedback.css`          | yes, unprompted              | none              | no                    |
+| B — `conversation.css`      | yes, unprompted              | none              | no                    |
+| I — `files-diffs.css`       | n/a — no local values at all | none              | no                    |
+| C — `composer-controls.css` | yes, after review            | none              | yes                   |
+| E — `navigation.css`        | yes, after review            | none              | yes                   |
 
 ## Review notes
+
+### Agent D — agents, threads, sidebar status (items 3-consumers, 4, 11, 12-project) — **delivered, verified after one review round**
+
+148/148 across the four suites re-run. **Its `ThreadStatusPill` change was the last outstanding
+typecheck error in the whole effort — `apps/web` is now completely clean.** The cyan/sky `Working`
+treatment is genuinely gone from `Sidebar.logic.ts`.
+
+Two designs worth preserving:
+
+- **Accents derive from an observed transition between two roster renders**, with the first
+  observation seeded silently. The Agents panel unmounts every time the sheet closes, so anything
+  mount-scoped would replay on every open. D matched the repo's existing `confirmedLabelCrossfade`
+  precedent rather than inventing a scheme.
+- **The single/bulk gate**: `attemptSettle` defaults to `source: "single"`, the multi-select handler
+  passes `"bulk"`, and `resolveThreadSettle` only acknowledges `single`. Bulk and automatic settles
+  fall back to the settled-shelf count.
+
+Correct refusals: left `Sidebar.tsx`/`AppSidebarLayout.tsx` alone because V1 archives rather than
+settles (item 11 has nothing to attach to, and the retheme arrives free through
+`resolveThreadStatusPill`); kept indigo for "Awaiting Input" instead of collapsing it into
+approval-amber, since that is a cross-surface semantic decision beyond item 3. It also noticed
+another agent mid-write in `Sidebar.logic.ts` and switched to narrow targeted edits with its reducer
+appended at the file tail rather than rewriting.
+
+**Blocked on a server fix, not D's scope:** D's unseen-completion recipe is correct but will render
+invisibly until the `KNOWN-ISSUES.md` "newly completed thread loses its DONE badge" defect is fixed.
+Root cause is `ProjectionPipeline.ts` overwriting `latest_turn_id` with a null `activeTurnId`, so
+`hasUnseenCompletion` returns false. That file currently carries uncommitted changes from another
+agent, so the fix appears to be in hand — worth confirming before judging the completion motion.
+
+Review round: raw literals in `agents-threads.css` (the convention post-dated D's prompt, so this
+was an orchestrator gap, not an agent error).
+
+### Agent B — conversation stream (items 5, 6, 10) — **delivered, verified**
+
+67/67 on the two timeline suites, 328 across `components/chat` + `session-logic`. Best replay
+prevention in the effort: a single ledger advanced by the list owner from the **full** row array,
+handing each row a plain boolean, so rows hold no mount-scoped animation state and a virtualized
+remount reads a value that is already `false`. 13 focused cases including thread-switch-and-return,
+fold/backfill of older turns, and already-completed tools expanded into view.
+
+Two bugs found and fixed that were not in its brief:
+
+- the timeline showed a **success check on neutral/empty tool completions** merely because the turn
+  ended — a misleading success signal;
+- in-flight tool calls were filtered out as "empty", so item 6's running state had **no row to
+  attach to at all**.
+
+Two correct refusals: it did not add a second live region (agent C already announces politely, and
+the row's per-second ticking timer would spam it), and it did not touch `ChatMarkdown.tsx` because a
+one-shot inside a memoized streaming-segment tree is a replay bug waiting to happen.
+
+Picked up both of agent C's handoffs. An interrupted stream removes the live edge and **cannot**
+glint — two dedicated tests, including the case where the message is left flagged `streaming`.
+
+**Closed by the orchestrator:** B needed `interruptState={composerInterruptState}` on the
+`<MessagesTimeline>` call in `ChatView.tsx` (agent C's file). C had settled, so it was added at
+`ChatView.tsx:5971`. Without it `Stopping…` was unreachable dead code.
+
+### Agent E — navigation (items 14, 15) — **delivered, verified after one review round**
+
+33/33 across five files. Rail marker genuinely moved from animating `top` to `translate3d`.
+Reports 0ms added close latency: the selection confirmation rides a `data-ending-style` exit that
+already existed rather than deferring the close.
+
+Strongest part is the three-guard proof that filtering keystrokes produce no entrance animation —
+notably catching that `<Command>`'s own key contains `browseGeneration`, so the palette _does_
+remount on browse-mode keystrokes, and resting `.nav-command-view` at `animation: none` so those
+remounts inherit nothing.
+
+Review round fixed six raw literals and removed every `var()` fallback. E also correctly escalated
+`stash@{0}` per `AGENTS.md` rather than touching it.
+
+**Logged for later, not E's scope:** `ModelListRow.tsx` carries a `0 0 10px` / `0 0 12px` selected
+glow, past the 3–4px ordinary budget. Item 15 said "preserve without increasing", so E was right to
+leave it. Routed to agent J.
+
+### Agent I — files and diffs (item 17) — **delivered, verified**
+
+32/32 across 4 files (confirmed by re-run). Spot-checks that mattered: `files-diffs.css` contains
+**zero** hardcoded durations or easings — every value reads from `motion.css`, which is the single
+easiest thing to fake and the one I checked first. `backwards` fill mode (not `both`), so no
+permanent transform is left over diff content. Reduced-motion block covers all three directional
+variants plus the tree reveal. Guard constants present at the stated values.
+
+Best work in the slice: the deferred-skeleton proof. `useDeferredPending` makes the component's own
+mount lifetime the pending window, so a cached diff unmounts before anything paints, and the test
+drains 5s of fake timers to prove `elapsed` never fires. The "exactly one container, never per row"
+test (`match(/files-tree-reveal/g).length === 1` for 6 files, zero animation classes at 200 files)
+is the right shape for the plan's no-staggering-large-trees rule.
+
+Declared out of scope, still owed: banner _recovery_ exit needs `ComposerBannerStack.tsx`;
+`FileBrowserPanel` first-index skeleton deliberately skipped (text label already carries the state).
+
+### Agent G — feedback systems (items 18, 19) — **delivered, verified**
+
+142/142 reported; 125/125 confirmed across the subset re-run with agent C. Toast arrival is genuinely
+`500ms → 230ms`. The Level 3 publishing accent is correctly gated: `shouldPlayPublishAcknowledgment`
+returns true only for `status === "pushed"`, so the `"created"` case (remote exists, nothing pushed)
+gets a static check — exactly the plan's "do not run until the initial push is confirmed".
+
+**Model behaviour for local tokens.** `feedback.css` declares `--feedback-toast-arrival: 230ms` and
+`--feedback-publish-accent: 280ms` as _named_ tokens, each with a comment citing the plan band it
+satisfies. That is the correct pattern when the ladder has no exact value, and it is what agent C
+was asked to adopt.
+
+G also flagged the `?raw` trap in another agent's file before that agent lost time to it.
+
+### Agent C — stop, approvals, Auto mode (items 7, 8, 9) — **delivered, one fix requested**
+
+39 focused / 232 across the chat folder; `cannot get stuck` verified present and correct. The stop
+work is the strongest result in wave 2: a four-state machine (`idle | pending | failed |
+unconfirmed`) with synchronous ref-guarded repeat-press refusal and a 6s watchdog that turns the
+`KNOWN-ISSUES.md` interrupted-turn wedge from a dead button into a retryable one — **without**
+touching the server root cause, which was the right boundary to hold.
+
+C also caught `DiffPanel.tsx` mid-write from agent I and reported it rather than editing it. That
+file has since gone clean; the report was a transient, and the discipline was correct.
+
+**Fix requested:** `styles/composer-controls.css` uses raw literals (`170ms`, `160ms`, `180ms`,
+`760ms` ×2) where named tokens belong. The values are all in-band — the issue is that raw literals
+are invisible to intensity review, and `scripts/motion-recipes.test.ts` only guards `motion.css`.
+Asked to adopt G's named-token-with-plan-citation pattern.
+
+**Plan inconsistency surfaced:** the ladder puts Level 3 at 240–340ms, but item 9 specifies a
+160–200ms Auto entry glint. C honoured the more specific instruction (180ms, ≤4px, single pass).
+Recorded here so nobody "fixes" it in either direction later.
+
+### Cross-agent findings routed by the orchestrator
+
+- **`?raw` CSS imports resolve to an empty string** under the `unit` project — `@tailwindcss/vite`
+  intercepts the load. Verified by probe: `?raw` and `import.meta.glob(..., {query:"?raw"})` both
+  return length 0. A stylesheet test using it asserts against nothing. Warned agents E and B.
+- **Agent C → agent B handoff:** visible `Stopping…` in the active response state and the
+  `INTERRUPTED` consumer both live in `MessagesTimeline.tsx`. `ChatView` already holds
+  `composerInterruptState`; `statusPresentation.ts` already exports the `INTERRUPTED` recipe with
+  label and stop icon. Also told B that an interrupted stream must **not** fire item 5's completion
+  glint — glinting on an interruption celebrates a failure.
 
 ### Agent A — controls & accessibility (plan items 2, 12-shell) — **delivered**
 
@@ -242,12 +501,12 @@ Both files were confirmed hash-identical to their pre-attempt state afterwards.
 ### Consequences
 
 1. **Do not "recover" the prompt-stash or preview clusters from the stash.** Merging
-   `upstream/main` restores them as tracked files *together with* their consumers
+   `upstream/main` restores them as tracked files _together with_ their consumers
    (`ChatComposer.tsx`, `PreviewAutomationHosts.tsx`, `PreviewView.tsx`, `ElectronBrowserHost.tsx`,
    `ThreadPreviewMiniPlayer.tsx`). Cherry-picking them produces exactly the breakage above.
 2. **`.repos/` (9,753 untracked), `patches/*beta.102*`, and the two `infra/relay/migrations/`
    directories are disposable debris** — all confirmed present as tracked content in
-   `upstream/main`. They are currently *blocking* a clean merge. Deleting them loses nothing.
+   `upstream/main`. They are currently _blocking_ a clean merge. Deleting them loses nothing.
 3. **The tree is dependency-incoherent right now**: beta.102 patch files present, `pnpm-lock.yaml`
    and `pnpm-workspace.yaml` still at beta.78. **Do not run `pnpm install` in this checkout** until
    the merge lands. The coherent version is committed at `523d8f9bb`.

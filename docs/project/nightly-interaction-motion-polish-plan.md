@@ -1,8 +1,30 @@
 # UI polish plan: interaction, motion, and feedback
 
-Status: proposed implementation plan — balanced-intensity revision
-Last updated: 2026-07-27
+Status: **implemented, reviewed by the user, and partly superseded.** Design authority for the
+intensity ladder, duration tokens and status axes; **no longer the execution order.**
+Last updated: 2026-07-28
 Scope: `apps/web`
+
+> ## ⚠️ Start here, not at this document
+>
+> This plan was implemented in full and the user then found that **almost none of it was visible in
+> the running app**. Do not begin work from this file.
+>
+> | Read                                                      | For                                                                     |
+> | --------------------------------------------------------- | ----------------------------------------------------------------------- |
+> | [**Session log**](./nightly-motion-polish-session-log.md) | **Start here.** The narrative: what broke, what was wrong, what is open |
+> | [Amended plan](./nightly-motion-polish-amended-plan.md)   | What gets built next and in what order — **execution authority**        |
+> | [Diagnosis](./nightly-motion-polish-diagnosis.md)         | Root causes, evidence-backed                                            |
+> | [User feedback](./nightly-motion-polish-user-feedback.md) | The user's verbatim critique, items 1–12                                |
+> | [Review log](./nightly-motion-polish-review.md)           | Implementation-time per-agent notes                                     |
+>
+> **Two amendments below are binding and contradict the original text:**
+>
+> 1. _"Amendment 2026-07-28 — extraordinary states may animate continuously"_ (in Explicit non-goals).
+>    The continuous-animation ban now covers **ordinary surfaces only**; `ultrathink` and the top
+>    reasoning tier are exempt.
+> 2. **Reduced motion is deferred** — see the standing decision at the top of the amended plan. Do not
+>    author, tune, or audit reduced-motion fallbacks until the user lifts it.
 
 ## Purpose
 
@@ -597,8 +619,41 @@ Primary files:
 - No confetti outside a genuinely exceptional future moment; the current plan does not require it.
 - No per-token streaming motion.
 - No bouncing rows, elastic easing, validation shaking, or magnetic controls.
-- No permanent neon outlines or ambient star particles on idle surfaces.
-- No continuous animation when no work is active.
+- No permanent neon outlines or ambient star particles on idle surfaces — **except on an explicitly
+  declared extraordinary state** (see below).
+- No continuous animation when no work is active **on ordinary surfaces**. Extraordinary states are
+  exempt (see below).
+
+### Amendment 2026-07-28 — extraordinary states may animate continuously
+
+The two rules above were originally absolute, and that was wrong. Corrected by the user:
+
+> No continuous animation when no work is active? Who said that? […] Under normal circumstances yes,
+> but ultracode, ultrathink, and whatever are not normal.
+
+The rules stand for **ordinary** surfaces, which is nearly everything: rows, tabs, trees, buttons,
+panels, toasts, the idle composer. Those must still go completely quiet once state has settled.
+
+An **extraordinary state** is one the user deliberately opted into, that is rare, that is visibly
+exceptional, and that they want to feel exceptional for as long as it is active. Continuous motion is
+permitted there, because the motion _is_ the signal that the mode is on. Currently:
+
+- `ultrathink` — slow drifting iridescent fill plus a continuously travelling rim streak;
+- the top reasoning tier on any provider — Codex **Max**, and the equivalent high/max settings
+  elsewhere — with a toned-down member of the same family.
+
+Constraints that still apply to an extraordinary state:
+
+- it must be **user-selected**, never automatic, and it must end when the mode ends;
+- it must be **cheap**: `background-position` drift, `opacity`, `transform`, or a registered-angle
+  rim. No filter animation, no large shadows, no per-frame layout;
+- it must be **slow** — a long period reads as alive without pulling the eye off the work;
+- it must not compete with the Level 4 composer/send sequence;
+- reduced motion still holds the animation still while keeping the state fully legible.
+
+Adding a surface to this list is a deliberate decision, recorded here. Anything not on the list is
+ordinary and the original rules apply unchanged.
+
 - No purple/pink replacement for semantic red, amber, green, or informational blue.
 - No full-panel blur/filter animation over terminal, diff, browser, or file content.
 - No hover scaling on dense rows, trees, tabs, or icon trays.

@@ -102,6 +102,36 @@ is probably mid-write in them.
 - Worktree paths supply stable preferred port offsets. Read the actual server and web ports from the `[dev-runner]` line because occupied ports can still shift them.
 - Before handing off a `--share` URL, open its origin in a controlled browser and confirm the app loads. A successful curl is insufficient because browsers reject some otherwise reachable ports.
 
+## Searching — `ChatComposer.tsx` is invisible to ripgrep past line 2058
+
+`apps/web/src/components/chat/ChatComposer.tsx` contains **6 genuine NUL bytes**, at lines 2058,
+2069, and 2175. They are deliberate: separators inside template literals used to build dedup keys.
+They are not corruption and should not be "cleaned up" without checking what reads those keys.
+
+The consequence is a silent search failure. Ripgrep applies binary detection to files reached by
+**directory traversal** and stops at the first NUL — with no warning, no stderr, and **exit code 0**:
+
+```sh
+rg -n "activeProviderIconClassName" apps/web/src/components/chat/
+# → ProviderModelPicker.tsx only. ChatComposer.tsx:3210 is silently absent.
+
+rg --text -n "activeProviderIconClassName" apps/web/src/components/chat/
+# → also finds ChatComposer.tsx:3210
+```
+
+Passing the file as an **explicit path** searches it fully, which is why this hides so well: a
+targeted `rg pattern path/to/ChatComposer.tsx` works, and only the directory-wide audit lies.
+
+So: any repo-wide or directory-scoped search silently misses roughly a third of the largest composer
+file. When auditing, either pass `--text`, name the file explicitly, or use `Read`. Treat a
+directory-scoped grep that returns nothing from `ChatComposer.tsx` as _unverified_, not as _clean_ —
+this has already produced false negatives during review.
+
+Confirmed 2026-07-28 while reviewing the interaction-motion-polish work. If someone wants to make
+the file greppable again, replacing `\x00` with `` (ASCII unit separator) would preserve the
+separator semantics without tripping binary detection — but verify every consumer of those dedup
+keys first.
+
 ## Package Roles
 
 - `apps/server`: Node.js WebSocket server. Wraps Codex app-server (JSON-RPC over stdio), serves the React web app, and manages provider sessions.
@@ -109,6 +139,17 @@ is probably mid-write in them.
 - `packages/contracts`: Shared effect/Schema schemas and TypeScript contracts for provider events, WebSocket protocol, and model/session types. Keep this package schema-only — no runtime logic.
 - `packages/shared`: Shared runtime utilities consumed by both server and client applications. Uses explicit subpath exports (e.g. `@t3tools/shared/git`) — no barrel index.
 - `packages/client-runtime`: Shared runtime package for sharing client code across web and mobile.
+
+## Claude Sub-agents — Fable orchestrates, Opus 5 implements
+
+User-directed standing rules (2026-07-28) for Claude Code sessions in this repo:
+
+- If you are Claude Fable and you delegate work to sub-agents, write **precise task specs**: exact
+  scope and file ownership, the root causes or docs the agent must read first, explicit
+  deliverables, and end goals stated as user-observable checks. Vague prompts produce unverifiable
+  work; every sub-agent report must come back as raw data the orchestrator can verify.
+- As Fable, **never spawn Fable sub-agents**. Spawn **Claude Opus 5** sub-agents only, at high
+  thinking/reasoning levels. Fable is the orchestrator and verifier; Opus 5 is the implementer.
 
 ## Codex Rescue Subagents
 

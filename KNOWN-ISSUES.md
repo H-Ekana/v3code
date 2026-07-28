@@ -1,5 +1,174 @@
 # Known Issues
 
+# 🟠 **CONFIRMED THREAD DELETION CAN DO NOTHING AFTER THE USER CLICKS `YES`**
+
+## **STATUS: CONFIRMED, NOT FIXED. The failed deletion did not reach the database.**
+
+After choosing **Delete** from a thread's context menu and approving the native confirmation dialog,
+the thread can remain in the sidebar with no visible error. This is not always a stale client row:
+in the confirmed reproduction, the delete command never reached the orchestration backend.
+
+### Verified reproduction
+
+Two stopped threads had the identical title **"Categorize and split dirty commits"**:
+
+| Provider | Thread ID                              | Database state after deleting the GPT row |
+| -------- | -------------------------------------- | ----------------------------------------- |
+| Codex    | `542eab66-3463-4987-9bbb-e61f7c0e4b2a` | `deleted_at = null`                       |
+| Claude   | `9786f3ea-69f9-4cb8-9b45-4648634d11dc` | `deleted_at = null`                       |
+
+The user selected the Codex/GPT row and clicked **Yes** in the confirmation dialog. A live,
+read-only inspection immediately afterwards found:
+
+- the Codex row still present in `projection_threads` with `deleted_at = null`;
+- no `thread.deleted` event for that thread;
+- no new entry in `orchestration_command_receipts` for that thread; and
+- its projected provider session already in `stopped`, with no active turn or error.
+
+Therefore this instance was not a successful database deletion that the sidebar failed to render.
+The orchestration service never received `thread.delete`.
+
+### Most likely failure boundary
+
+`apps/web/src/hooks/useThreadActions.ts` does several awaited cleanup steps before it dispatches the
+durable delete command:
+
+1. optionally stop the provider session;
+2. await `terminalEnvironment.close`;
+3. only then dispatch `threadEnvironment.delete`.
+
+For this reproduction there was no linked worktree and the session was already stopped. That leaves
+the awaited terminal-close command as the only normal asynchronous step between confirmation and
+the missing delete dispatch. A stalled or interrupted terminal-close request is therefore the
+strongest current lead, although client-side tracing is still needed to prove it.
+
+The ordering is especially suspicious because
+`apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts` already stops the provider session
+and closes thread terminals after a durable `thread.deleted` event. Client-side cleanup before the
+tombstone duplicates that responsibility and creates a point where deletion can silently stop
+halfway.
+
+Identical titles made the incident harder to inspect, but they are not themselves sufficient to
+explain the failure: commands are scoped by environment and thread ID, not title.
+
+### Expected behavior
+
+Once the user confirms, the app must either persist `thread.deleted` and remove the exact selected
+thread, or show an actionable failure. A cleanup request must never leave the operation silently
+unfinished.
+
+### Investigation and fix direction
+
+- Add phase-level tracing keyed by environment ID and thread ID for confirmation, provider stop,
+  terminal close, delete dispatch, command receipt, and projection update.
+- Add a regression test where terminal close never settles or is interrupted; the durable delete
+  must still be dispatched.
+- Prefer dispatching `thread.delete` first and leaving provider/terminal cleanup to the existing
+  server-side deletion reactor. If client pre-cleanup remains necessary, make it bounded and
+  best-effort rather than a prerequisite.
+- Do not silently suppress an interrupted delete operation. Surface a failure and keep enough
+  context for a retry.
+- Include the provider name and a short thread-ID suffix in deletion diagnostics so same-title
+  threads can be distinguished unambiguously.
+
+---
+
+# 🟡 **SUB-AGENT ACTIVITY CLOCKS CAN SHOW UTC AS IF IT WERE LOCAL TIME**
+
+## **STATUS: CONFIRMED IN THE INSTALLED BUILD. FIX EXISTS IN CURRENT SOURCE BUT HAS NOT REACHED THAT BUILD.**
+
+Times displayed inside sub-agent tool calls can be exactly 5 hours 30 minutes behind the Windows
+clock when the computer is using India Standard Time. This is a presentation bug, not clock drift
+and not corrupted database timestamps.
+
+### Verified evidence
+
+- Windows reported `2026-07-28 18:28:36 +05:30` in the `India Standard Time` zone.
+- A persisted activity timestamp was `2026-07-28T12:53:08.906Z`. The trailing `Z` means UTC, so its
+  correct local value is `18:23:08.906 IST`.
+- The installed Agents panel showed the UTC clock portion instead of applying the `+05:30` offset.
+- A nearby test process independently printed a local start time of `18:22`, agreeing with the
+  converted event time and confirming that the system and provider clocks were aligned.
+
+### Root cause
+
+The installed client bundle renders activity times with the equivalent of:
+
+```ts
+entry.at.slice(11, 19);
+```
+
+That extracts the `HH:mm:ss` text directly from the ISO UTC timestamp. It does not convert the
+instant into the renderer's local time zone, but the result is presented without a `UTC` label, so
+it looks like an incorrect local clock.
+
+The current source in `apps/web/src/components/AgentsPanel.tsx` already uses
+`formatTimestamp(entry.at, settings.timestampFormat)`. The shared formatter uses
+`Intl.DateTimeFormat`, which converts the instant into the renderer's local time zone. The installed
+`app.asar` still contains the older substring implementation, so the correction requires an app
+build containing the current source.
+
+### Expected behavior and regression coverage
+
+- Never display a wall-clock timestamp by slicing an ISO string.
+- Use the shared timestamp formatter for every Agents panel and tool-call time.
+- Keep elapsed durations distinct from wall-clock times.
+- Add a regression test under a non-UTC time zone, such as `Asia/Kolkata`, proving that a `Z`
+  timestamp is rendered with the local offset.
+- If UTC is ever intentionally displayed, label it explicitly as `UTC`.
+
+---
+
+# 🟠 **OPENING AN EXISTING CHAT CAN REPLAY ITS ENTIRE HISTORY AS LIVE ACTIVITY**
+
+## **STATUS: INTERMITTENTLY OBSERVED, NOT YET DIAGNOSED.**
+
+Sometimes selecting an existing chat does not hydrate directly into its current persisted state.
+Instead, the interface appears to replay the thread chronologically from its beginning before finally
+settling on the present:
+
+- the user's earliest messages appear first;
+- assistant messages and tool activity advance through their original sequence;
+- sub-agents visibly repeat their complete lifecycles, including starting, working, changing status,
+  and finishing; and
+- after the historical sequence finishes, the thread returns to its actual current state.
+
+The effect resembles a time-lapse or "time warp" through the conversation. Historical events are
+presented as if they were arriving live, even though every event was already persisted with its
+original timestamp.
+
+### Expected behavior
+
+Opening a chat should immediately hydrate its latest materialized state. Existing messages should
+render as static history, and each sub-agent should appear only in its latest persisted state.
+Animations, status transitions, notifications, and completion effects should run only for events
+received after the live subscription begins.
+
+### Impact
+
+- Old agents appear to start working again, which falsely suggests live backend activity.
+- Long threads can produce substantial visual churn, delay, and CPU usage before becoming usable.
+- One-shot arrival and completion animations may replay when they should remain acknowledged.
+- The user cannot reliably distinguish historical playback from new work.
+
+### Investigation leads
+
+The failure is likely at the snapshot-to-live-stream boundary. Investigate whether:
+
+- initial thread hydration dispatches persisted events individually through the same reducer path as
+  new WebSocket events;
+- a reconnect or thread selection subscribes from sequence zero instead of the latest hydrated
+  cursor;
+- historical `agent.snapshot` activities are applied one by one instead of collapsing directly to
+  the latest roster; or
+- transition and animation logic lacks an explicit `initialHydration` guard.
+
+Capture the affected thread ID, selection timestamp, whether the app had just reconnected, event
+sequence/cursor values, and a performance trace when reproducing. The important invariant is:
+**hydrate history once, then animate only genuinely new events.**
+
+---
+
 # 🔴 **CLAUDE STRUCTURED QUESTION CAN VANISH WHILE THE TURN STAYS RUNNING**
 
 ## **STATUS: CONFIRMED, NOT FIXED. Live request may be recoverable without restarting.**
@@ -568,3 +737,75 @@ fields, but `task_progress` emits coarse periodic summaries where the Codex app-
 separate item event per reasoning block, command and file change.
 
 Plan, blocker register and roadmap: **`docs/project/ideal-agents-sidebar.md`**
+
+---
+
+# 🟠 **CLAUDE WORKFLOW AGENTS STAY `active` AFTER THE WORKFLOW HAS COMPLETED**
+
+## **STATUS: CONFIRMED, NOT FIXED. Cosmetic, but it misreports token spend as ongoing.**
+
+Observed 2026-07-28. A Claude `Workflow` run (`wf_ae2c3275-7c1`, 12 diagnostic agents) rendered
+`12 running · 49 settled · Σ 1.9M tok` in the workflow panel roughly **18 minutes after every process
+involved had exited**. A later reproduction showed the same twelve cards labeled `active`, each at
+exactly `66m 9s`, while the footer still reported `12 running · 49 settled · Σ 1.9M tok`. The user
+reasonably read this as "the workflow is still running and burning my usage limit".
+
+This survives leaving and reopening the thread. Completion results exist, but the last persisted
+workflow-progress state continues to describe the diagnostic agents as non-terminal.
+
+Same family as _"A companion job that outlives a server restart strands its agent card forever"_
+above — a non-terminal status stays authoritative because the thing that would emit the terminal
+status died with the run — but a **different subsystem and a different tell**, so it is filed
+separately.
+
+## How to tell it apart from a genuinely live run
+
+The distinguishing symptom is that **every agent shows the identical elapsed time** — first all
+twelve read `33m 7s`, and a later rendering showed all twelve at `66m 9s`. That is diagnostic:
+
+- The stranded-agent-card bug above ticks **live** (client counts `firstStartedAt` against the wall
+  clock). A workflow panel may preserve a frozen progress frame or recompute its elapsed label after
+  hydration, but it still preserves the stale non-terminal statuses.
+- Agents that really are running were started staggered and would show _different_ elapsed times.
+  Twelve identical timers cannot be twelve live processes.
+
+## Evidence used to confirm death (all four agree, and all are cheap)
+
+1. **No file has been written since the run ended.** Newest file in the workflow transcript dir was
+   `10:27:49`; `journal.jsonl` last written `10:26:45`; checked at `10:45:37` — 18 minutes silent. A
+   live agent writes to its `agent-<id>.jsonl` continuously.
+2. **No process exists.** The only long-lived `node` was from the _previous day_; everything else
+   post-dated the check and belonged to the checking session itself.
+3. **`TaskList` returns nothing.**
+4. **Internally contradictory state.** `journal.jsonl` contains recorded _final results_ for 11 of
+   the 12 agents the panel claims are `running`. An agent cannot both have returned and still be
+   running.
+
+## Practical consequences
+
+- **`Σ tok` is a total already spent, not a rate.** A stale panel does not mean tokens are still
+  accruing.
+- Do not "stop" a run on the panel's word alone. Check mtimes in the transcript dir first — if it has
+  been quiet for minutes, there is nothing to stop and `TaskStop` will report failure on an
+  already-dead task, which reads alarmingly and is meaningless.
+- Results are **not** lost when this happens. `journal.jsonl` holds each completed `agent()` call's
+  return value and can be read directly:
+
+```bash
+node -e "
+const fs=require('fs');
+const lines=fs.readFileSync('journal.jsonl','utf8').split('\n').filter(Boolean).map(l=>JSON.parse(l));
+for (const d of lines.filter(o=>o.result!==undefined)) console.log(d.agentId, JSON.stringify(d.result).slice(0,200));
+"
+```
+
+Recovering a stopped run this way is what produced
+`docs/project/nightly-motion-polish-diagnosis.md` — 11 of 12 agents' findings survived the run being
+killed.
+
+## Investigation target
+
+Trace the terminal workflow update from Claude's completed `Workflow` result through persistence,
+thread hydration, and the workflow-panel reducer. The required invariant is: once a workflow has
+returned or every child has a terminal result, reopening the thread must materialize every child as
+terminal and must never revive the last `running` progress frame.
