@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   SidebarStageBackdrop,
+  resolveEnvironmentIdentificationPillLabel,
+  resolveSidebarStageBackdropVariant,
   StageBackdropArt,
   StageBackdropButtonArt,
 } from "./SidebarStageBackdrop";
@@ -12,6 +14,20 @@ describe("SidebarStageBackdrop", () => {
     const markup = renderToStaticMarkup(<SidebarStageBackdrop variant="nightly" />);
 
     expect(markup).toContain("h-28");
+  });
+
+  it("resolves stage artwork only when enabled", () => {
+    expect(resolveSidebarStageBackdropVariant("Dev")).toBe("dev");
+    expect(resolveSidebarStageBackdropVariant("Nightly")).toBe("nightly");
+    expect(resolveSidebarStageBackdropVariant("Dev", false)).toBeNull();
+    expect(resolveSidebarStageBackdropVariant("Alpha")).toBeNull();
+  });
+
+  it("resolves supported environment pill labels", () => {
+    expect(resolveEnvironmentIdentificationPillLabel("Dev")).toBe("Dev");
+    expect(resolveEnvironmentIdentificationPillLabel("nightly")).toBe("Nightly");
+    expect(resolveEnvironmentIdentificationPillLabel("Latest")).toBeNull();
+    expect(resolveEnvironmentIdentificationPillLabel("Alpha")).toBeNull();
   });
 
   it.each(["nightly", "dev"] as const)(

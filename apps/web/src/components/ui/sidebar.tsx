@@ -798,19 +798,28 @@ function SidebarSeparator({ className, ...props }: React.ComponentProps<typeof S
   );
 }
 
-function SidebarContent({ className, ...props }: React.ComponentProps<"div">) {
+function SidebarContent({
+  className,
+  fixedHeader,
+  ...props
+}: React.ComponentProps<"div"> & {
+  fixedHeader?: React.ReactNode;
+}) {
   return (
-    <ScrollArea hideScrollbars scrollFade className="h-auto min-h-0 flex-1">
-      <div
-        className={cn(
-          "flex w-full min-w-0 flex-col gap-2 group-data-[collapsible=icon]:overflow-hidden",
-          className,
-        )}
-        data-sidebar="content"
-        data-slot="sidebar-content"
-        {...props}
-      />
-    </ScrollArea>
+    <>
+      {fixedHeader ? <div className="w-full shrink-0">{fixedHeader}</div> : null}
+      <ScrollArea hideScrollbars scrollFade className="h-auto min-h-0 flex-1">
+        <div
+          className={cn(
+            "flex w-full min-w-0 flex-col gap-2 group-data-[collapsible=icon]:overflow-hidden",
+            className,
+          )}
+          data-sidebar="content"
+          data-slot="sidebar-content"
+          {...props}
+        />
+      </ScrollArea>
+    </>
   );
 }
 
@@ -905,14 +914,14 @@ const sidebarMenuButtonVariants = cva(
     },
     variants: {
       size: {
-        default: "h-8 text-sm",
-        lg: "h-12 text-sm group-data-[collapsible=icon]:p-0!",
-        sm: "h-7 text-xs",
+        default: "h-8 rounded-md px-2.5 py-1.5 text-sm",
+        icon: "size-8 justify-center rounded-md p-0",
+        lg: "h-12 rounded-lg p-2 text-sm group-data-[collapsible=icon]:p-0!",
+        sm: "h-7 rounded-lg p-2 text-xs",
       },
       variant: {
-        default: "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-        outline:
-          "bg-sidebar-control-surface ring-1 ring-sidebar-border hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+        default: "font-medium text-sidebar-muted-foreground/80",
+        outline: "bg-sidebar-control-surface ring-1 ring-sidebar-border",
       },
     },
   },
