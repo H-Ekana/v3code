@@ -51,6 +51,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count,
           pending_user_input_count,
           has_actionable_proposed_plan,
+          active_agent_count,
+          agents_last_activity_at,
           deleted_at
         )
         VALUES (
@@ -74,6 +76,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.pendingApprovalCount},
           ${row.pendingUserInputCount},
           ${row.hasActionableProposedPlan},
+          ${row.activeAgentCount},
+          ${row.agentsLastActivityAt},
           ${row.deletedAt}
         )
         ON CONFLICT (thread_id)
@@ -97,6 +101,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count = excluded.pending_approval_count,
           pending_user_input_count = excluded.pending_user_input_count,
           has_actionable_proposed_plan = excluded.has_actionable_proposed_plan,
+          active_agent_count = excluded.active_agent_count,
+          agents_last_activity_at = excluded.agents_last_activity_at,
           deleted_at = excluded.deleted_at
       `,
   });
@@ -127,6 +133,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
+          active_agent_count AS "activeAgentCount",
+          agents_last_activity_at AS "agentsLastActivityAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
         WHERE thread_id = ${threadId}
@@ -159,6 +167,8 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
+          active_agent_count AS "activeAgentCount",
+          agents_last_activity_at AS "agentsLastActivityAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
         WHERE project_id = ${projectId}

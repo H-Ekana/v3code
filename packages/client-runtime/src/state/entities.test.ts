@@ -103,6 +103,8 @@ const THREAD_SHELL = {
   hasPendingApprovals: false,
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
+  activeAgentCount: 0,
+  agentsLastActivityAt: null,
 } as const;
 
 const SNAPSHOT: OrchestrationShellSnapshot = {

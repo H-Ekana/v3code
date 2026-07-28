@@ -1941,6 +1941,194 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("projects the live subagent count from the newest agent roster", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-agents-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-agents"),
+        occurredAt: "2026-02-26T12:30:00.000Z",
+        commandId: CommandId.make("cmd-agents-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-agents-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-agents"),
+          title: "Project Agents",
+          workspaceRoot: "/tmp/project-agents",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-02-26T12:30:00.000Z",
+          updatedAt: "2026-02-26T12:30:00.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-agents-2"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-agents"),
+        occurredAt: "2026-02-26T12:30:01.000Z",
+        commandId: CommandId.make("cmd-agents-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-agents-2"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-agents"),
+          projectId: ProjectId.make("project-agents"),
+          title: "Thread Agents",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-02-26T12:30:01.000Z",
+          updatedAt: "2026-02-26T12:30:01.000Z",
+        },
+      });
+
+      const appendRoster = (input: {
+        readonly suffix: string;
+        readonly at: string;
+        readonly revision: number;
+        readonly agents: ReadonlyArray<Record<string, unknown>>;
+      }) =>
+        appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make(`evt-agents-${input.suffix}`),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-agents"),
+          occurredAt: input.at,
+          commandId: CommandId.make(`cmd-agents-${input.suffix}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-agents-${input.suffix}`),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-agents"),
+            activity: {
+              id: EventId.make(`activity-agents-${input.suffix}`),
+              tone: "info",
+              kind: "agent.snapshot",
+              summary: "agent roster",
+              payload: { agents: input.agents, revision: input.revision },
+              turnId: null,
+              createdAt: input.at,
+            },
+          },
+        });
+
+      const agent = (input: {
+        readonly id: string;
+        readonly status: string;
+        readonly kind: string;
+        readonly lastActivityAt: string;
+      }) => ({
+        agentId: input.id,
+        name: input.id,
+        kind: input.kind,
+        status: input.status,
+        startedAt: "2026-02-26T12:30:02.000Z",
+        lastActivityAt: input.lastActivityAt,
+        updatedAt: input.lastActivityAt,
+      });
+
+      // Two live workers, one settled, plus a workflow container that is
+      // grouping chrome rather than a worker.
+      yield* appendRoster({
+        suffix: "3",
+        at: "2026-02-26T12:30:03.000Z",
+        revision: 1,
+        agents: [
+          agent({
+            id: "a1",
+            status: "running",
+            kind: "subagent",
+            lastActivityAt: "2026-02-26T12:30:03.000Z",
+          }),
+          agent({
+            id: "a2",
+            status: "waiting",
+            kind: "subagent",
+            lastActivityAt: "2026-02-26T12:30:02.500Z",
+          }),
+          agent({
+            id: "a3",
+            status: "idle",
+            kind: "subagent",
+            lastActivityAt: "2026-02-26T12:30:02.000Z",
+          }),
+          agent({
+            id: "a4",
+            status: "running",
+            kind: "workflow",
+            lastActivityAt: "2026-02-26T12:30:09.000Z",
+          }),
+        ],
+      });
+
+      const liveRows = yield* sql<{
+        readonly activeAgentCount: number;
+        readonly agentsLastActivityAt: string | null;
+      }>`
+        SELECT
+          active_agent_count AS "activeAgentCount",
+          agents_last_activity_at AS "agentsLastActivityAt"
+        FROM projection_threads
+        WHERE thread_id = 'thread-agents'
+      `;
+      assert.deepEqual(liveRows, [
+        { activeAgentCount: 2, agentsLastActivityAt: "2026-02-26T12:30:03.000Z" },
+      ]);
+
+      // A newer roster wins outright: the count must not accumulate across
+      // snapshots, and settling every worker has to return the thread to 0 so
+      // the sidebar can show Done again.
+      yield* appendRoster({
+        suffix: "4",
+        at: "2026-02-26T12:30:04.000Z",
+        revision: 2,
+        agents: [
+          agent({
+            id: "a1",
+            status: "completed",
+            kind: "subagent",
+            lastActivityAt: "2026-02-26T12:30:04.000Z",
+          }),
+          agent({
+            id: "a2",
+            status: "stopped",
+            kind: "subagent",
+            lastActivityAt: "2026-02-26T12:30:04.000Z",
+          }),
+        ],
+      });
+
+      const settledRows = yield* sql<{
+        readonly activeAgentCount: number;
+        readonly agentsLastActivityAt: string | null;
+      }>`
+        SELECT
+          active_agent_count AS "activeAgentCount",
+          agents_last_activity_at AS "agentsLastActivityAt"
+        FROM projection_threads
+        WHERE thread_id = 'thread-agents'
+      `;
+      assert.deepEqual(settledRows, [{ activeAgentCount: 0, agentsLastActivityAt: null }]);
+    }),
+  );
+
   it.effect("clears stale pending user input from projected shell summaries", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;

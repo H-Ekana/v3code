@@ -3,6 +3,8 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  THREAD_AGENT_TERMINAL_STATUSES,
+  THREAD_AGENTS_ACTIVITY_KIND,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -201,6 +203,72 @@ function deriveHasActionableProposedPlan(input: {
 
   const latestPlan = sorted.at(-1) ?? null;
   return latestPlan !== null && latestPlan.implementedAt === null;
+}
+
+/**
+ * Non-terminal subagents in the thread's newest roster, plus how recently one
+ * of them moved.
+ *
+ * Reads the payload structurally rather than schema-decoding it: this runs on
+ * every `thread.activity-appended`, and a roster can carry dozens of rows.
+ * Winner is the highest `revision`, matching `deriveLatestAgentSnapshot` on
+ * the client so both surfaces agree on which roster is authoritative.
+ *
+ * `idle` counts as settled, not active — a Codex agent between activations is
+ * resumable, not producing. Workflow *containers* are grouping chrome rather
+ * than workers, so they are excluded to keep the count equal to the number of
+ * things actually running.
+ */
+function deriveActiveAgentsFromActivities(activities: ReadonlyArray<ProjectionThreadActivity>): {
+  readonly activeAgentCount: number;
+  readonly agentsLastActivityAt: string | null;
+} {
+  let bestRevision = -1;
+  let bestAgents: ReadonlyArray<Record<string, unknown>> = [];
+
+  for (const activity of activities) {
+    if (activity.kind !== THREAD_AGENTS_ACTIVITY_KIND) {
+      continue;
+    }
+    const payload =
+      typeof activity.payload === "object" && activity.payload !== null
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    if (payload === null || !Array.isArray(payload.agents)) {
+      continue;
+    }
+    const revision = typeof payload.revision === "number" ? payload.revision : 0;
+    if (revision >= bestRevision) {
+      bestRevision = revision;
+      bestAgents = payload.agents.filter(
+        (agent): agent is Record<string, unknown> => typeof agent === "object" && agent !== null,
+      );
+    }
+  }
+
+  let activeAgentCount = 0;
+  let agentsLastActivityAt: string | null = null;
+  for (const agent of bestAgents) {
+    const status = typeof agent.status === "string" ? agent.status : null;
+    if (
+      status === null ||
+      status === "idle" ||
+      THREAD_AGENT_TERMINAL_STATUSES.has(status as never) ||
+      agent.kind === "workflow"
+    ) {
+      continue;
+    }
+    activeAgentCount += 1;
+    const lastActivityAt = typeof agent.lastActivityAt === "string" ? agent.lastActivityAt : null;
+    if (
+      lastActivityAt !== null &&
+      (agentsLastActivityAt === null || lastActivityAt > agentsLastActivityAt)
+    ) {
+      agentsLastActivityAt = lastActivityAt;
+    }
+  }
+
+  return { activeAgentCount, agentsLastActivityAt };
 }
 
 function retainProjectionMessagesAfterRevert(
@@ -579,6 +647,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         latestTurnId: existingRow.value.latestTurnId,
         proposedPlans,
       });
+      const { activeAgentCount, agentsLastActivityAt } =
+        deriveActiveAgentsFromActivities(activities);
 
       yield* projectionThreadRepository.upsert({
         ...existingRow.value,
@@ -586,6 +656,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         pendingApprovalCount,
         pendingUserInputCount,
         hasActionableProposedPlan: hasActionableProposedPlan ? 1 : 0,
+        activeAgentCount,
+        agentsLastActivityAt,
       });
     });
 
@@ -615,6 +687,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
             hasActionableProposedPlan: 0,
+            activeAgentCount: 0,
+            agentsLastActivityAt: null,
             deletedAt: null,
           });
           return;

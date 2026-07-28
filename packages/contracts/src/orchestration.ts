@@ -424,6 +424,18 @@ export const OrchestrationThreadShell = Schema.Struct({
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
+  // Non-terminal subagents still outstanding on this thread. The session drops
+  // to "ready" the moment the main turn completes regardless of backgrounded
+  // work, so this is the only signal that a settled-looking thread is still
+  // producing. Defaulted for decoding so persisted pre-035 client snapshots
+  // still load.
+  activeAgentCount: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  // Freshness for the count above: consumers discount a roster that stopped
+  // updating, since a server that dies mid-run never writes a terminal
+  // snapshot and its agents replay as running forever.
+  agentsLastActivityAt: Schema.NullOr(IsoDateTime).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 

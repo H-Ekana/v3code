@@ -99,6 +99,8 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
+        activeAgentCount: 0,
+        agentsLastActivityAt: null,
         deletedAt: null,
       });
 
@@ -161,6 +163,8 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
+        activeAgentCount: 0,
+        agentsLastActivityAt: null,
         deletedAt: null,
       });
 

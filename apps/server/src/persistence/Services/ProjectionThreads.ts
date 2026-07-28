@@ -44,6 +44,10 @@ export const ProjectionThread = Schema.Struct({
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
   hasActionableProposedPlan: NonNegativeInt,
+  // Non-terminal subagents in the thread's latest `agent.snapshot` roster,
+  // denormalized so the sidebar can read it without loading thread detail.
+  activeAgentCount: NonNegativeInt,
+  agentsLastActivityAt: Schema.NullOr(IsoDateTime),
   deletedAt: Schema.NullOr(IsoDateTime),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
