@@ -346,6 +346,15 @@ export function resolveInlineCodeFileLinkMeta(
     }
   }
 
+  // Inline code is a guess, not an authored link: globs and other expansion
+  // metacharacters are commands/patterns, never file references, and a
+  // relative path with no cwd cannot resolve to anything openable. The prose
+  // link resolver stays permissive; this path stays conservative.
+  if (/[*?[\]{}]/.test(candidate)) return null;
+  if (!cwd && !candidate.startsWith("/") && !WINDOWS_DRIVE_PATH_PATTERN.test(candidate)) {
+    return null;
+  }
+
   const resolved = resolveMarkdownFileLinkMeta(candidate, cwd);
   if (resolved) return resolved;
 
