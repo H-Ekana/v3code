@@ -4,8 +4,21 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import type { VcsStatusResult } from "@t3tools/contracts";
-import { CloudIcon, FolderGit2Icon, GitPullRequestIcon, TerminalIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CircleAlertIcon,
+  CircleDashedIcon,
+  CircleDotIcon,
+  CircleIcon,
+  CloudIcon,
+  FolderGit2Icon,
+  GitPullRequestIcon,
+  TerminalIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { useMemo } from "react";
+import { cn } from "../lib/utils";
+import type { StatusIconRole } from "../lib/statusPresentation";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { useProject } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
@@ -173,6 +186,46 @@ export function ThreadWorktreeIndicator({
   );
 }
 
+/**
+ * Shape carries status alongside colour and text. A bare coloured dot was the
+ * only signal at narrow widths (the label is `hidden md:inline`), which made
+ * activity colour-only exactly where the sidebar is most compressed.
+ */
+const THREAD_STATUS_ICON: Partial<Record<StatusIconRole, LucideIcon>> = {
+  activity: CircleDashedIcon,
+  queued: CircleDashedIcon,
+  waiting: CircleDotIcon,
+  check: CheckIcon,
+  error: CircleAlertIcon,
+};
+
+function ThreadStatusGlyph({
+  status,
+  className,
+}: {
+  status: ThreadStatusPill;
+  className?: string;
+}) {
+  const Icon = THREAD_STATUS_ICON[status.iconRole] ?? CircleIcon;
+  return (
+    <Icon
+      aria-hidden
+      className={cn(
+        "shrink-0",
+        className,
+        // Running gets the contained violet trace; everything else takes the
+        // shared recipe straight from statusPresentation. `motion-resting` is
+        // the no-op case and is left off so it cannot add a stray transition.
+        status.iconRole === "activity"
+          ? "thread-status-trace"
+          : status.motionClass === "motion-resting"
+            ? undefined
+            : status.motionClass,
+      )}
+    />
+  );
+}
+
 export function ThreadStatusLabel({
   status,
   compact = false,
@@ -191,11 +244,7 @@ export function ThreadStatusLabel({
             />
           }
         >
-          <span
-            className={`size-[9px] rounded-full ${status.dotClass} ${
-              status.pulse ? "animate-status-pulse" : ""
-            }`}
-          />
+          <ThreadStatusGlyph status={status} className="size-3" />
         </TooltipTrigger>
         <TooltipPopup side="top">{status.label}</TooltipPopup>
       </Tooltip>
@@ -212,11 +261,7 @@ export function ThreadStatusLabel({
           />
         }
       >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
-            status.pulse ? "animate-status-pulse" : ""
-          }`}
-        />
+        <ThreadStatusGlyph status={status} className="size-3" />
         <span className="hidden md:inline">{status.label}</span>
       </TooltipTrigger>
       <TooltipPopup side="top">{status.label}</TooltipPopup>

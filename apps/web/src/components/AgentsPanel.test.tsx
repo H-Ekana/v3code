@@ -2,7 +2,7 @@ import { ProviderDriverKind, type ThreadAgentSnapshot } from "@t3tools/contracts
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import AgentsPanel from "./AgentsPanel";
+import AgentsPanel, { computeAgentLifecycleAccents } from "./AgentsPanel";
 
 const TIMESTAMP = "2026-07-27T10:00:00.000Z";
 
@@ -98,7 +98,7 @@ describe("AgentsPanel provider identity", () => {
 });
 
 describe("AgentsPanel sections", () => {
-  it("keeps completed sub-agents behind a collapsed Finished toggle", () => {
+  it("shows completed sub-agents under an expanded Finished toggle by default", () => {
     const markup = renderAgent(
       agent({
         agentId: "completed-agent",
@@ -112,13 +112,15 @@ describe("AgentsPanel sections", () => {
     )?.[0];
 
     expect(finishedToggle).toBeDefined();
-    expect(finishedToggle).toContain('aria-expanded="false"');
+    // Open on first paint: the roster is usually opened to read what a
+    // finished sub-agent did, so its results must not start hidden.
+    expect(finishedToggle).toContain('aria-expanded="true"');
     expect(finishedToggle).toContain("Finished");
     expect(finishedToggle).toContain("· 1");
-    expect(markup).not.toContain("Completed agent");
+    expect(markup).toContain("Completed agent");
   });
 
-  it("shows running sub-agents while completed siblings stay collapsed", () => {
+  it("shows running sub-agents alongside completed siblings", () => {
     const running = agent({
       agentId: "running-agent",
       provider: ProviderDriverKind.make("codex"),
@@ -135,7 +137,7 @@ describe("AgentsPanel sections", () => {
     );
 
     expect(markup).toContain("Running sibling");
-    expect(markup).not.toContain("Completed sibling");
+    expect(markup).toContain("Completed sibling");
     expect(markup).toContain('aria-label="Finished sub-agents · 1"');
   });
 
@@ -244,5 +246,145 @@ describe("AgentCard work kind", () => {
 
     expect(markup).toContain("Reading the diff");
     expect(markup).not.toContain("Inspect");
+  });
+});
+
+describe("agent lifecycle accents", () => {
+  const roster = (
+    entries: ReadonlyArray<[string, ThreadAgentSnapshot["status"]]>,
+  ): ReadonlyArray<Pick<ThreadAgentSnapshot, "agentId" | "status">> =>
+    entries.map(([agentId, status]) => ({
+      agentId,
+      status,
+    })) as ReadonlyArray<Pick<ThreadAgentSnapshot, "agentId" | "status">>;
+
+  // Replay prevention, part 1: the panel unmounts whenever the sheet closes.
+  // The first observation of a roster is a remount or a first paint, never a
+  // change, so nothing may animate — otherwise reopening the panel replays
+  // every arrival and completion the thread has ever had.
+  it("animates nothing on the first observation of a roster", () => {
+    const { accents } = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([
+        ["running-agent", "running"],
+        ["finished-agent", "completed"],
+        ["failed-agent", "failed"],
+      ]),
+    });
+
+    expect(accents.size).toBe(0);
+  });
+
+  // Replay prevention, part 2: a historical agent that was ALREADY terminal
+  // when first seen never completes in front of the user, so it gets no
+  // completion accent on any later render either.
+  it("never completes an agent that was already settled when first seen", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([["finished-agent", "completed"]]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([["finished-agent", "completed"]]),
+    });
+
+    expect(second.accents.size).toBe(0);
+  });
+
+  it("gives a genuinely new agent one arrival", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([["existing", "running"]]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([
+        ["existing", "running"],
+        ["fresh", "pending"],
+      ]),
+    });
+
+    expect(second.accents.get("fresh")).toBe("arrival");
+    expect(second.accents.has("existing")).toBe(false);
+  });
+
+  it("gives an observed run-to-finish transition one completion", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([["worker", "running"]]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([["worker", "completed"]]),
+    });
+
+    expect(second.accents.get("worker")).toBe("completion");
+  });
+
+  it("does not re-fire the completion on subsequent renders of the settled agent", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([["worker", "running"]]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([["worker", "completed"]]),
+    });
+    const third = computeAgentLifecycleAccents({
+      previousStatusById: second.statusById,
+      agents: roster([["worker", "completed"]]),
+    });
+
+    expect(third.accents.size).toBe(0);
+  });
+
+  // An agent whose first sighting is already terminal (a very fast subagent)
+  // is new, not finished: one accent, not two stacked on the same transition.
+  it("spends only the arrival on an agent that appears already settled", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([["existing", "running"]]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([
+        ["existing", "running"],
+        ["instant", "completed"],
+      ]),
+    });
+
+    expect(second.accents.get("instant")).toBe("arrival");
+  });
+
+  it("survives a reorder without manufacturing an accent", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([
+        ["a", "running"],
+        ["b", "running"],
+      ]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([
+        ["b", "running"],
+        ["a", "running"],
+      ]),
+    });
+
+    expect(second.accents.size).toBe(0);
+  });
+
+  it("does not treat a non-terminal status change as a completion", () => {
+    const first = computeAgentLifecycleAccents({
+      previousStatusById: null,
+      agents: roster([["worker", "pending"]]),
+    });
+    const second = computeAgentLifecycleAccents({
+      previousStatusById: first.statusById,
+      agents: roster([["worker", "running"]]),
+    });
+
+    expect(second.accents.size).toBe(0);
   });
 });

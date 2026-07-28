@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { createContext, memo, useContext, useEffect, useRef, useState } from "react";
 import {
   THREAD_AGENT_COLLAPSED_ACTIVITY_COUNT,
   type ThreadAgentSnapshot,
@@ -19,6 +19,7 @@ import { formatDuration } from "../session-logic";
 import { formatTimestamp, parseTimestampDate } from "../timestampFormat";
 import { useClientSettings } from "../hooks/useSettings";
 import { formatProviderDisplayName } from "../lib/contextWindow";
+import { getStatusPresentation, type StatusAxes } from "../lib/statusPresentation";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 
 interface AgentsPanelProps {
@@ -27,15 +28,53 @@ interface AgentsPanelProps {
   mode?: "sheet" | "sidebar" | "embedded";
 }
 
-const STATUS_DOT_CLASS: Record<ThreadAgentSnapshot["status"], string> = {
-  pending: "bg-muted-foreground/40",
-  running: "bg-primary animate-status-pulse motion-reduce:animate-none",
-  waiting: "bg-warning animate-status-pulse motion-reduce:animate-none",
-  idle: "bg-primary/50",
-  completed: "bg-success",
-  failed: "bg-destructive",
-  stopped: "bg-muted-foreground/60",
+/**
+ * Agent lifecycle expressed on the four shared axes. The panel keeps its own
+ * domain labels below ("Idle · resumable" says more here than the shared
+ * "Ready to resume"), but colour and motion come from `statusPresentation` so
+ * an agent card and a thread row cannot disagree about what running looks like.
+ */
+const STATUS_AXES: Record<ThreadAgentSnapshot["status"], StatusAxes> = {
+  pending: { activity: "queued", attention: "none", outcome: "neutral", persistence: "active" },
+  running: { activity: "running", attention: "none", outcome: "neutral", persistence: "active" },
+  waiting: {
+    activity: "waiting",
+    attention: "approval-required",
+    outcome: "neutral",
+    persistence: "active",
+  },
+  idle: {
+    activity: "complete",
+    attention: "none",
+    outcome: "neutral",
+    persistence: "idle-resumable",
+  },
+  completed: {
+    activity: "complete",
+    attention: "none",
+    outcome: "success",
+    persistence: "active",
+  },
+  failed: { activity: "failed", attention: "none", outcome: "failure", persistence: "active" },
+  stopped: {
+    activity: "interrupted",
+    attention: "none",
+    outcome: "neutral",
+    persistence: "active",
+  },
 };
+
+const STATUS_ROLE_DOT_CLASS = {
+  primary: "bg-primary",
+  warning: "bg-warning",
+  success: "bg-success",
+  destructive: "bg-destructive",
+  muted: "bg-muted-foreground/50",
+} as const;
+
+function agentDotClass(status: ThreadAgentSnapshot["status"]): string {
+  return STATUS_ROLE_DOT_CLASS[getStatusPresentation(STATUS_AXES[status]).colorRole];
+}
 
 const STATUS_LABEL: Record<ThreadAgentSnapshot["status"], string> = {
   pending: "Queued",
@@ -49,10 +88,127 @@ const STATUS_LABEL: Record<ThreadAgentSnapshot["status"], string> = {
 
 const EMPTY_AGENT_SNAPSHOTS: ReadonlyArray<ThreadAgentSnapshot> = [];
 
+// ── Lifecycle one-shots (plan item 4) ────────────────────────────────
+//
+// Arrival and completion are derived from an OBSERVED TRANSITION between two
+// renders of the roster, never from the agent's current status. The panel
+// unmounts every time the sheet closes; a status-derived accent would replay
+// the whole roster's arrivals and completions on each reopen, and again on
+// every reorder into and out of the `Finished` group.
+//
+// The first observation of a roster seeds silently — a remount, restored
+// history, or a first paint is not a change — which is the same rule
+// `confirmedLabelCrossfade` uses for branch labels.
+
+export type AgentLifecycleAccent = "arrival" | "completion";
+
+/** Long enough to cover the 180ms arrival and the 200ms completion so an
+    unrelated re-render mid-flight cannot strip the class and cut it short. */
+export const AGENT_ACCENT_HOLD_MS = 260;
+
+interface AgentAccentEntry {
+  readonly accent: AgentLifecycleAccent;
+  readonly atMs: number;
+}
+
+export function computeAgentLifecycleAccents(input: {
+  /** `null` on the very first observation: seed only, animate nothing. */
+  previousStatusById: ReadonlyMap<string, ThreadAgentSnapshot["status"]> | null;
+  agents: ReadonlyArray<Pick<ThreadAgentSnapshot, "agentId" | "status">>;
+}): {
+  accents: ReadonlyMap<string, AgentLifecycleAccent>;
+  statusById: ReadonlyMap<string, ThreadAgentSnapshot["status"]>;
+} {
+  const statusById = new Map<string, ThreadAgentSnapshot["status"]>();
+  const accents = new Map<string, AgentLifecycleAccent>();
+
+  for (const agent of input.agents) {
+    const agentId = String(agent.agentId);
+    statusById.set(agentId, agent.status);
+    if (input.previousStatusById === null) continue;
+
+    const previousStatus = input.previousStatusById.get(agentId);
+    if (previousStatus === undefined) {
+      // Genuinely new to a roster we were already watching. One accent only —
+      // an agent that appears already finished arrives, it does not also
+      // "complete", because the user never saw it run.
+      accents.set(agentId, "arrival");
+      continue;
+    }
+    if (
+      previousStatus !== agent.status &&
+      isTerminalAgentStatus(agent.status) &&
+      !isTerminalAgentStatus(previousStatus)
+    ) {
+      accents.set(agentId, "completion");
+    }
+  }
+
+  return { accents, statusById };
+}
+
+const AgentAccentContext = createContext<ReadonlyMap<string, AgentLifecycleAccent>>(new Map());
+
+function useAgentAccent(agentId: string): AgentLifecycleAccent | null {
+  return useContext(AgentAccentContext).get(agentId) ?? null;
+}
+
+function useAgentLifecycleAccents(
+  agents: ReadonlyArray<ThreadAgentSnapshot>,
+): ReadonlyMap<string, AgentLifecycleAccent> {
+  const statusByIdRef = useRef<ReadonlyMap<string, ThreadAgentSnapshot["status"]> | null>(null);
+  const heldRef = useRef<ReadonlyMap<string, AgentAccentEntry>>(new Map());
+  const exposedRef = useRef<ReadonlyMap<string, AgentLifecycleAccent>>(new Map());
+  // Guarded on roster identity so React's double-invoked renders re-use the
+  // previous answer instead of comparing the roster against itself and
+  // silently swallowing the accent.
+  const lastAgentsRef = useRef<ReadonlyArray<ThreadAgentSnapshot> | null>(null);
+
+  if (lastAgentsRef.current !== agents) {
+    lastAgentsRef.current = agents;
+    const { accents, statusById } = computeAgentLifecycleAccents({
+      previousStatusById: statusByIdRef.current,
+      agents,
+    });
+    statusByIdRef.current = statusById;
+
+    const now = Date.now();
+    const held = new Map<string, AgentAccentEntry>();
+    for (const [agentId, entry] of heldRef.current) {
+      if (now - entry.atMs < AGENT_ACCENT_HOLD_MS && statusById.has(agentId)) {
+        held.set(agentId, entry);
+      }
+    }
+    for (const [agentId, accent] of accents) {
+      held.set(agentId, { accent, atMs: now });
+    }
+    heldRef.current = held;
+    exposedRef.current = new Map(
+      [...held].map(([agentId, entry]) => [agentId, entry.accent] as const),
+    );
+  }
+
+  return exposedRef.current;
+}
+
+/**
+ * Remount key for a value that should crossfade on change but not on first
+ * paint. Returns `null` until a real change is observed.
+ */
+function useChangeCrossfadeKey(value: string): string | null {
+  const previousRef = useRef(value);
+  const generationRef = useRef(0);
+  if (previousRef.current !== value) {
+    previousRef.current = value;
+    generationRef.current += 1;
+  }
+  return generationRef.current === 0 ? null : `change-${generationRef.current}`;
+}
+
 function AgentStatusDot({ status }: { status: ThreadAgentSnapshot["status"] }) {
   return (
     <span
-      className={cn("size-1.75 shrink-0 rounded-full", STATUS_DOT_CLASS[status])}
+      className={cn("size-1.75 shrink-0 rounded-full", agentDotClass(status))}
       role="img"
       aria-label={STATUS_LABEL[status]}
     />
@@ -72,7 +228,11 @@ function AgentProviderIcon({ agent }: { agent: ThreadAgentSnapshot }) {
   return (
     <>
       <span
-        className="relative isolate inline-flex size-5 shrink-0"
+        // `agent-status-mark` owns the running ring: 3px beyond the mark, tight
+        // and duty-cycled, replacing the dot's own continuous pulse so a
+        // running agent shows one indicator rather than two.
+        className="agent-status-mark relative size-5 shrink-0"
+        data-agent-running={agent.status === "running" ? "true" : undefined}
         role="img"
         aria-label={accessibleLabel}
         title={accessibleLabel}
@@ -84,7 +244,7 @@ function AgentProviderIcon({ agent }: { agent: ThreadAgentSnapshot }) {
           displayName={String(provider)}
           className="size-5"
           iconClassName="size-5"
-          statusDotClassName={STATUS_DOT_CLASS[agent.status]}
+          statusDotClassName={agentDotClass(agent.status)}
           indicatorBackground="var(--card)"
         />
         {isDelegated ? (
@@ -159,6 +319,7 @@ function AgentCard({
   const [expanded, setExpanded] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const settings = useClientSettings();
+  const accent = useAgentAccent(String(agent.agentId));
   const settled = isTerminalAgentStatus(agent.status);
   // Settled cards lead with outcome (error first); live cards with activity.
   const activity =
@@ -199,7 +360,12 @@ function AgentCard({
     // inside another button.
     <div
       className={cn(
-        "group/agent w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-left transition-[background-color,border-color,box-shadow,opacity] duration-200 ease-out motion-reduce:transition-none",
+        // `agent-card` carries the 240ms settle of border/tint into the
+        // inactive surface. That transition is the card body's ONLY move
+        // during a completion — the ring→check on the status mark is the
+        // single coordinated accent.
+        "agent-card group/agent w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-left",
+        accent === "arrival" && "agent-card-arrival",
         hasDetails && "hover:border-primary/25",
         isLive && "border-primary/20 bg-primary/[0.035] shadow-[0_0_8px_-4px_var(--primary)]",
         agent.status === "waiting" && "border-warning/25",
@@ -236,7 +402,16 @@ function AgentCard({
             <AgentElapsed agent={agent} />
           </span>
           {agent.status === "completed" ? (
-            <CheckIcon className="size-3 shrink-0 text-success" />
+            // The running ring contracts into this check. One element, one
+            // move: no card glow, icon flash, or border sweep beside it.
+            <span
+              className={cn(
+                "inline-flex size-3 shrink-0 items-center justify-center rounded-full text-success",
+                accent === "completion" && "agent-completion-mark",
+              )}
+            >
+              <CheckIcon className="size-3" />
+            </span>
           ) : null}
         </div>
         {activity || workKind ? (
@@ -293,7 +468,10 @@ function AgentCard({
         </div>
       </button>
       {expanded && hasDetails ? (
-        <div className="mt-2 space-y-0.5 border-t border-primary/15 pt-2">
+        // Disclosure reveal: the detail feed eases in over 170ms rather than
+        // mounting abruptly. Keyed to the disclosure, not to the activity text,
+        // so a running agent's per-tick updates never re-trigger it.
+        <div className="agent-activity-reveal mt-2 space-y-0.5 border-t border-primary/15 pt-2">
           {visibleActivity.map((entry) => (
             <div key={`${entry.at}-${entry.summary}`} className="flex gap-2 text-[11px]">
               <span className="shrink-0 font-mono tabular-nums text-muted-foreground/60">
@@ -352,6 +530,9 @@ function PhaseHeader({ phase }: { phase: AgentPanelPhase }) {
     (agent) => agent.status === "idle" || isTerminalAgentStatus(agent.status),
   ).length;
   const activeCount = phase.agents.length - doneCount;
+  // Level 1: counts crossfade instead of jumping. `null` on first paint, so a
+  // phase header that merely remounts does not flash.
+  const countKey = useChangeCrossfadeKey(`${activeCount}:${doneCount}`);
   return (
     <div className="flex items-center gap-2 px-1 pt-2 pb-1 text-[10px] text-muted-foreground">
       <span
@@ -366,7 +547,10 @@ function PhaseHeader({ phase }: { phase: AgentPanelPhase }) {
         {phase.title}
       </span>
       {phase.status === "running" ? (
-        <span>
+        <span
+          key={countKey ?? "initial"}
+          className={countKey === null ? undefined : "agent-phase-count"}
+        >
           {activeCount} active{doneCount > 0 ? ` · ${doneCount} done` : ""}
         </span>
       ) : phase.status === "pending" ? (
@@ -563,7 +747,14 @@ function BackgroundTasksSection({
 
 const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: AgentsPanelProps) {
   const state = deriveAgentPanelState(agents);
-  const [finishedExpanded, setFinishedExpanded] = useState(false);
+  // Resolved once for the whole roster, above the grouping: a card that moves
+  // between `Sub-agents` and the `Finished` group keeps its identity
+  // by agentId, so regrouping cannot manufacture a fresh arrival.
+  const accents = useAgentLifecycleAccents(agents);
+  // Finished starts open: the roster is usually consulted to read what a
+  // completed sub-agent actually did, so hiding those behind a click buries
+  // the thing most often being looked for.
+  const [finishedExpanded, setFinishedExpanded] = useState(true);
   const [backgroundExpanded, setBackgroundExpanded] = useState(false);
 
   if (agents.length === 0) {
@@ -582,43 +773,47 @@ const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: Ag
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col", mode === "embedded" && "bg-transparent")}>
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-4 p-3">
-          {state.groups.map((group, index) => (
-            <AgentGroup
-              key={group.workflow?.agentId ?? `group-${index}`}
-              group={group}
-              onOpenScript={onOpenScript}
+    <AgentAccentContext.Provider value={accents}>
+      <div className={cn("flex h-full min-h-0 flex-col", mode === "embedded" && "bg-transparent")}>
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="space-y-4 p-3">
+            {state.groups.map((group, index) => (
+              <AgentGroup
+                key={group.workflow?.agentId ?? `group-${index}`}
+                group={group}
+                onOpenScript={onOpenScript}
+              />
+            ))}
+            <SubagentsSection
+              activeRows={state.activeSubagents}
+              settledRows={state.settledSubagents}
+              settledExpanded={finishedExpanded}
+              onSettledExpandedChange={setFinishedExpanded}
             />
-          ))}
-          <SubagentsSection
-            activeRows={state.activeSubagents}
-            settledRows={state.settledSubagents}
-            settledExpanded={finishedExpanded}
-            onSettledExpandedChange={setFinishedExpanded}
-          />
-          <BackgroundTasksSection
-            agents={state.backgroundTasks}
-            expanded={backgroundExpanded}
-            onExpandedChange={setBackgroundExpanded}
-          />
-        </div>
-      </ScrollArea>
-      <div className="flex items-center gap-3 border-t border-primary/10 bg-primary/[0.025] px-3.5 py-2 text-[11px] text-muted-foreground">
-        {state.runningCount > 0 ? (
-          <span className="flex items-center gap-1.5 text-primary">
-            <span className="size-1.75 rounded-full bg-primary shadow-[0_0_8px_var(--primary)] animate-status-pulse motion-reduce:animate-none" />
-            {state.runningCount} running
+            <BackgroundTasksSection
+              agents={state.backgroundTasks}
+              expanded={backgroundExpanded}
+              onExpandedChange={setBackgroundExpanded}
+            />
+          </div>
+        </ScrollArea>
+        <div className="flex items-center gap-3 border-t border-primary/10 bg-primary/[0.025] px-3.5 py-2 text-[11px] text-muted-foreground">
+          {state.runningCount > 0 ? (
+            <span className="flex items-center gap-1.5 text-primary">
+              <span className="size-1.75 rounded-full bg-primary shadow-[0_0_8px_var(--primary)] animate-status-pulse motion-reduce:animate-none" />
+              {state.runningCount} running
+            </span>
+          ) : null}
+          {state.waitingCount > 0 ? <span>{state.waitingCount} waiting</span> : null}
+          {/* The quiet shared completion summary. Bulk and automatic
+              settlement land here rather than on any per-card flourish. */}
+          {state.settledCount > 0 ? <span>{state.settledCount} settled</span> : null}
+          <span className="ml-auto font-mono tabular-nums">
+            Σ {formatAgentTokenCount(state.totalTokens)} tok
           </span>
-        ) : null}
-        {state.waitingCount > 0 ? <span>{state.waitingCount} waiting</span> : null}
-        {state.settledCount > 0 ? <span>{state.settledCount} settled</span> : null}
-        <span className="ml-auto font-mono tabular-nums">
-          Σ {formatAgentTokenCount(state.totalTokens)} tok
-        </span>
+        </div>
       </div>
-    </div>
+    </AgentAccentContext.Provider>
   );
 });
 

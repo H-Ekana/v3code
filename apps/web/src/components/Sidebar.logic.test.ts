@@ -20,6 +20,7 @@ import {
   resolveSidebarV2RowSurfaceClassName,
   resolveThreadRowClassName,
   resolveSidebarV2Status,
+  SIDEBAR_AGENTS_STALE_AFTER_MS,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
   formatWorkingDurationLabel,
@@ -31,6 +32,13 @@ import {
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
+  beginThreadSettle,
+  clearThreadSettleMark,
+  releaseThreadSettleHold,
+  resolveThreadSettle,
+  threadSettlePhase,
+  EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT,
+  type ThreadStatusPill,
 } from "./Sidebar.logic";
 import {
   EnvironmentId,
@@ -601,7 +609,17 @@ describe("resolveSidebarV2Status", () => {
     updatedAt: "2026-03-09T10:00:00.000Z",
   };
 
-  const idle = { hasPendingApprovals: false, hasPendingUserInput: false };
+  const idle = {
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    activeAgentCount: 0,
+    agentsLastActivityAt: null,
+  };
+
+  // Fixed clock so the staleness cutoff is exercised deterministically.
+  const now = Date.parse("2026-03-09T10:00:00.000Z");
+  const agentsAt = (msAgo: number) => new Date(now - msAgo).toISOString();
+  const settled = { ...session, status: "ready" as const, activeTurnId: null as never };
 
   it("prioritizes approval over a running session", () => {
     expect(resolveSidebarV2Status({ ...idle, hasPendingApprovals: true, session })).toBe(
@@ -654,6 +672,98 @@ describe("resolveSidebarV2Status", () => {
 
   it("defaults to ready with no session", () => {
     expect(resolveSidebarV2Status({ ...idle, session: null })).toBe("ready");
+  });
+
+  it("reports agents when the session settled but subagents are still live", () => {
+    expect(
+      resolveSidebarV2Status(
+        {
+          ...idle,
+          session: settled,
+          activeAgentCount: 3,
+          agentsLastActivityAt: agentsAt(60_000),
+        },
+        now,
+      ),
+    ).toBe("agents");
+  });
+
+  it("ranks a running session above live subagents", () => {
+    // The main loop working is the stronger signal; subagents under it are
+    // implied rather than newsworthy.
+    expect(
+      resolveSidebarV2Status(
+        { ...idle, session, activeAgentCount: 2, agentsLastActivityAt: agentsAt(1_000) },
+        now,
+      ),
+    ).toBe("working");
+  });
+
+  it("ranks approval, input, and failure above live subagents", () => {
+    const live = { activeAgentCount: 2, agentsLastActivityAt: agentsAt(1_000) };
+    expect(
+      resolveSidebarV2Status(
+        { ...idle, ...live, session: settled, hasPendingApprovals: true },
+        now,
+      ),
+    ).toBe("approval");
+    expect(
+      resolveSidebarV2Status(
+        { ...idle, ...live, session: settled, hasPendingUserInput: true },
+        now,
+      ),
+    ).toBe("input");
+    expect(
+      resolveSidebarV2Status(
+        { ...idle, ...live, session: { ...session, status: "error" as const, lastError: "boom" } },
+        now,
+      ),
+    ).toBe("failed");
+  });
+
+  it("ages out a roster that stopped reporting", () => {
+    // A server that dies mid-run leaves its agents replaying as running
+    // forever; without the cutoff the thread could never show Done again.
+    expect(
+      resolveSidebarV2Status(
+        {
+          ...idle,
+          session: settled,
+          activeAgentCount: 3,
+          agentsLastActivityAt: agentsAt(SIDEBAR_AGENTS_STALE_AFTER_MS + 1_000),
+        },
+        now,
+      ),
+    ).toBe("ready");
+  });
+
+  it("treats an untimestamped or unparseable roster as stale", () => {
+    expect(
+      resolveSidebarV2Status(
+        { ...idle, session: settled, activeAgentCount: 3, agentsLastActivityAt: null },
+        now,
+      ),
+    ).toBe("ready");
+    expect(
+      resolveSidebarV2Status(
+        { ...idle, session: settled, activeAgentCount: 3, agentsLastActivityAt: "not-a-date" },
+        now,
+      ),
+    ).toBe("ready");
+  });
+
+  it("stays ready when the roster has no active agents", () => {
+    expect(
+      resolveSidebarV2Status(
+        {
+          ...idle,
+          session: settled,
+          activeAgentCount: 0,
+          agentsLastActivityAt: agentsAt(1_000),
+        },
+        now,
+      ),
+    ).toBe("ready");
   });
 });
 
@@ -1053,6 +1163,22 @@ describe("resolveSidebarV2RowSurfaceClassName", () => {
 });
 
 describe("resolveProjectStatusIndicator", () => {
+  // Priority ordering is the whole contract here; the shared presentation
+  // fields ride along unchanged, so a fixture supplies them.
+  function pill(overrides: Pick<ThreadStatusPill, "label" | "colorClass" | "dotClass" | "pulse">) {
+    return {
+      ...overrides,
+      axes: {
+        activity: "running",
+        attention: "none",
+        outcome: "neutral",
+        persistence: "active",
+      },
+      iconRole: "activity",
+      motionClass: "motion-pending",
+    } satisfies ThreadStatusPill;
+  }
+
   it("returns null when no threads have a notable status", () => {
     expect(resolveProjectStatusIndicator([null, null])).toBeNull();
   });
@@ -1060,24 +1186,24 @@ describe("resolveProjectStatusIndicator", () => {
   it("surfaces the highest-priority actionable state across project threads", () => {
     expect(
       resolveProjectStatusIndicator([
-        {
+        pill({
           label: "Completed",
           colorClass: "text-emerald-600",
           dotClass: "bg-emerald-500",
           pulse: false,
-        },
-        {
+        }),
+        pill({
           label: "Pending Approval",
           colorClass: "text-amber-600",
           dotClass: "bg-amber-500",
           pulse: false,
-        },
-        {
+        }),
+        pill({
           label: "Working",
-          colorClass: "text-sky-600",
-          dotClass: "bg-sky-500",
+          colorClass: "text-primary",
+          dotClass: "bg-primary",
           pulse: true,
-        },
+        }),
       ]),
     ).toMatchObject({ label: "Pending Approval", dotClass: "bg-amber-500" });
   });
@@ -1085,18 +1211,18 @@ describe("resolveProjectStatusIndicator", () => {
   it("prefers plan-ready over completed when no stronger action is needed", () => {
     expect(
       resolveProjectStatusIndicator([
-        {
+        pill({
           label: "Completed",
           colorClass: "text-emerald-600",
           dotClass: "bg-emerald-500",
           pulse: false,
-        },
-        {
+        }),
+        pill({
           label: "Plan Ready",
           colorClass: "text-violet-600",
           dotClass: "bg-violet-500",
           pulse: false,
-        },
+        }),
       ]),
     ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
   });
@@ -1534,5 +1660,278 @@ describe("sortLogicalProjectsForSidebar", () => {
         (project) => project.projectKey,
       ),
     ).toEqual(["logical-newer", "logical-older"]);
+  });
+});
+
+describe("thread settlement acknowledgment", () => {
+  const key = "environment-local:thread-1";
+  const other = "environment-local:thread-2";
+
+  it("shows a pending owner on press and no accent until the server confirms", () => {
+    const pressed = beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+      threadKey: key,
+      source: "single",
+    });
+
+    expect(threadSettlePhase(pressed, key)).toBe("pending");
+    expect(pressed.acknowledged.has(key)).toBe(false);
+  });
+
+  it("acknowledges a user-initiated single settle only after it succeeds", () => {
+    const pressed = beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+      threadKey: key,
+      source: "single",
+    });
+    const settled = resolveThreadSettle(pressed, { threadKey: key, outcome: "success" });
+
+    expect(threadSettlePhase(settled, key)).toBe("acknowledged");
+  });
+
+  // Hold-in-place window. A single success both lights the accent AND pins the
+  // row in its active slot so the ring laps before the FLIP relocates it. The
+  // held set is a subset of acknowledged, so the phase is still "acknowledged".
+  it("holds a single settle in its active slot while it is acknowledged", () => {
+    const settled = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key, source: "single" }),
+      { threadKey: key, outcome: "success" },
+    );
+
+    expect(settled.held.has(key)).toBe(true);
+    expect(settled.acknowledged.has(key)).toBe(true);
+    expect(threadSettlePhase(settled, key)).toBe("acknowledged");
+  });
+
+  it("does not hold bulk, automatic, or failed settles", () => {
+    const bulk = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key, source: "bulk" }),
+      { threadKey: key, outcome: "success" },
+    );
+    const automatic = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+        threadKey: key,
+        source: "automatic",
+      }),
+      { threadKey: key, outcome: "success" },
+    );
+    const failed = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key, source: "single" }),
+      { threadKey: key, outcome: "failure" },
+    );
+
+    expect(bulk.held.size).toBe(0);
+    expect(automatic.held.size).toBe(0);
+    expect(failed.held.size).toBe(0);
+  });
+
+  // Releasing the hold lets the row regroup (and the FLIP play) while the accent
+  // is still lit: the key leaves `held` but stays `acknowledged`.
+  it("releases the hold without dropping the acknowledgment", () => {
+    const settled = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key, source: "single" }),
+      { threadKey: key, outcome: "success" },
+    );
+    const released = releaseThreadSettleHold(settled, { threadKey: key });
+
+    expect(released.held.has(key)).toBe(false);
+    expect(threadSettlePhase(released, key)).toBe("acknowledged");
+  });
+
+  it("is inert when releasing a hold no row is holding", () => {
+    expect(releaseThreadSettleHold(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key })).toBe(
+      EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT,
+    );
+    // A second release after the first is also a no-op.
+    const released = releaseThreadSettleHold(
+      resolveThreadSettle(
+        beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+          threadKey: key,
+          source: "single",
+        }),
+        { threadKey: key, outcome: "success" },
+      ),
+      { threadKey: key },
+    );
+    expect(releaseThreadSettleHold(released, { threadKey: key })).toBe(released);
+  });
+
+  it("drops a lingering hold when the acknowledgment is cleared", () => {
+    const settled = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key, source: "single" }),
+      { threadKey: key, outcome: "success" },
+    );
+    const cleared = clearThreadSettleMark(settled, { threadKey: key, mark: "acknowledged" });
+
+    expect(cleared.held.has(key)).toBe(false);
+    expect(threadSettlePhase(cleared, key)).toBe("idle");
+  });
+
+  it("clears a stale hold when the same thread is settled again", () => {
+    const settled = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, { threadKey: key, source: "single" }),
+      { threadKey: key, outcome: "success" },
+    );
+    const retried = beginThreadSettle(settled, { threadKey: key, source: "single" });
+
+    expect(retried.held.has(key)).toBe(false);
+    expect(threadSettlePhase(retried, key)).toBe("pending");
+  });
+
+  // The single-vs-bulk distinction. N rows each firing the Level 3 accent is
+  // precisely the intensity creep the ladder forbids.
+  it("keeps a bulk settle quiet even though it succeeds", () => {
+    const pressed = beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+      threadKey: key,
+      source: "bulk",
+    });
+    const settled = resolveThreadSettle(pressed, { threadKey: key, outcome: "success" });
+
+    expect(threadSettlePhase(settled, key)).toBe("idle");
+    expect(settled.acknowledged.size).toBe(0);
+  });
+
+  it("keeps an automatic settle quiet", () => {
+    const pressed = beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+      threadKey: key,
+      source: "automatic",
+    });
+    const settled = resolveThreadSettle(pressed, { threadKey: key, outcome: "success" });
+
+    expect(threadSettlePhase(settled, key)).toBe("idle");
+  });
+
+  it("gives a failed settle destructive emphasis and no completion accent", () => {
+    const pressed = beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+      threadKey: key,
+      source: "single",
+    });
+    const failed = resolveThreadSettle(pressed, { threadKey: key, outcome: "failure" });
+
+    expect(threadSettlePhase(failed, key)).toBe("failed");
+    expect(failed.acknowledged.size).toBe(0);
+  });
+
+  // Replay prevention. Auto-settlement, a row remounting into the settled
+  // shelf, a reorder, a project-scope flip, and opening an already-settled
+  // thread all reach the reducer (if at all) WITHOUT a preceding press, and a
+  // resolve with no pending entry must be inert.
+  it("ignores a settlement that no press started", () => {
+    const state = resolveThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+      threadKey: key,
+      outcome: "success",
+    });
+
+    expect(state).toBe(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT);
+    expect(threadSettlePhase(state, key)).toBe("idle");
+  });
+
+  it("cannot replay the accent once the one-shot has been cleared", () => {
+    const settled = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+        threadKey: key,
+        source: "single",
+      }),
+      { threadKey: key, outcome: "success" },
+    );
+    const cleared = clearThreadSettleMark(settled, { threadKey: key, mark: "acknowledged" });
+
+    expect(threadSettlePhase(cleared, key)).toBe("idle");
+    // A later resolve — a duplicate response, a remount re-reporting the same
+    // settled row — finds nothing pending and changes nothing.
+    expect(resolveThreadSettle(cleared, { threadKey: key, outcome: "success" })).toBe(cleared);
+  });
+
+  it("scopes every phase to its own thread key", () => {
+    const state = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+        threadKey: key,
+        source: "single",
+      }),
+      { threadKey: key, outcome: "success" },
+    );
+
+    expect(threadSettlePhase(state, other)).toBe("idle");
+  });
+
+  it("clears a stale outcome when the same thread is settled again", () => {
+    const failed = resolveThreadSettle(
+      beginThreadSettle(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT, {
+        threadKey: key,
+        source: "single",
+      }),
+      { threadKey: key, outcome: "failure" },
+    );
+    const retried = beginThreadSettle(failed, { threadKey: key, source: "single" });
+
+    expect(threadSettlePhase(retried, key)).toBe("pending");
+    expect(retried.failed.has(key)).toBe(false);
+  });
+});
+
+describe("resolveThreadStatusPill shared status axes", () => {
+  const runningThread = {
+    hasActionableProposedPlan: false,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    interactionMode: DEFAULT_INTERACTION_MODE,
+    latestTurn: null,
+    lastVisitedAt: undefined,
+    session: {
+      threadId: ThreadId.make("thread-1"),
+      status: "running" as const,
+      providerName: "Codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      activeTurnId: "turn-1" as never,
+      lastError: null,
+      updatedAt: "2026-03-09T10:00:00.000Z",
+    },
+  };
+
+  it("uses the shared violet running recipe rather than the old cyan/blue treatment", () => {
+    const pill = resolveThreadStatusPill({ thread: runningThread });
+
+    expect(pill?.colorClass).toContain("text-primary");
+    expect(pill?.colorClass).not.toContain("sky");
+    expect(pill?.dotClass).not.toContain("sky");
+  });
+
+  it("carries an icon role and motion recipe so status is never colour alone", () => {
+    const pill = resolveThreadStatusPill({ thread: runningThread });
+
+    expect(pill?.iconRole).toBe("activity");
+    expect(pill?.motionClass).toBe("motion-pending");
+    expect(pill?.axes.activity).toBe("running");
+  });
+
+  it("treats connecting as ongoing activity, not information", () => {
+    const pill = resolveThreadStatusPill({
+      thread: { ...runningThread, session: { ...runningThread.session, status: "starting" } },
+    });
+
+    expect(pill?.label).toBe("Connecting");
+    expect(pill?.iconRole).toBe("activity");
+    expect(pill?.colorClass).not.toContain("sky");
+  });
+
+  it("earns the completion motion only while the result is unseen", () => {
+    const completed = {
+      ...runningThread,
+      latestTurn: makeLatestTurn(),
+      session: { ...runningThread.session, status: "ready" as const, activeTurnId: null },
+    };
+
+    const unseen = resolveThreadStatusPill({
+      thread: { ...completed, lastVisitedAt: "2026-03-09T10:01:00.000Z" },
+    });
+    expect(unseen?.label).toBe("Completed");
+    expect(unseen?.motionClass).toBe("motion-completion");
+
+    // Once the user has opened the thread the pill disappears entirely, so
+    // restored history has nothing to replay.
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...completed, lastVisitedAt: "2026-03-09T10:06:00.000Z" },
+      }),
+    ).toBeNull();
   });
 });

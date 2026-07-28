@@ -29,6 +29,7 @@ import type { ScopedThreadRef, SidebarProjectGroupingMode } from "@t3tools/contr
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  BotIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -52,6 +53,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -115,11 +117,22 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import {
+  beginThreadSettle,
+  clearThreadSettleMark,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
   applyManualThreadOrder,
   isTrailingDoubleClick,
+  releaseThreadSettleHold,
+  resolveThreadSettle,
+  threadSettlePhase,
+  EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT,
+  THREAD_SETTLE_FAILED_MS,
+  THREAD_SETTLE_HOLD_MS,
+  THREAD_SETTLE_RELOCATE_MS,
+  type ThreadSettlePhase,
+  type ThreadSettleSource,
   moveThreadInManualOrder,
   orderItemsByPreferredIds,
   resolveAdjacentThreadId,
@@ -441,6 +454,10 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   snoozeSupported: boolean;
   // Compact wake countdown ("2h") for rows in the snoozed shelf.
   snoozeWakeLabelText: string | null;
+  // Where this row sits in a user-initiated settle. Driven by an explicit
+  // command reducer, never by the row's settled partition, so remount,
+  // reorder, auto-settle and bulk settle all arrive here as "idle".
+  settlePhase: ThreadSettlePhase;
   // When a snooze ended (timer or early wake); drives the Woke pill until
   // the user visits the thread.
   wokeAt: string | null;
@@ -515,51 +532,66 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // findable. In-flight rows recede the same as read-ready ones (inbox-zero:
   // working threads aren't your problem yet) — only the colored status label
   // stands out.
-  const isInFlight = status === "working" || status === "approval" || status === "input";
+  const isInFlight =
+    status === "working" || status === "agents" || status === "approval" || status === "input";
   const shouldRecede =
     (status === "ready" || isInFlight) && !isUnread && !isWoke && !props.isActive && !isSelected;
   // Status hues follow the system-wide convention set by sidebar v1 and the
-  // mobile Live Activity/widgets (amber approval, indigo input, sky working)
-  // so a thread reads the same color everywhere it surfaces.
+  // mobile Live Activity/widgets: amber approval, indigo input, and — since the
+  // shared status pass — VIOLET for ongoing activity. The old sky/blue
+  // `Working` treatment is gone; blue is reserved for genuinely informational
+  // states (the snoozed shelf's return-ticket labels below).
   const topStatus =
     status === "working"
       ? {
           label: "Working",
           icon: "working" as const,
-          className:
-            "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none dark:text-sky-400",
+          className: "animate-sidebar-working-text text-status-working motion-reduce:animate-none",
         }
-      : status === "approval"
+      : status === "agents"
         ? {
-            label: "Approval",
-            icon: null,
-            className: "text-amber-700 dark:text-amber-300",
+            // A sibling of Working rather than a repeat of it: both are ongoing
+            // activity, so both live in the violet-to-magenta family, but the
+            // subagent hue sits further toward magenta and lighter. Scanning a
+            // column of rows, that difference is what says "this thread is
+            // producing without the main loop" before the label is read. The
+            // bot glyph and count carry the same distinction for anyone who
+            // cannot rely on hue.
+            label: `${thread.activeAgentCount} ${thread.activeAgentCount === 1 ? "agent" : "agents"}`,
+            icon: "agents" as const,
+            className: "animate-sidebar-working-text text-status-agents motion-reduce:animate-none",
           }
-        : status === "input"
+        : status === "approval"
           ? {
-              label: "Input",
+              label: "Approval",
               icon: null,
-              className: "text-indigo-600 dark:text-indigo-300",
+              className: "text-amber-700 dark:text-amber-300",
             }
-          : status === "failed"
+          : status === "input"
             ? {
-                label: "Failed",
+                label: "Input",
                 icon: null,
-                className: "text-red-700 dark:text-red-300",
+                className: "text-indigo-600 dark:text-indigo-300",
               }
-            : isWoke
+            : status === "failed"
               ? {
-                  label: "Woke",
-                  icon: "woke" as const,
-                  className: "text-amber-700 dark:text-amber-300",
+                  label: "Failed",
+                  icon: null,
+                  className: "text-red-700 dark:text-red-300",
                 }
-              : isUnread
+              : isWoke
                 ? {
-                    label: "Done",
-                    icon: "done" as const,
-                    className: "",
+                    label: "Woke",
+                    icon: "woke" as const,
+                    className: "text-amber-700 dark:text-amber-300",
                   }
-                : null;
+                : isUnread
+                  ? {
+                      label: "Done",
+                      icon: "done" as const,
+                      className: "",
+                    }
+                  : null;
 
   const gitCwd = thread.worktreePath ?? props.projectCwd;
   const gitStatus = useEnvironmentQuery(
@@ -729,13 +761,19 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // like elevated cards while settled threads were plain rows, leaving neither
   // a useful hierarchy nor a reliable hover cue. Status now lives in the row
   // content; surface is reserved for interaction (hover, multi-select, route).
-  const rowSurfaceClassName = resolveSidebarV2RowSurfaceClassName({
-    isActive: props.isActive,
-    isSelected,
-    isUnread: hasUnreadCompletion,
-    isInFlight,
-    shouldRecede,
-  });
+  const rowSurfaceClassName = cn(
+    resolveSidebarV2RowSurfaceClassName({
+      isActive: props.isActive,
+      isSelected,
+      isUnread: hasUnreadCompletion,
+      isInFlight,
+      shouldRecede,
+    }),
+    // Level 2: one contained inset edge illumination as the row arrives in its
+    // settled presentation. Inset box-shadow only — nothing escapes the row,
+    // and it touches no transform, so auto-animate's FLIP is unaffected.
+    props.settlePhase === "acknowledged" && "thread-settle-row-edge",
+  );
 
   const title = isRenaming ? (
     <input
@@ -803,6 +841,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
     return (
       <li
         data-thread-item
+        data-settle-flip-key={threadKey}
         className="list-none [content-visibility:auto] [contain-intrinsic-size:auto_34px]"
       >
         <Tooltip>
@@ -842,9 +881,35 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
               remain visible AND clickable while the row is hovered. Only
               the time/jump label yields to the settle affordance. */}
             {prBadge}
-            <span className="relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end">
-              <span className="inline-flex justify-end tabular-nums text-muted-foreground/55 transition-opacity group-hover/v2-row:opacity-0">
-                {variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
+            <span
+              className={cn(
+                "relative ml-auto flex h-6 min-w-8 shrink-0 items-center justify-end",
+                // The Level 3 ring travels around this slot: it is the same
+                // screen position the Settle button occupied on the card, so
+                // the accent stays anchored to the owning action even though
+                // the row has relocated into the settled shelf.
+                props.settlePhase === "acknowledged" && "thread-settle-ack rounded-md",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-flex justify-end tabular-nums text-muted-foreground/55 transition-opacity",
+                  props.settlePhase === "acknowledged"
+                    ? "opacity-100"
+                    : "group-hover/v2-row:opacity-0",
+                )}
+              >
+                {props.settlePhase === "acknowledged" ? (
+                  // Under reduced motion the ring travel is dropped in CSS and
+                  // this check plus the settled label — both real DOM — remain.
+                  <span
+                    role="status"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary"
+                  >
+                    <CheckIcon aria-hidden className="size-3" />
+                    Settled
+                  </span>
+                ) : variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
                   // Snoozed rows show when they come BACK, not when they were
                   // last touched — the return ticket is the row's whole story.
                   <span className="text-xs text-blue-600 tabular-nums dark:text-blue-400">
@@ -882,7 +947,10 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                     <AlarmClockOffIcon className="size-3" />
                   </button>
                 )
-              ) : !props.settlementSupported ? null : variantAction === "unsettle" ? (
+              ) : !props.settlementSupported ||
+                // Nothing may cover the acknowledgment while it plays; the
+                // un-settle affordance comes back the moment it resolves.
+                props.settlePhase === "acknowledged" ? null : variantAction === "unsettle" ? (
                 <button
                   type="button"
                   aria-label="Un-settle thread"
@@ -895,10 +963,22 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                 <button
                   type="button"
                   aria-label="Settle thread"
+                  aria-busy={props.settlePhase === "pending" || undefined}
+                  disabled={props.settlePhase === "pending"}
                   onClick={handleSettleClick}
-                  className="absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-[color,background-color,box-shadow,opacity] duration-200 ease-out hover:bg-primary/8 hover:text-astro-highlight hover:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] focus-visible:bg-primary/8 focus-visible:text-astro-highlight focus-visible:opacity-100 focus-visible:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] motion-reduce:transition-none group-hover/v2-row:opacity-100"
+                  className={cn(
+                    "absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-[color,background-color,box-shadow,opacity] duration-200 ease-out hover:bg-primary/8 hover:text-astro-highlight hover:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] focus-visible:bg-primary/8 focus-visible:text-astro-highlight focus-visible:opacity-100 focus-visible:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] motion-reduce:transition-none group-hover/v2-row:opacity-100",
+                    // The pending owner must stay visible once pressed, even if
+                    // the pointer leaves the row while the command is in flight.
+                    props.settlePhase === "pending" && "opacity-100",
+                    props.settlePhase === "failed" && "thread-settle-failed opacity-100",
+                  )}
                 >
-                  <CheckIcon className="size-3" />
+                  {props.settlePhase === "pending" ? (
+                    <CircleDashedIcon className="thread-status-trace size-3" />
+                  ) : (
+                    <CheckIcon className="size-3" />
+                  )}
                 </button>
               )}
             </span>
@@ -917,6 +997,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
     <li
       ref={sortable?.setNodeRef}
       data-thread-item
+      data-settle-flip-key={threadKey}
       data-dragging={sortable?.isDragging || undefined}
       style={sortable?.style}
       {...sortable?.listeners}
@@ -995,7 +1076,12 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                       )}
                     >
                       {topStatus.icon === "working" ? (
-                        <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                        <CircleDashedIcon
+                          aria-hidden
+                          className="thread-status-trace size-4 shrink-0"
+                        />
+                      ) : topStatus.icon === "agents" ? (
+                        <BotIcon aria-hidden className="size-4 shrink-0" />
                       ) : topStatus.icon === "woke" ? (
                         <AlarmClockIcon aria-hidden className="size-4 shrink-0" />
                       ) : null}
@@ -1003,7 +1089,11 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                           wrapper around the ticking duration would make
                           screen readers announce every second. */}
                       <span role="status">{topStatus.label}</span>
-                      {status === "working" ? (
+                      {status === "working" || status === "agents" ? (
+                        // For "agents" the turn has already completed, so this
+                        // resolves to the session's updatedAt — i.e. how long
+                        // the subagents have been running on their own, which
+                        // is the number worth watching.
                         <span aria-hidden>
                           <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                         </span>
@@ -1018,6 +1108,12 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                     className={cn(
                       "absolute inset-y-0 right-0 flex items-stretch gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/v2-row:opacity-100",
                       snoozeMenuOpen && "opacity-100",
+                      // The acknowledgment (and the pending/failed marks that
+                      // lead to it) must be visible regardless of hover — a
+                      // settle fired from the context menu never hovers or
+                      // focuses this control, so without this the Level 3 ring
+                      // would play inside an opacity-0 wrapper and never be seen.
+                      props.settlePhase !== "idle" && "opacity-100",
                     )}
                   >
                     {showSnoozeButton ? (
@@ -1031,11 +1127,26 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                       <button
                         type="button"
                         aria-label="Settle thread"
+                        // The press is acknowledged immediately by the pending
+                        // owner below; the accent waits for the server.
+                        aria-busy={props.settlePhase === "pending" || undefined}
+                        disabled={props.settlePhase === "pending"}
                         onClick={handleSettleClick}
-                        className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground transition-[color,background-color,box-shadow] duration-200 ease-out hover:bg-primary/8 hover:text-astro-highlight hover:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] focus-visible:bg-primary/8 focus-visible:text-astro-highlight focus-visible:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] motion-reduce:transition-none"
+                        className={cn(
+                          "inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground transition-[color,background-color,box-shadow] duration-200 ease-out hover:bg-primary/8 hover:text-astro-highlight hover:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] focus-visible:bg-primary/8 focus-visible:text-astro-highlight focus-visible:shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_38%,transparent)] motion-reduce:transition-none",
+                          // Only reached when the row has not yet relocated —
+                          // normally the acknowledgment lands on the settled
+                          // slim row instead, at the same screen position.
+                          props.settlePhase === "acknowledged" && "thread-settle-ack",
+                          props.settlePhase === "failed" && "thread-settle-failed",
+                        )}
                       >
-                        <CheckIcon className="size-3" />
-                        Settle
+                        {props.settlePhase === "pending" ? (
+                          <CircleDashedIcon className="thread-status-trace size-3" />
+                        ) : (
+                          <CheckIcon className="size-3" />
+                        )}
+                        {props.settlePhase === "pending" ? "Settling" : "Settle"}
                       </button>
                     ) : null}
                   </span>
@@ -1303,6 +1414,44 @@ export default function SidebarV2() {
     clearSelection();
   }, [clearSelection, projectScopeKey]);
 
+  // ── Project switch settle (plan item 12) ────────────────────────────
+  //
+  // Three systems can move a row: dnd-kit's drag transform, auto-animate's FLIP,
+  // and this. Exactly one is allowed to hold a transform at a time, so the
+  // switch stands auto-animate down for its own window rather than letting a
+  // per-row FLIP run underneath a whole-list settle. dnd-kit cannot overlap at
+  // all — the scope menu and a drag are mutually exclusive interactions.
+  //
+  // WAAPI rather than a CSS class because the animation must RE-run on every
+  // switch, including a switch back to a scope the list has already shown;
+  // re-triggering a CSS animation would need a key churn that remounts (and so
+  // hard-swaps) the very rows this is meant to settle.
+  const lastProjectScopeRef = useRef(projectScopeKey);
+  useEffect(() => {
+    // First run, and re-runs where the scope did not actually change, are not
+    // switches. A remount seeds the ref and animates nothing.
+    if (lastProjectScopeRef.current === projectScopeKey) return;
+    lastProjectScopeRef.current = projectScopeKey;
+    const node = listNodeRef.current;
+    if (!node || typeof node.animate !== "function") return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+
+    listAutoAnimateRef.current?.disable();
+    const animation = node.animate(
+      [
+        { opacity: 0.45, transform: "translateY(4px)" },
+        { opacity: 1, transform: "none" },
+      ],
+      { duration: 160, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+    );
+    const timer = window.setTimeout(() => listAutoAnimateRef.current?.enable(), 200);
+    return () => {
+      animation.cancel();
+      window.clearTimeout(timer);
+      listAutoAnimateRef.current?.enable();
+    };
+  }, [projectScopeKey]);
+
   const handleRemoveProjectMembers = useCallback(
     async (projectGroup: SidebarProjectSnapshot, members: readonly SidebarProjectGroupMember[]) => {
       const api = readLocalApi();
@@ -1460,6 +1609,13 @@ export default function SidebarV2() {
   // merging, no optimistic holds. Archived threads remain hidden here —
   // archive keeps its original "remove from sidebar" meaning.
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  // Plan item 11. Command-driven, not state-derived: see the reducer's note in
+  // Sidebar.logic.ts for why a settled row can never light itself up. Declared
+  // above the active/settled partition because the partition HOLDS an
+  // acknowledged single settle (settleAck.held) in its active slot until the
+  // ring has lapped in place; only then does the row regroup and the FLIP slide.
+  const [settleAck, setSettleAck] = useState(EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT);
+  const heldSettleKeys = settleAck.held;
   const { activeThreads, snoozedThreads, settledThreads, snoozeNow } = useMemo(() => {
     const now = `${nowMinute}:00.000Z`;
     // Snooze classification uses a REAL clock, not the quantized minute:
@@ -1488,10 +1644,17 @@ export default function SidebarV2() {
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
       const changeRequestState = changeRequestStateByKey.get(threadKey) ?? null;
-      // Snooze outranks settled classification: an explicitly snoozed thread
-      // belongs to the shelf even if it would also auto-settle (the shelf's
-      // wake time is a stronger statement about when it matters again).
-      if (supportsSnooze && effectiveSnoozed(thread, { now: preciseNow })) {
+      // A just-acknowledged single settle is HELD in its active slot while its
+      // ring laps in place. The store already classifies the thread as settled,
+      // but the row must not regroup — and so must not FLIP down into the shelf
+      // — until the hold window ends (see THREAD_SETTLE_HOLD_MS and the release
+      // timer below). Held outranks snooze and settled classification alike.
+      if (heldSettleKeys.has(threadKey)) {
+        active.push(thread);
+      } else if (supportsSnooze && effectiveSnoozed(thread, { now: preciseNow })) {
+        // Snooze outranks settled classification: an explicitly snoozed thread
+        // belongs to the shelf even if it would also auto-settle (the shelf's
+        // wake time is a stronger statement about when it matters again).
         snoozed.push(thread);
       } else if (
         supportsSettlement &&
@@ -1522,6 +1685,7 @@ export default function SidebarV2() {
   }, [
     autoSettleAfterDays,
     changeRequestStateByKey,
+    heldSettleKeys,
     manualThreadOrder,
     nowMinute,
     scopedProjectKeys,
@@ -1776,6 +1940,54 @@ export default function SidebarV2() {
   // A settle per thread at a time: double clicks and repeated menu picks
   // must not dispatch a second settle that fails and toasts a false error.
   const settlingThreadKeysRef = useRef(new Set<string>());
+  // Release the hold-in-place window: once the ring has lapped in the row's
+  // active slot, the row is freed so the partition regroups it into the settled
+  // shelf and the FLIP plays the slide. Kept SHORTER than the acknowledgment
+  // teardown below so the key is still `acknowledged` on the regroup commit —
+  // that is the exact commit the FLIP needs to measure and animate.
+  useEffect(() => {
+    if (settleAck.held.size === 0) return;
+    const timers = [...settleAck.held].map((threadKey) =>
+      window.setTimeout(
+        () => setSettleAck((state) => releaseThreadSettleHold(state, { threadKey })),
+        THREAD_SETTLE_HOLD_MS,
+      ),
+    );
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+    };
+  }, [settleAck.held]);
+  // One-shots are torn down on a timer so the accent cannot outlive its
+  // window and re-fire on a later remount of the same row. The window spans the
+  // whole earned sequence — the in-place hold and then the relocation slide —
+  // so the "Settled" confirmation stays lit until the row lands in the shelf.
+  useEffect(() => {
+    if (settleAck.acknowledged.size === 0) return;
+    const timers = [...settleAck.acknowledged].map((threadKey) =>
+      window.setTimeout(
+        () =>
+          setSettleAck((state) =>
+            clearThreadSettleMark(state, { threadKey, mark: "acknowledged" }),
+          ),
+        THREAD_SETTLE_HOLD_MS + THREAD_SETTLE_RELOCATE_MS,
+      ),
+    );
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+    };
+  }, [settleAck.acknowledged]);
+  useEffect(() => {
+    if (settleAck.failed.size === 0) return;
+    const timers = [...settleAck.failed].map((threadKey) =>
+      window.setTimeout(
+        () => setSettleAck((state) => clearThreadSettleMark(state, { threadKey, mark: "failed" })),
+        THREAD_SETTLE_FAILED_MS,
+      ),
+    );
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+    };
+  }, [settleAck.failed]);
   // Parking the thread you're looking at (settle or snooze) moves you
   // forward: the next remaining card (never a settled or snoozed row, never
   // one leaving in the same batch), or a fresh draft in this project when it
@@ -1807,15 +2019,27 @@ export default function SidebarV2() {
   );
 
   const attemptSettle = useCallback(
-    (threadRef: ScopedThreadRef, opts: { coSettlingKeys?: ReadonlySet<string> } = {}) => {
+    (
+      threadRef: ScopedThreadRef,
+      opts: { coSettlingKeys?: ReadonlySet<string>; source?: ThreadSettleSource } = {},
+    ) => {
       void (async () => {
         const threadKey = scopedThreadKey(threadRef);
         if (settlingThreadKeysRef.current.has(threadKey)) return;
         settlingThreadKeysRef.current.add(threadKey);
+        // Defaults to "single" because the row's own Settle button is the only
+        // caller that omits it. Every batch and automated path names itself.
+        const settleSource = opts.source ?? "single";
+        // The press is registered immediately — the control gets a pending
+        // owner right away — but nothing celebratory happens until the server
+        // confirms below.
+        setSettleAck((state) => beginThreadSettle(state, { threadKey, source: settleSource }));
         try {
           const navigateAfterSettle = planForwardNavigation(threadKey, opts.coSettlingKeys);
           const result = await settleThread(threadRef);
           if (result._tag === "Failure") {
+            // Semantic error feedback, no completion accent.
+            setSettleAck((state) => resolveThreadSettle(state, { threadKey, outcome: "failure" }));
             // Never navigate away from a thread that did not settle.
             if (!isAtomCommandInterrupted(result)) {
               const error = squashAtomCommandFailure(result);
@@ -1829,6 +2053,9 @@ export default function SidebarV2() {
             }
             return;
           }
+          // Settlement succeeded. Only a `single` source earns the Level 3
+          // acknowledgment; the reducer drops bulk and automatic sources here.
+          setSettleAck((state) => resolveThreadSettle(state, { threadKey, outcome: "success" }));
           // Only move forward if the user is still on the settled thread —
           // a navigation made during the await wins over ours.
           if (routeThreadKeyRef.current === threadKey) {
@@ -2010,7 +2237,14 @@ export default function SidebarV2() {
         for (const threadKey of threadKeys) {
           const thread = threadByKeyRef.current.get(threadKey);
           if (!thread || thread.settledOverride === "settled") continue;
-          attemptSettle(scopeThreadRef(thread.environmentId, thread.id), { coSettlingKeys });
+          // `source: "bulk"` is what keeps a multi-select settle quiet. N rows
+          // each firing the Level 3 accent would be exactly the intensity creep
+          // the ladder exists to prevent; the settled shelf's count is the
+          // shared completion summary for a batch.
+          attemptSettle(scopeThreadRef(thread.environmentId, thread.id), {
+            coSettlingKeys,
+            source: "bulk",
+          });
         }
         clearSelection();
         return;
@@ -2304,13 +2538,85 @@ export default function SidebarV2() {
   // both would otherwise animate the same drop, auto-animate FLIPping rows from
   // their pre-drop positions while dnd-kit eases its own transforms out.
   const listAutoAnimateRef = useRef<AnimationController | null>(null);
+  const listNodeRef = useRef<HTMLUListElement | null>(null);
   const attachListAutoAnimateRef = useCallback((node: HTMLUListElement | null) => {
+    listNodeRef.current = node;
     if (!node) {
       listAutoAnimateRef.current = null;
       return;
     }
     listAutoAnimateRef.current = autoAnimate(node, { duration: 150, easing: "ease-out" });
   }, []);
+
+  // ── Settle relocation slide (plan item 11, Level 3) ─────────────────
+  //
+  // When a single user-initiated settle is acknowledged, its row leaves the
+  // active card list and reappears as a slim row in the settled shelf — a
+  // different element, at a different position. Left alone that reads as a
+  // disappear/reappear with a neighbour jump. Instead, FLIP the settled row
+  // from the card's last on-screen position into its shelf slot: every row in a
+  // settle lifecycle is measured each commit, and once an `acknowledged` row has
+  // actually moved it plays the delta out as a transform.
+  //
+  // WAAPI, not a CSS class: the slide must re-run per settle, and it must own
+  // the row's transform outright. auto-animate would otherwise hold the new row
+  // at opacity 0 and animate the same element — so, exactly like the project
+  // switch above, auto-animate stands down for the slide's window. The row also
+  // rides on an opaque backdrop (`.thread-settle-relocating`) so a translucent
+  // row never reads as text over the rows it crosses on the way down.
+  const settleFlipRectsRef = useRef(new Map<string, DOMRect>());
+  const settleFlipDoneRef = useRef(new Set<string>());
+  useLayoutEffect(() => {
+    const rects = settleFlipRectsRef.current;
+    const done = settleFlipDoneRef.current;
+    const tracked = new Set<string>([...settleAck.pending.keys(), ...settleAck.acknowledged]);
+    // Forget rows that have left the settle lifecycle entirely.
+    for (const key of [...rects.keys()]) if (!tracked.has(key)) rects.delete(key);
+    for (const key of [...done]) if (!tracked.has(key)) done.delete(key);
+
+    const listNode = listNodeRef.current;
+    if (listNode === null || tracked.size === 0) return;
+    // `CSS` in this module is dnd-kit's transform helper, so reach for the DOM
+    // global explicitly. getBoundingClientRect is inert under the unit renderer;
+    // the slide is a real-browser affordance, and CSS.escape looks the row up
+    // safely (scoped thread keys carry colons).
+    const domCss = globalThis.CSS;
+    if (typeof domCss === "undefined" || typeof domCss.escape !== "function") return;
+
+    for (const key of tracked) {
+      const node = listNode.querySelector<HTMLElement>(
+        `[data-settle-flip-key="${domCss.escape(key)}"]`,
+      );
+      if (node === null) continue;
+      const nextRect = node.getBoundingClientRect();
+      const prevRect = rects.get(key);
+      rects.set(key, nextRect);
+      // A pending row is only tracked so its pre-relocation position is known;
+      // only an acknowledged row slides, and only once.
+      if (prevRect === undefined || done.has(key) || !settleAck.acknowledged.has(key)) {
+        continue;
+      }
+      const dx = prevRect.left - nextRect.left;
+      const dy = prevRect.top - nextRect.top;
+      if ((Math.abs(dx) < 1 && Math.abs(dy) < 1) || typeof node.animate !== "function") {
+        continue;
+      }
+      done.add(key);
+      // Exactly one system may hold a transform on a row at a time.
+      listAutoAnimateRef.current?.disable();
+      node.classList.add("thread-settle-relocating");
+      const animation = node.animate(
+        [{ transform: `translate3d(${dx}px, ${dy}px, 0)` }, { transform: "translate3d(0, 0, 0)" }],
+        { duration: THREAD_SETTLE_RELOCATE_MS, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+      );
+      const settleDown = () => {
+        node.classList.remove("thread-settle-relocating");
+        listAutoAnimateRef.current?.enable();
+      };
+      animation.addEventListener("finish", settleDown, { once: true });
+      animation.addEventListener("cancel", settleDown, { once: true });
+    }
+  }, [settleAck, activeThreads, settledThreads]);
 
   const [draggingThreadKey, setDraggingThreadKey] = useState<string | null>(null);
   const dragSensors = useSensors(
@@ -2441,17 +2747,26 @@ export default function SidebarV2() {
                   aria-label="Filter threads by project"
                   className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm font-medium text-sidebar-muted-foreground outline-none hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                 >
-                  {scopedProjectGroup ? (
-                    <ProjectFavicon
-                      environmentId={scopedProjectGroup.environmentId}
-                      cwd={scopedProjectGroup.workspaceRoot}
-                      className="size-4 shrink-0"
-                    />
-                  ) : (
-                    <FolderIcon className="size-4 shrink-0 text-sidebar-muted-foreground/80" />
-                  )}
-                  <span className="min-w-0 flex-1 truncate">
-                    {scopedProjectGroup?.displayName ?? "All projects"}
+                  {/* Project identity crossfades over 160ms instead of
+                      hard-swapping. Keyed on the scope so React remounts the
+                      pair and the animation re-runs; opacity only, so it never
+                      competes with the list's own settle transform. */}
+                  <span
+                    key={projectScopeKey ?? "all"}
+                    className="sidebar-project-identity flex min-w-0 flex-1 items-center gap-2"
+                  >
+                    {scopedProjectGroup ? (
+                      <ProjectFavicon
+                        environmentId={scopedProjectGroup.environmentId}
+                        cwd={scopedProjectGroup.workspaceRoot}
+                        className="size-4 shrink-0"
+                      />
+                    ) : (
+                      <FolderIcon className="size-4 shrink-0 text-sidebar-muted-foreground/80" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate">
+                      {scopedProjectGroup?.displayName ?? "All projects"}
+                    </span>
                   </span>
                   <ChevronDownIcon className="size-4 shrink-0 text-sidebar-muted-foreground/70" />
                 </MenuTrigger>
@@ -2605,6 +2920,7 @@ export default function SidebarV2() {
                           // the wake signal must survive the trip. Still-snoozed
                           // rows resolve to null on their own.
                           wokeAt={threadWokeAt(thread, { now: snoozeNow })}
+                          settlePhase={threadSettlePhase(settleAck, threadKey)}
                           isActive={routeThreadKey === threadKey}
                           jumpLabel={showJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null}
                           currentEnvironmentId={primaryEnvironmentId}

@@ -12,6 +12,11 @@ import type { ThreadRouteTarget } from "../threadRoutes";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+import {
+  getStatusPresentation,
+  type StatusAxes,
+  type StatusIconRole,
+} from "../lib/statusPresentation";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
@@ -105,6 +110,31 @@ export interface ThreadStatusPill {
   colorClass: string;
   dotClass: string;
   pulse: boolean;
+  /**
+   * The shared activity/attention/outcome/persistence axes this pill stands
+   * for. The domain keeps its own label and hue — "Working" is not "Running",
+   * and approval-amber stays distinct from input-indigo — but the icon and
+   * motion below are resolved by `lib/statusPresentation` so thread rows,
+   * agent cards, and connection indicators cannot drift apart.
+   */
+  axes: StatusAxes;
+  /** Resolved via `getStatusPresentation`; renderers map it to a real glyph so
+      status is never carried by colour alone. */
+  iconRole: StatusIconRole;
+  /** Shared motion recipe class from `styles/motion.css`. */
+  motionClass: string;
+}
+
+/** Builds the shared half of a pill so every branch below stays consistent. */
+function threadStatusPresentation(
+  axes: StatusAxes,
+): Pick<ThreadStatusPill, "axes" | "iconRole" | "motionClass"> {
+  const presentation = getStatusPresentation(axes);
+  return {
+    axes,
+    iconRole: presentation.iconRole,
+    motionClass: presentation.motionClass,
+  };
 }
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
@@ -443,14 +473,49 @@ export function resolveSidebarV2RowSurfaceClassName(input: {
 // whether it finished, asked a question, or proposed a plan.
 // Unread completion is tracked separately: it describes whether a ready
 // thread needs attention, not what the thread is currently doing.
-export type SidebarV2Status = "approval" | "input" | "working" | "failed" | "ready";
+export type SidebarV2Status = "approval" | "input" | "working" | "agents" | "failed" | "ready";
 
 type SidebarV2StatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "session"
+  | "activeAgentCount"
+  | "agentsLastActivityAt"
 >;
 
-export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2Status {
+/**
+ * How long a roster may go quiet before its agents stop counting as live.
+ *
+ * A server that dies mid-run never writes a terminal snapshot, so its agents
+ * replay as `running` forever (see scripts/fix-stuck-agent-cards.mjs) — without
+ * a cutoff a crashed thread would advertise "3 agents" permanently and could
+ * never show Done. 30 minutes matches ProviderSessionReaper's own idle
+ * threshold: past that the session is reaped anyway, so a roster still claiming
+ * to be busy is lying.
+ */
+export const SIDEBAR_AGENTS_STALE_AFTER_MS = 30 * 60_000;
+
+function hasLiveSubagents(thread: SidebarV2StatusInput, nowMs: number): boolean {
+  if (thread.activeAgentCount <= 0) {
+    return false;
+  }
+  // A roster with active rows but no timestamp cannot be aged out, so it is
+  // treated as stale rather than risking a badge that never clears.
+  if (thread.agentsLastActivityAt === null) {
+    return false;
+  }
+  const lastActivityMs = Date.parse(thread.agentsLastActivityAt);
+  if (Number.isNaN(lastActivityMs)) {
+    return false;
+  }
+  return nowMs - lastActivityMs < SIDEBAR_AGENTS_STALE_AFTER_MS;
+}
+
+export function resolveSidebarV2Status(
+  thread: SidebarV2StatusInput,
+  nowMs: number = Date.now(),
+): SidebarV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
   }
@@ -462,6 +527,14 @@ export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2S
   }
   if (thread.session?.status === "error") {
     return "failed";
+  }
+  // Ranked below the session states because it only describes the gap they
+  // leave: the session drops to "ready" the instant the main turn completes,
+  // with no regard for backgrounded subagents, so a thread can be settled-
+  // looking and still producing. Sitting above "ready" is also what keeps the
+  // Done checkmark off a thread whose subagents have not reported back.
+  if (hasLiveSubagents(thread, nowMs)) {
+    return "agents";
   }
   return "ready";
 }
@@ -671,33 +744,67 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-amber-600 dark:text-amber-300/90",
       dotClass: "bg-amber-500 dark:bg-amber-300/90",
       pulse: false,
+      ...threadStatusPresentation({
+        activity: "waiting",
+        attention: "approval-required",
+        outcome: "neutral",
+        persistence: "active",
+      }),
     };
   }
 
   if (thread.hasPendingUserInput) {
     return {
       label: "Awaiting Input",
+      // Indigo, not the shared waiting-amber: this sidebar, v2, and the mobile
+      // widgets all reserve amber for "approve something" and indigo for
+      // "answer something". The shared axes still classify both as `waiting`,
+      // so the icon and motion match.
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
+      ...threadStatusPresentation({
+        activity: "waiting",
+        attention: "input-required",
+        outcome: "neutral",
+        persistence: "active",
+      }),
     };
   }
 
   if (thread.session?.status === "running") {
     return {
       label: "Working",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      // Retheme (plan item 3): the old cyan/blue `Working` treatment now uses
+      // the shared violet running recipe. Blue is reserved for genuinely
+      // informational states. The label and the dashed-ring icon carry the
+      // meaning, so this reads correctly with colour ignored.
+      colorClass: "text-primary",
+      dotClass: "bg-primary",
       pulse: true,
+      ...threadStatusPresentation({
+        activity: "running",
+        attention: "none",
+        outcome: "neutral",
+        persistence: "active",
+      }),
     };
   }
 
   if (thread.session?.status === "starting") {
     return {
       label: "Connecting",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      // Same violet running recipe: connecting is ongoing activity, not
+      // information. Only the label distinguishes it from Working.
+      colorClass: "text-primary/85",
+      dotClass: "bg-primary/85",
       pulse: true,
+      ...threadStatusPresentation({
+        activity: "running",
+        attention: "none",
+        outcome: "neutral",
+        persistence: "active",
+      }),
     };
   }
 
@@ -712,6 +819,12 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-violet-600 dark:text-violet-300/90",
       dotClass: "bg-violet-500 dark:bg-violet-300/90",
       pulse: false,
+      ...threadStatusPresentation({
+        activity: "waiting",
+        attention: "input-required",
+        outcome: "neutral",
+        persistence: "active",
+      }),
     };
   }
 
@@ -721,6 +834,15 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-emerald-600 dark:text-emerald-300/90",
       dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
       pulse: false,
+      // `unseen-result` is what earns `motion-completion`. A thread the user
+      // has already opened never reaches this branch, so restored history
+      // cannot replay the arrival.
+      ...threadStatusPresentation({
+        activity: "complete",
+        attention: "unseen-result",
+        outcome: "success",
+        persistence: "active",
+      }),
     };
   }
 
@@ -952,4 +1074,185 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+// ── Thread settlement acknowledgment (plan item 11) ──────────────────
+//
+// The acknowledgment is driven by an explicit command reducer and is
+// deliberately NOT derived from `thread.settledAt` or from a row's settled
+// partition. Anything derived from state replays: a remount, a reorder, a
+// project-scope flip, a snoozed thread waking into the settled tail, or simply
+// opening an already-settled thread would all re-fire the accent, because from
+// the row's point of view those are indistinguishable from "just settled".
+//
+// A row can therefore only be acknowledged if a `beginThreadSettle` for that
+// exact key preceded the resolve. Automatic settlement never calls it, so it
+// can never light up.
+
+export type ThreadSettleSource = "single" | "bulk" | "automatic";
+
+export type ThreadSettlePhase = "idle" | "pending" | "acknowledged" | "failed";
+
+export interface ThreadSettleAcknowledgementState {
+  /** Keys whose settle command is in flight, with the source that started it. */
+  readonly pending: ReadonlyMap<string, ThreadSettleSource>;
+  /** Keys that earned the Level 3 accent and have not yet been cleared. */
+  readonly acknowledged: ReadonlySet<string>;
+  /**
+   * Acknowledged keys still HELD in their pre-settle ACTIVE slot. A subset of
+   * `acknowledged`: the store may already classify the thread as settled, but
+   * the grouping layer keeps a held row where it is so the ring laps and the
+   * row edge lights IN PLACE. The FLIP relocation into the settled shelf only
+   * plays once the key leaves `held` (see `releaseThreadSettleHold`), which is
+   * what stops the slide from starting before the ring completes its lap.
+   */
+  readonly held: ReadonlySet<string>;
+  /** Keys whose settle failed: semantic error emphasis, never an accent. */
+  readonly failed: ReadonlySet<string>;
+}
+
+export const EMPTY_THREAD_SETTLE_ACKNOWLEDGEMENT: ThreadSettleAcknowledgementState = {
+  pending: new Map(),
+  acknowledged: new Set(),
+  held: new Set(),
+  failed: new Set(),
+};
+
+/** Ring travel around the settle control. Level 3 band is 240–300ms. */
+export const THREAD_SETTLE_ACK_DURATION_MS = 280;
+/** All-round row edge illumination as the row settles. Part of the same Level 3
+    acknowledgment as the ring, so it spends the accent's 240–300ms band.
+    Mirrors --threads-settle-row-edge in agents-threads.css. */
+export const THREAD_SETTLE_ROW_EDGE_MS = 260;
+/** The FLIP slide that carries a just-settled row from its active card slot
+    into the settled shelf. Level 3 band (240–300ms); driven as a WAAPI
+    transform in SidebarV2 so it re-runs per settle and never freezes state. */
+export const THREAD_SETTLE_RELOCATE_MS = 280;
+/**
+ * How long a just-acknowledged single settle is HELD in its pre-settle ACTIVE
+ * slot before the row is allowed to regroup into the settled shelf. The ring
+ * laps and the row edge lights IN PLACE during this window, so the slide can
+ * never begin before the ring (THREAD_SETTLE_ACK_DURATION_MS, 280ms) has
+ * completed its full lap — with a little headroom over the row edge
+ * (THREAD_SETTLE_ROW_EDGE_MS, 260ms) so the whole in-place accent reads before
+ * the row leaves. JS-only: it drives a setTimeout plus the active/settled
+ * partition, not a CSS animation, so unlike the durations above it has no
+ * `--token` mirror to keep in step. */
+export const THREAD_SETTLE_HOLD_MS = 300;
+/** How long a failed settle keeps its destructive emphasis on the control. */
+export const THREAD_SETTLE_FAILED_MS = 2_000;
+
+function withoutKey<T>(source: ReadonlySet<T>, key: T): ReadonlySet<T> {
+  if (!source.has(key)) return source;
+  const next = new Set(source);
+  next.delete(key);
+  return next;
+}
+
+/**
+ * Records the press. The control shows a pending owner immediately; nothing
+ * celebratory happens yet, because the settlement has not succeeded.
+ */
+export function beginThreadSettle(
+  state: ThreadSettleAcknowledgementState,
+  input: { threadKey: string; source: ThreadSettleSource },
+): ThreadSettleAcknowledgementState {
+  const pending = new Map(state.pending);
+  pending.set(input.threadKey, input.source);
+  return {
+    pending,
+    // A retry clears the previous outcome so a stale accent, hold, or error
+    // mark cannot sit under a fresh attempt.
+    acknowledged: withoutKey(state.acknowledged, input.threadKey),
+    held: withoutKey(state.held, input.threadKey),
+    failed: withoutKey(state.failed, input.threadKey),
+  };
+}
+
+/**
+ * Resolves an in-flight settle.
+ *
+ * Only a `single`-source success earns the acknowledgment. `bulk` and
+ * `automatic` successes clear quietly — the shared completion summary is the
+ * settled shelf's own count, not a per-row flourish. A resolve for a key that
+ * was never begun is ignored entirely, which is what makes remount, reorder,
+ * and automatic settlement inert.
+ */
+export function resolveThreadSettle(
+  state: ThreadSettleAcknowledgementState,
+  input: { threadKey: string; outcome: "success" | "failure" },
+): ThreadSettleAcknowledgementState {
+  const source = state.pending.get(input.threadKey);
+  if (source === undefined) {
+    return state;
+  }
+  const pending = new Map(state.pending);
+  pending.delete(input.threadKey);
+
+  if (input.outcome === "failure") {
+    const failed = new Set(state.failed);
+    failed.add(input.threadKey);
+    return { pending, acknowledged: state.acknowledged, held: state.held, failed };
+  }
+
+  if (source !== "single") {
+    return { pending, acknowledged: state.acknowledged, held: state.held, failed: state.failed };
+  }
+
+  const acknowledged = new Set(state.acknowledged);
+  acknowledged.add(input.threadKey);
+  // The row is held in its active slot for the same success: the ring must lap
+  // in place before the grouping layer lets it relocate into the settled shelf.
+  // Only a `single` source is ever held — bulk and automatic settles returned
+  // above and so never light up or hold.
+  const held = new Set(state.held);
+  held.add(input.threadKey);
+  return { pending, acknowledged, held, failed: state.failed };
+}
+
+/**
+ * Ends the hold-in-place window for one row. The key stays `acknowledged` — the
+ * ring and row edge already played in place, and the accent rides the slide out
+ * — but is no longer `held`, so the active/settled partition may finally regroup
+ * it into the settled shelf. That regroup is the commit on which the existing
+ * FLIP measures the delta and plays the slide. A key that was never held (or
+ * already released) is returned unchanged so the caller's timer is inert.
+ */
+export function releaseThreadSettleHold(
+  state: ThreadSettleAcknowledgementState,
+  input: { threadKey: string },
+): ThreadSettleAcknowledgementState {
+  const held = withoutKey(state.held, input.threadKey);
+  if (held === state.held) return state;
+  return { pending: state.pending, acknowledged: state.acknowledged, held, failed: state.failed };
+}
+
+/** Drops a one-shot mark once its animation window has elapsed. Clearing the
+    acknowledgment also drops any lingering hold so a torn-down accent can never
+    strand a row out of its settled shelf. */
+export function clearThreadSettleMark(
+  state: ThreadSettleAcknowledgementState,
+  input: { threadKey: string; mark: "acknowledged" | "failed" },
+): ThreadSettleAcknowledgementState {
+  const source = input.mark === "acknowledged" ? state.acknowledged : state.failed;
+  const next = withoutKey(source, input.threadKey);
+  if (next === source) return state;
+  return input.mark === "acknowledged"
+    ? {
+        pending: state.pending,
+        acknowledged: next,
+        held: withoutKey(state.held, input.threadKey),
+        failed: state.failed,
+      }
+    : { pending: state.pending, acknowledged: state.acknowledged, held: state.held, failed: next };
+}
+
+export function threadSettlePhase(
+  state: ThreadSettleAcknowledgementState,
+  threadKey: string,
+): ThreadSettlePhase {
+  if (state.pending.has(threadKey)) return "pending";
+  if (state.acknowledged.has(threadKey)) return "acknowledged";
+  if (state.failed.has(threadKey)) return "failed";
+  return "idle";
 }
