@@ -23,6 +23,11 @@ export interface MarkdownClipboardPayload {
   html: string;
 }
 
+export interface SelectionRangeSource {
+  readonly rangeCount: number;
+  getRangeAt(index: number): Range;
+}
+
 function isSkippedElement(element: Element): boolean {
   if (SKIPPED_TAGS.has(element.tagName) || element.localName === "svg") return true;
   if (element.getAttribute("aria-hidden") === "true") return true;
@@ -292,7 +297,7 @@ function sanitizedHtmlFrom(container: Element): string {
 }
 
 export function chatMarkdownClipboardPayload(
-  selection: Selection,
+  selection: SelectionRangeSource,
 ): MarkdownClipboardPayload | null {
   const texts: string[] = [];
   const htmls: string[] = [];

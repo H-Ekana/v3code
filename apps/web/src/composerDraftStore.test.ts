@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import {
   defaultInstanceIdForDriver,
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -676,6 +677,77 @@ describe("composerDraftStore review comments", () => {
     expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.reviewComments).toEqual([
       comment,
     ]);
+  });
+});
+
+describe("composerDraftStore conversation references", () => {
+  const threadId = ThreadId.make("thread-conversation-references");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const firstReference = {
+    id: "reference-1",
+    sourceMessageId: MessageId.make("message-1"),
+    sourceRole: "assistant",
+    selectedAt: "2026-07-28T12:00:00.000Z",
+    text: "First excerpt.",
+  } as const;
+  const secondReference = {
+    id: "reference-2",
+    sourceMessageId: MessageId.make("message-2"),
+    sourceRole: "user",
+    selectedAt: "2026-07-28T12:01:00.000Z",
+    text: "Second excerpt.",
+  } as const;
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("preserves insertion order and rejects a duplicate excerpt", () => {
+    const store = useComposerDraftStore.getState();
+
+    expect(store.addConversationReference(threadRef, firstReference)).toBe(true);
+    expect(store.addConversationReference(threadRef, secondReference)).toBe(true);
+    expect(
+      store.addConversationReference(threadRef, {
+        ...secondReference,
+        id: "reference-duplicate",
+        text: "  Second excerpt.\r\n",
+      }),
+    ).toBe(false);
+
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.conversationReferences.map(
+        (reference) => reference.id,
+      ),
+    ).toEqual(["reference-1", "reference-2"]);
+  });
+
+  it("persists, removes, and clears references with composer content", () => {
+    const store = useComposerDraftStore.getState();
+    store.addConversationReference(threadRef, firstReference);
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+      };
+    };
+    const persisted = persistApi.getOptions().partialize(useComposerDraftStore.getState()) as {
+      draftsByThreadKey?: Record<
+        string,
+        { conversationReferences?: Array<Record<string, unknown>> }
+      >;
+    };
+
+    expect(
+      persisted.draftsByThreadKey?.[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)]
+        ?.conversationReferences?.[0],
+    ).toMatchObject(firstReference);
+
+    store.removeConversationReference(threadRef, firstReference.id);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
+
+    store.addConversationReference(threadRef, firstReference);
+    store.clearComposerContent(threadRef);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 });
 
