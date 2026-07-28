@@ -107,6 +107,7 @@ import {
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
+import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
@@ -290,15 +291,13 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
       <Tooltip>
         <TooltipTrigger
           render={
-            <Button
-              variant="ghost"
+            <ComposerControl
               className={cn(
-                "shrink-0 whitespace-nowrap px-2 sm:px-3",
+                "shrink-0 whitespace-nowrap",
                 props.interactionMode === "plan"
                   ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
                   : "text-muted-foreground/80 hover:text-foreground/95",
               )}
-              size="sm"
               type="button"
               onClick={props.onToggleInteractionMode}
               aria-label={interactionModeTooltip}
@@ -306,9 +305,9 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
           }
         >
           {props.interactionMode === "plan" ? (
-            <PencilRulerIcon className="text-current opacity-100" />
+            <ComposerControlIcon icon={PencilRulerIcon} className="text-current opacity-100" />
           ) : (
-            <BotIcon />
+            <ComposerControlIcon icon={BotIcon} opticalSize="large" />
           )}
           <span className="sr-only sm:not-sr-only">
             {props.interactionMode === "plan" ? "Plan" : "Build"}
@@ -390,22 +389,21 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
           <Tooltip>
             <TooltipTrigger
               render={
-                <Button
-                  variant="ghost"
+                <ComposerControl
                   className={cn(
-                    "shrink-0 whitespace-nowrap px-2 sm:px-3",
+                    "shrink-0 whitespace-nowrap",
                     props.planSidebarOpen
                       ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
                       : "text-muted-foreground/80 hover:text-foreground/95",
                   )}
-                  size="sm"
                   type="button"
                   onClick={props.onTogglePlanSidebar}
                   aria-label={planSidebarTooltip}
                 />
               }
             >
-              <ListTodoIcon
+              <ComposerControlIcon
+                icon={ListTodoIcon}
                 className={props.planSidebarOpen ? "text-current opacity-100" : undefined}
               />
               <span className="sr-only sm:not-sr-only">{props.planSidebarLabel}</span>

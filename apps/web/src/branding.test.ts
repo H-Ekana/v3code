@@ -187,3 +187,74 @@ describe("resolveSidebarV2Enabled", () => {
     ).toBe(false);
   });
 });
+
+describe("resolveSidebarV2Default", () => {
+  it.each(["Nightly", "Dev", "nightly", " dev "])("enables the beta for %s builds", (stage) => {
+    expect(resolveSidebarV2Default(stage)).toBe(true);
+  });
+
+  it.each(["Alpha", "Latest", ""])("leaves the beta off for %s builds", (stage) => {
+    expect(resolveSidebarV2Default(stage)).toBe(false);
+  });
+});
+
+describe("resolveSidebarV2Enabled", () => {
+  const hydrated = { settingsHydrated: true } as const;
+
+  it.each(["Alpha", "Latest"])(
+    "keeps a legacy opt-in on %s builds even without the companion flag",
+    (stageLabel) => {
+      // `true` was never the schema default, so it can only be an explicit
+      // opt-in from settings written before `sidebarV2ConfiguredByUser` existed.
+      expect(
+        resolveSidebarV2Enabled({
+          ...hydrated,
+          enabled: true,
+          configuredByUser: false,
+          stageLabel,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("applies the stage default when the beta was never enabled or configured", () => {
+    expect(
+      resolveSidebarV2Enabled({
+        ...hydrated,
+        enabled: false,
+        configuredByUser: false,
+        stageLabel: "Nightly",
+      }),
+    ).toBe(true);
+    expect(
+      resolveSidebarV2Enabled({
+        ...hydrated,
+        enabled: false,
+        configuredByUser: false,
+        stageLabel: "Latest",
+      }),
+    ).toBe(false);
+  });
+
+  it("honors an explicit opt-out over the stage default", () => {
+    expect(
+      resolveSidebarV2Enabled({
+        ...hydrated,
+        enabled: false,
+        configuredByUser: true,
+        stageLabel: "Nightly",
+      }),
+    ).toBe(false);
+  });
+
+  it("holds v1 until settings hydrate so the sidebar does not remount", () => {
+    expect(
+      resolveSidebarV2Enabled({
+        enabled: true,
+        configuredByUser: true,
+        settingsHydrated: false,
+        stageLabel: "Nightly",
+      }),
+    ).toBe(false);
+  });
+});

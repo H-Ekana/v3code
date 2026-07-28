@@ -540,6 +540,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 :root {
   --app-scrollbar-width: 6px;
+  --app-scrollbar-thumb: rgb(217 217 217);
+  --app-scrollbar-thumb-hover: rgb(191 191 191);
   --glass-blur: 12px;
   --glass-opacity: 80%;
   --glass-saturation: 1.14;
@@ -554,6 +556,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 .dark {
+  --app-scrollbar-thumb: rgb(255 255 255 / 8%);
+  --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
   --glass-blur: 16px;
   --glass-saturation: 1.08;
 }
@@ -821,12 +825,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
         rgb(0 0 0 / 96%) 82%,
         black 100%
       ),
-      linear-gradient(black, black);
-    -webkit-mask-position: top, bottom;
+      linear-gradient(black, black), linear-gradient(black, black);
+    -webkit-mask-position: top, bottom, right;
     -webkit-mask-repeat: no-repeat;
     -webkit-mask-size:
       100% var(--topbar-scroll-fade-height),
-      100% calc(100% - var(--topbar-scroll-fade-height));
+      100% calc(100% - var(--topbar-scroll-fade-height)),
+      var(--app-scrollbar-width) 100%;
     mask-image:
       linear-gradient(
         to bottom,
@@ -838,12 +843,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
         rgb(0 0 0 / 96%) 82%,
         black 100%
       ),
-      linear-gradient(black, black);
-    mask-position: top, bottom;
+      linear-gradient(black, black), linear-gradient(black, black);
+    mask-position: top, bottom, right;
     mask-repeat: no-repeat;
     mask-size:
       100% var(--topbar-scroll-fade-height),
-      100% calc(100% - var(--topbar-scroll-fade-height));
+      100% calc(100% - var(--topbar-scroll-fade-height)),
+      var(--app-scrollbar-width) 100%;
   }
 
   .workspace-titlebar-controls {
@@ -1581,12 +1587,54 @@ code {
 /* `--muted-foreground` already inverts per theme, so one rule replaces the
    light/dark literal pair the thumbs used to carry. */
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+  background: var(--app-scrollbar-thumb);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--muted-foreground) 48%, transparent);
+  background: var(--app-scrollbar-thumb-hover);
+}
+
+.model-picker-list::-webkit-scrollbar-track {
+  margin-block: 0.5rem;
+}
+
+.model-picker-list-scroll-fade-top,
+.model-picker-list-scroll-fade-bottom {
+  -webkit-mask-image: var(--model-picker-list-scroll-mask), linear-gradient(black, black);
+  -webkit-mask-position: left, right;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size:
+    calc(100% - var(--app-scrollbar-width)) 100%,
+    var(--app-scrollbar-width) 100%;
+  mask-image: var(--model-picker-list-scroll-mask), linear-gradient(black, black);
+  mask-position: left, right;
+  mask-repeat: no-repeat;
+  mask-size:
+    calc(100% - var(--app-scrollbar-width)) 100%,
+    var(--app-scrollbar-width) 100%;
+}
+
+.model-picker-list-scroll-fade-top {
+  --model-picker-list-scroll-mask: linear-gradient(to bottom, transparent, black var(--fade-size));
+}
+
+.model-picker-list-scroll-fade-bottom {
+  --model-picker-list-scroll-mask: linear-gradient(
+    to bottom,
+    black calc(100% - var(--fade-size)),
+    transparent
+  );
+}
+
+.model-picker-list-scroll-fade-top.model-picker-list-scroll-fade-bottom {
+  --model-picker-list-scroll-mask: linear-gradient(
+    to bottom,
+    transparent,
+    black var(--fade-size),
+    black calc(100% - var(--fade-size)),
+    transparent
+  );
 }
 
 .turn-chip-strip {
@@ -2032,22 +2080,6 @@ label:has(> select#reasoning-effort) select {
 }
 
 /* The `ultrathink` special state lives in `./styles/special-states.css`. */
-
-/* Thin scrollbar for model picker */
-.model-picker-list::-webkit-scrollbar {
-  width: 4px;
-}
-
-/* Quieter than the global thumb, and likewise theme-inverting via
-   `--muted-foreground` instead of a light/dark literal pair. */
-.model-picker-list::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--muted-foreground) 22%, transparent);
-  border-radius: 2px;
-}
-
-.model-picker-list::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
-}
 
 /* Composer chips are non-editable decorators, so the browser skips them when
    painting text selection; this overlay stands in for the native highlight. */
