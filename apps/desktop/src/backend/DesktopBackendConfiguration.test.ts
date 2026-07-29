@@ -139,6 +139,12 @@ describe("DesktopBackendConfiguration", () => {
         assert.isUndefined(first.env.T3CODE_PORT);
         assert.isUndefined(first.env.T3CODE_MODE);
         assert.isUndefined(first.env.T3CODE_DESKTOP_LAN_HOST);
+        if (process.env.T3CODE_TRACE_MIN_LEVEL === undefined) {
+          assert.equal(first.env.T3CODE_TRACE_MIN_LEVEL, "Warn");
+        }
+        if (process.env.T3CODE_TRACE_TIMING_ENABLED === undefined) {
+          assert.equal(first.env.T3CODE_TRACE_TIMING_ENABLED, "false");
+        }
 
         assert.equal(first.bootstrap.mode, "desktop");
         assert.equal(first.bootstrap.noBrowser, true);
