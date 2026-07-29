@@ -39,6 +39,7 @@ import { ServerConfig } from "../config.ts";
 import { subscribeBeforeSnapshotWithoutMutex } from "../utils/subscribeBeforeSnapshot.ts";
 
 const SAMPLE_INTERVAL_MS = 1_000;
+const IDLE_SAMPLE_INTERVAL_MS = 10_000;
 const UNKNOWN_BACKGROUND_SAMPLE_INTERVAL_MS = 5_000;
 const BATTERY_SAMPLE_INTERVAL_MS = 5_000;
 const CONSTRAINED_SAMPLE_INTERVAL_MS = 15_000;
@@ -252,7 +253,7 @@ function isThermallyConstrained(snapshot: HostPowerSnapshot): boolean {
   return snapshot.thermalState === "serious" || snapshot.thermalState === "critical";
 }
 
-export function resolveNativeSampleIntervalMs(
+function resolvePowerSampleIntervalMs(
   snapshot: HostPowerSnapshot,
   liveSubscriberCount: number,
 ): number {
@@ -269,6 +270,17 @@ export function resolveNativeSampleIntervalMs(
   }
   if (snapshot.onBattery === "true") return BATTERY_SAMPLE_INTERVAL_MS;
   return SAMPLE_INTERVAL_MS;
+}
+
+export function resolveNativeSampleIntervalMs(
+  snapshot: HostPowerSnapshot,
+  liveSubscriberCount: number,
+): number {
+  const intervalMs = resolvePowerSampleIntervalMs(snapshot, liveSubscriberCount);
+  if (liveSubscriberCount > 0) return intervalMs;
+  // Without a live subscriber each sample only feeds the sidecar's in-memory
+  // history, so a full system process enumeration every second is wasted work.
+  return Math.max(intervalMs, IDLE_SAMPLE_INTERVAL_MS);
 }
 
 export function commitCollectionControlUpdate<E, R>(

@@ -50,15 +50,15 @@ describe("resolveNativeSampleIntervalMs", () => {
       source: "unknown",
       stale: true,
     };
-    expect(resolveNativeSampleIntervalMs(unknown, 0)).toBe(5_000);
+    expect(resolveNativeSampleIntervalMs(unknown, 0)).toBe(10_000);
     expect(resolveNativeSampleIntervalMs(unknown, 1)).toBe(1_000);
     expect(
       resolveNativeSampleIntervalMs(
         { ...basePower, stale: true, locked: "true", suspended: true },
         0,
       ),
-    ).toBe(5_000);
-    expect(resolveNativeSampleIntervalMs(basePower, 0)).toBe(1_000);
+    ).toBe(10_000);
+    expect(resolveNativeSampleIntervalMs(basePower, 0)).toBe(10_000);
   });
 });
 
