@@ -64,6 +64,10 @@ whose version lacks the `.v3.X.Y.Z` suffix.**
 
 ## 3. Pre-build checklist
 
+- **Consult the release ledger first**: `docs/project/installer-releases.md` is the
+  authoritative record of the last shipped version — run `git pull` and take the top
+  row's fork suffix plus one. Do not derive the last version from the local machine's
+  installed app; other machines build installers too.
 - Working tree is committed (the commit hash is baked into the artifact).
 - `vendor/claude-plugins/codex` exists with `.claude-plugin/plugin.json` — the build
   hard-fails with `MissingBundledCodexPluginError` without it.
@@ -72,8 +76,23 @@ whose version lacks the `.v3.X.Y.Z` suffix.**
   A newer nightly date wins; if the upstream base is unchanged, the bumped fork suffix wins.
 - Do not run the build inside a sandbox that blocks native toolchains — the build compiles
   the Rust resource monitor and runs electron-builder.
+- **No Rust toolchain?** The resource-monitor stage runs `cargo build` and fails with
+  `spawn cargo ENOENT` if Rust is not installed. Escape hatch: place a prebuilt
+  `t3-resource-monitor.exe` at
+  `native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe`
+  and set `T3CODE_RESOURCE_MONITOR_USE_PREBUILT=1` for the build. Get the binary from the
+  upstream nightly release **matching the merged upstream commit**: download the
+  `T3-Code-<nightly>-x64.exe` asset, then extract with 7-Zip:
+  `7z x <installer.exe> '$PLUGINSDIR/app-64.7z'` followed by
+  `7z e app-64.7z resources/resource-monitor/t3-resource-monitor.exe`.
+  Never reuse a binary from a different upstream version than the one merged.
 
 ## 4. Build command
+
+**Windows-only.** All V3 Code machines run Windows: build ONLY the Windows NSIS `.exe`
+(`dist:desktop:win`). Do not build the mac DMG, the Linux AppImage, or any other target
+unless the user explicitly asks — they waste significant build time and cannot even
+complete on a Windows host.
 
 Run through pnpm so `vp` (vite-plus) is on PATH. A bare
 `node scripts/build-desktop-artifact.ts` fails with `spawn vp ENOENT`.
@@ -107,6 +126,10 @@ build output, `T3CODE_DESKTOP_KEEP_STAGE=true` to keep the staging dir for inspe
 - The produced file is named `V3-Code-V3-<version>-<arch>.exe` — if the `-V3-` segment is
   missing, the suffix was wrong and the build is wired to upstream's update channel. Discard it.
 - The version string in the filename is strictly higher than the previous installer.
+- **Record the release**: append a row (newest first) to
+  `docs/project/installer-releases.md` with the full version, upstream base + commit,
+  and date, then commit and push it to `origin` right away. Skipping this strands the
+  next agent (possibly on another machine) with a stale version number.
 
 ## 6. Updating users
 

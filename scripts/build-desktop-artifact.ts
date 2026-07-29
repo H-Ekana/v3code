@@ -1234,7 +1234,29 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
   const rustTargets = resolveResourceMonitorRustTargets(input.platform, input.arch);
   const builtBinaries: string[] = [];
 
+  // Fork escape hatch: upstream CI has a Rust toolchain; local fork machines
+  // may not. When set, an existing binary at the cargo output path (e.g.
+  // extracted from the matching upstream release) is used instead of building.
+  const usePrebuiltResourceMonitor =
+    (process.env["T3CODE_RESOURCE_MONITOR_USE_PREBUILT"] ?? "") !== "";
+
   for (const rustTarget of rustTargets) {
+    const binaryPath = path.join(
+      input.repoRoot,
+      "native/resource-monitor/target",
+      rustTarget,
+      "release",
+      executableName,
+    );
+
+    if (usePrebuiltResourceMonitor && (yield* fs.exists(binaryPath))) {
+      yield* Effect.log(
+        `[desktop-artifact] Using prebuilt resource monitor at ${binaryPath} (T3CODE_RESOURCE_MONITOR_USE_PREBUILT).`,
+      );
+      builtBinaries.push(binaryPath);
+      continue;
+    }
+
     const spawnCommand = yield* resolveSpawnCommand("cargo", [
       "build",
       "--locked",
@@ -1253,14 +1275,6 @@ const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input:
         label: `cargo build resource monitor (${rustTarget})`,
         verbose: input.verbose,
       },
-    );
-
-    const binaryPath = path.join(
-      input.repoRoot,
-      "native/resource-monitor/target",
-      rustTarget,
-      "release",
-      executableName,
     );
     if (!(yield* fs.exists(binaryPath))) {
       return yield* new ResourceMonitorBuildOutputMissingError({
