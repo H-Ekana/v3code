@@ -9,6 +9,7 @@ import {
   THREAD_AGENTS_ACTIVITY_KIND,
   ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -738,7 +739,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
-        const expiredAt = new Date().toISOString();
+        // Wall clock on purpose: expiry stamps must sort after the persisted
+        // request activities, which carry real timestamps (a TestClock-driven
+        // DateTime.now would sort at the epoch, before them).
+        const expiredAt = DateTime.formatIso(DateTime.nowUnsafe());
         yield* Effect.forEach(
           candidateRows,
           (candidate) =>

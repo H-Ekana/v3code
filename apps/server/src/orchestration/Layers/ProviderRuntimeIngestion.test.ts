@@ -86,6 +86,9 @@ function makeTestServerSettingsLayer(
         get streamChanges() {
           return Stream.fromPubSub(changes);
         },
+        get subscribeChanges() {
+          return Effect.sync(() => Stream.fromPubSub(changes));
+        },
       } satisfies ServerSettingsService["Service"];
     }),
   ).pipe(Layer.provide(baseLayer));

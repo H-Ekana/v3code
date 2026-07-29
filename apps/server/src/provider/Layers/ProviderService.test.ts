@@ -23,6 +23,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -58,6 +59,8 @@ import {
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
+
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 
@@ -827,12 +830,12 @@ it.effect("ProviderServiceLive reconciles settled active turns without touching 
       ]);
       assert.equal(runtimeRows[0]?.threadId, liveThreadId);
       assert.equal(runtimeRows[0]?.status, "running");
-      assert.deepEqual(JSON.parse(runtimeRows[0]?.runtimePayload ?? "null"), {
+      assert.deepEqual(decodeUnknownJsonString(runtimeRows[0]?.runtimePayload ?? "null"), {
         activeTurnId: "turn-live",
       });
       assert.equal(runtimeRows[1]?.threadId, staleThreadId);
       assert.equal(runtimeRows[1]?.status, "stopped");
-      assert.deepEqual(JSON.parse(runtimeRows[1]?.runtimePayload ?? "null"), {
+      assert.deepEqual(decodeUnknownJsonString(runtimeRows[1]?.runtimePayload ?? "null"), {
         activeTurnId: null,
         lastRuntimeEvent: "provider.startupReconcile",
       });

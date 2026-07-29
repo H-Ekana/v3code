@@ -47,6 +47,8 @@ import {
 } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // The bundled Codex plugin is vendored in this checkout, so without an explicit
@@ -816,12 +818,12 @@ describe("ClaudeAdapterLive", () => {
       };
       NodeFS.writeFileSync(
         NodePath.join(stateDir, "state.json"),
-        JSON.stringify({ version: 1, jobs: [completedRecord] }),
+        encodeUnknownJsonString({ version: 1, jobs: [completedRecord] }),
         "utf8",
       );
       NodeFS.writeFileSync(
         NodePath.join(jobsDir, `${jobId}.json`),
-        JSON.stringify(completedRecord),
+        encodeUnknownJsonString(completedRecord),
         "utf8",
       );
       yield* TestClock.adjust("2 seconds");

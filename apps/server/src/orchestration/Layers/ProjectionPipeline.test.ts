@@ -12,6 +12,7 @@ import {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -34,6 +35,8 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
+
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
   OrchestrationProjectionPipelineLive.pipe(
@@ -2539,7 +2542,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.equal(resolvedRows.length, 1);
       assert.equal(resolvedRows[0]?.summary, "Structured question expired after restart");
-      assert.deepEqual(JSON.parse(resolvedRows[0]?.payloadJson ?? "{}"), {
+      assert.deepEqual(decodeUnknownJsonString(resolvedRows[0]?.payloadJson ?? "{}"), {
         requestId,
         status: "expired",
         reason: "provider-restarted",

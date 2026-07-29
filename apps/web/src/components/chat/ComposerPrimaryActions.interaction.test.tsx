@@ -24,6 +24,7 @@ const baseProps = {
   showPlanFollowUpPrompt: false,
   promptHasText: false,
   isSendBusy: false,
+  sendDisabledReason: null,
   isConnecting: false,
   isEnvironmentUnavailable: false,
   isPreparingWorktree: false,
