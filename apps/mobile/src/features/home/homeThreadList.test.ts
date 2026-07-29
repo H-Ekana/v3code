@@ -45,6 +45,7 @@ function makeThread(
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     activeAgentCount: 0,
+    activeBackgroundTaskCount: 0,
     agentsLastActivityAt: null,
     ...input,
     settledOverride: input.settledOverride ?? null,

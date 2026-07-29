@@ -68,6 +68,7 @@ function makeShell(input: {
     hasPendingUserInput: input.pending === "user-input",
     hasActionableProposedPlan: false,
     activeAgentCount: 0,
+    activeBackgroundTaskCount: 0,
     agentsLastActivityAt: null,
   };
 }

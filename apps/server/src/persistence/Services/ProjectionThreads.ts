@@ -47,6 +47,9 @@ export const ProjectionThread = Schema.Struct({
   // Non-terminal subagents in the thread's latest `agent.snapshot` roster,
   // denormalized so the sidebar can read it without loading thread detail.
   activeAgentCount: NonNegativeInt,
+  // Non-terminal `shell`/`monitor` roster rows, kept apart from the agent
+  // count so a lone background watcher does not read as a running agent.
+  activeBackgroundTaskCount: NonNegativeInt,
   agentsLastActivityAt: Schema.NullOr(IsoDateTime),
   deletedAt: Schema.NullOr(IsoDateTime),
 });

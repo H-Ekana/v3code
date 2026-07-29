@@ -2177,8 +2177,10 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         updatedAt: input.lastActivityAt,
       });
 
-      // Two live workers, one settled, plus a workflow container that is
-      // grouping chrome rather than a worker.
+      // Two live workers, one settled, a workflow container that is grouping
+      // chrome rather than a worker, and a live background shell that must
+      // count as a task, not an agent — while still moving the shared
+      // freshness watermark.
       yield* appendRoster({
         suffix: "3",
         at: "2026-02-26T12:30:03.000Z",
@@ -2208,21 +2210,33 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
             kind: "workflow",
             lastActivityAt: "2026-02-26T12:30:09.000Z",
           }),
+          agent({
+            id: "a5",
+            status: "running",
+            kind: "shell",
+            lastActivityAt: "2026-02-26T12:30:03.500Z",
+          }),
         ],
       });
 
       const liveRows = yield* sql<{
         readonly activeAgentCount: number;
+        readonly activeBackgroundTaskCount: number;
         readonly agentsLastActivityAt: string | null;
       }>`
         SELECT
           active_agent_count AS "activeAgentCount",
+          active_background_task_count AS "activeBackgroundTaskCount",
           agents_last_activity_at AS "agentsLastActivityAt"
         FROM projection_threads
         WHERE thread_id = 'thread-agents'
       `;
       assert.deepEqual(liveRows, [
-        { activeAgentCount: 2, agentsLastActivityAt: "2026-02-26T12:30:03.000Z" },
+        {
+          activeAgentCount: 2,
+          activeBackgroundTaskCount: 1,
+          agentsLastActivityAt: "2026-02-26T12:30:03.500Z",
+        },
       ]);
 
       // A newer roster wins outright: the count must not accumulate across
@@ -2250,15 +2264,19 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
 
       const settledRows = yield* sql<{
         readonly activeAgentCount: number;
+        readonly activeBackgroundTaskCount: number;
         readonly agentsLastActivityAt: string | null;
       }>`
         SELECT
           active_agent_count AS "activeAgentCount",
+          active_background_task_count AS "activeBackgroundTaskCount",
           agents_last_activity_at AS "agentsLastActivityAt"
         FROM projection_threads
         WHERE thread_id = 'thread-agents'
       `;
-      assert.deepEqual(settledRows, [{ activeAgentCount: 0, agentsLastActivityAt: null }]);
+      assert.deepEqual(settledRows, [
+        { activeAgentCount: 0, activeBackgroundTaskCount: 0, agentsLastActivityAt: null },
+      ]);
     }),
   );
 

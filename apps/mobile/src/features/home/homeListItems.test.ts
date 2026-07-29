@@ -55,6 +55,7 @@ function makeThread(id: string, projectId: ProjectId): EnvironmentThreadShell {
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     activeAgentCount: 0,
+    activeBackgroundTaskCount: 0,
     agentsLastActivityAt: null,
   };
 }

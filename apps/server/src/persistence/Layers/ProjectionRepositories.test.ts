@@ -100,6 +100,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         activeAgentCount: 0,
+        activeBackgroundTaskCount: 0,
         agentsLastActivityAt: null,
         deletedAt: null,
       });
@@ -164,6 +165,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         activeAgentCount: 0,
+        activeBackgroundTaskCount: 0,
         agentsLastActivityAt: null,
         deletedAt: null,
       });

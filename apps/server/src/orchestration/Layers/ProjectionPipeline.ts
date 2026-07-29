@@ -278,10 +278,14 @@ function deriveHasActionableProposedPlan(input: {
  * `idle` counts as settled, not active — a Codex agent between activations is
  * resumable, not producing. Workflow *containers* are grouping chrome rather
  * than workers, so they are excluded to keep the count equal to the number of
- * things actually running.
+ * things actually running. `shell` and `monitor` rows are live work but not
+ * agents — a build watcher must not make the sidebar claim "1 agent" — so they
+ * land in `activeBackgroundTaskCount` instead. Both counts share one freshness
+ * watermark: either kind of row going quiet means the roster may be stale.
  */
 function deriveActiveAgentsFromActivities(activities: ReadonlyArray<ProjectionThreadActivity>): {
   readonly activeAgentCount: number;
+  readonly activeBackgroundTaskCount: number;
   readonly agentsLastActivityAt: string | null;
 } {
   let bestRevision = -1;
@@ -308,6 +312,7 @@ function deriveActiveAgentsFromActivities(activities: ReadonlyArray<ProjectionTh
   }
 
   let activeAgentCount = 0;
+  let activeBackgroundTaskCount = 0;
   let agentsLastActivityAt: string | null = null;
   for (const agent of bestAgents) {
     const status = typeof agent.status === "string" ? agent.status : null;
@@ -319,7 +324,11 @@ function deriveActiveAgentsFromActivities(activities: ReadonlyArray<ProjectionTh
     ) {
       continue;
     }
-    activeAgentCount += 1;
+    if (agent.kind === "shell" || agent.kind === "monitor") {
+      activeBackgroundTaskCount += 1;
+    } else {
+      activeAgentCount += 1;
+    }
     const lastActivityAt = typeof agent.lastActivityAt === "string" ? agent.lastActivityAt : null;
     if (
       lastActivityAt !== null &&
@@ -329,7 +338,7 @@ function deriveActiveAgentsFromActivities(activities: ReadonlyArray<ProjectionTh
     }
   }
 
-  return { activeAgentCount, agentsLastActivityAt };
+  return { activeAgentCount, activeBackgroundTaskCount, agentsLastActivityAt };
 }
 
 function retainProjectionMessagesAfterRevert(
@@ -708,7 +717,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         latestTurnId: existingRow.value.latestTurnId,
         proposedPlans,
       });
-      const { activeAgentCount, agentsLastActivityAt } =
+      const { activeAgentCount, activeBackgroundTaskCount, agentsLastActivityAt } =
         deriveActiveAgentsFromActivities(activities);
 
       yield* projectionThreadRepository.upsert({
@@ -718,6 +727,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         pendingUserInputCount,
         hasActionableProposedPlan: hasActionableProposedPlan ? 1 : 0,
         activeAgentCount,
+        activeBackgroundTaskCount,
         agentsLastActivityAt,
       });
     });
@@ -866,6 +876,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             pendingUserInputCount: 0,
             hasActionableProposedPlan: 0,
             activeAgentCount: 0,
+            activeBackgroundTaskCount: 0,
             agentsLastActivityAt: null,
             deletedAt: null,
           });

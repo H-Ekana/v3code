@@ -343,6 +343,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           active_agent_count AS "activeAgentCount",
+          active_background_task_count AS "activeBackgroundTaskCount",
           agents_last_activity_at AS "agentsLastActivityAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
@@ -377,6 +378,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           active_agent_count AS "activeAgentCount",
+          active_background_task_count AS "activeBackgroundTaskCount",
           agents_last_activity_at AS "agentsLastActivityAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
@@ -413,6 +415,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           active_agent_count AS "activeAgentCount",
+          active_background_task_count AS "activeBackgroundTaskCount",
           agents_last_activity_at AS "agentsLastActivityAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
@@ -781,6 +784,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
           active_agent_count AS "activeAgentCount",
+          active_background_task_count AS "activeBackgroundTaskCount",
           agents_last_activity_at AS "agentsLastActivityAt",
           deleted_at AS "deletedAt"
         FROM projection_threads
@@ -1555,6 +1559,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       hasPendingUserInput: row.pendingUserInputCount > 0,
                       hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
                       activeAgentCount: row.activeAgentCount,
+                      activeBackgroundTaskCount: row.activeBackgroundTaskCount,
                       agentsLastActivityAt: row.agentsLastActivityAt,
                     } satisfies OrchestrationThreadShell)
                   : Result.failVoid,
@@ -1695,6 +1700,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   hasPendingUserInput: row.pendingUserInputCount > 0,
                   hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
                   activeAgentCount: row.activeAgentCount,
+                  activeBackgroundTaskCount: row.activeBackgroundTaskCount,
                   agentsLastActivityAt: row.agentsLastActivityAt,
                 }),
               ),
@@ -1941,6 +1947,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
         activeAgentCount: threadRow.value.activeAgentCount,
+        activeBackgroundTaskCount: threadRow.value.activeBackgroundTaskCount,
         agentsLastActivityAt: threadRow.value.agentsLastActivityAt,
       } satisfies OrchestrationThreadShell);
     });

@@ -107,6 +107,7 @@ function makeReadModel(
       hasPendingUserInput: false,
       hasActionableProposedPlan: false,
       activeAgentCount: 0,
+      activeBackgroundTaskCount: 0,
       agentsLastActivityAt: null,
       latestTurn: null,
       messages: [],

@@ -560,8 +560,13 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
             // column of rows, that difference is what says "this thread is
             // producing without the main loop" before the label is read. The
             // bot glyph and count carry the same distinction for anyone who
-            // cannot rely on hue.
-            label: `${thread.activeAgentCount} ${thread.activeAgentCount === 1 ? "agent" : "agents"}`,
+            // cannot rely on hue. When the only live work is background (a
+            // build watcher, a monitor), the label says so instead of claiming
+            // an agent is running; agents win the label when both exist.
+            label:
+              thread.activeAgentCount > 0
+                ? `${thread.activeAgentCount} ${thread.activeAgentCount === 1 ? "agent" : "agents"}`
+                : `${thread.activeBackgroundTaskCount} ${thread.activeBackgroundTaskCount === 1 ? "background task" : "background tasks"}`,
             icon: "agents" as const,
             className: "animate-sidebar-working-text text-status-agents motion-reduce:animate-none",
           }

@@ -104,6 +104,7 @@ const THREAD_SHELL = {
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
   activeAgentCount: 0,
+  activeBackgroundTaskCount: 0,
   agentsLastActivityAt: null,
 } as const;
 

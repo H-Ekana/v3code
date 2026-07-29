@@ -613,6 +613,7 @@ describe("resolveSidebarV2Status", () => {
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     activeAgentCount: 0,
+    activeBackgroundTaskCount: 0,
     agentsLastActivityAt: null,
   };
 
@@ -681,6 +682,23 @@ describe("resolveSidebarV2Status", () => {
           ...idle,
           session: settled,
           activeAgentCount: 3,
+          agentsLastActivityAt: agentsAt(60_000),
+        },
+        now,
+      ),
+    ).toBe("agents");
+  });
+
+  it("reports agents when the only live work is a background task", () => {
+    // A build watcher or monitor keeps the thread producing after the main
+    // turn settles; the badge label distinguishes it from agents, the status
+    // does not.
+    expect(
+      resolveSidebarV2Status(
+        {
+          ...idle,
+          session: settled,
+          activeBackgroundTaskCount: 1,
           agentsLastActivityAt: agentsAt(60_000),
         },
         now,
@@ -759,6 +777,7 @@ describe("resolveSidebarV2Status", () => {
           ...idle,
           session: settled,
           activeAgentCount: 0,
+          activeBackgroundTaskCount: 0,
           agentsLastActivityAt: agentsAt(1_000),
         },
         now,

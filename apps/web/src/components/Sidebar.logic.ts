@@ -483,6 +483,7 @@ type SidebarV2StatusInput = Pick<
   | "hasPendingUserInput"
   | "session"
   | "activeAgentCount"
+  | "activeBackgroundTaskCount"
   | "agentsLastActivityAt"
 >;
 
@@ -499,7 +500,10 @@ type SidebarV2StatusInput = Pick<
 export const SIDEBAR_AGENTS_STALE_AFTER_MS = 30 * 60_000;
 
 function hasLiveSubagents(thread: SidebarV2StatusInput, nowMs: number): boolean {
-  if (thread.activeAgentCount <= 0) {
+  // Background tasks (shell watchers, monitors) keep the thread "agents"-live
+  // too: the main turn is done but the thread is still producing. The badge
+  // label distinguishes the two — the liveness rule does not need to.
+  if (thread.activeAgentCount + thread.activeBackgroundTaskCount <= 0) {
     return false;
   }
   // A roster with active rows but no timestamp cannot be aged out, so it is

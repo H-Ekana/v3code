@@ -429,7 +429,12 @@ export const OrchestrationThreadShell = Schema.Struct({
   // producing. Defaulted for decoding so persisted pre-035 client snapshots
   // still load.
   activeAgentCount: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
-  // Freshness for the count above: consumers discount a roster that stopped
+  // Non-terminal background work (`shell` and `monitor` roster rows) split out
+  // from `activeAgentCount` so clients can label "1 background task" instead of
+  // claiming an agent is running when only a watcher is. Defaulted for decoding
+  // so persisted pre-036 client snapshots still load.
+  activeBackgroundTaskCount: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  // Freshness for the counts above: consumers discount a roster that stopped
   // updating, since a server that dies mid-run never writes a terminal
   // snapshot and its agents replay as running forever.
   agentsLastActivityAt: Schema.NullOr(IsoDateTime).pipe(
