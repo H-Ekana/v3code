@@ -1,811 +1,536 @@
 # Known Issues
 
-# 🟠 **CONFIRMED THREAD DELETION CAN DO NOTHING AFTER THE USER CLICKS `YES`**
-
-## **STATUS: CONFIRMED, NOT FIXED. The failed deletion did not reach the database.**
-
-After choosing **Delete** from a thread's context menu and approving the native confirmation dialog,
-the thread can remain in the sidebar with no visible error. This is not always a stale client row:
-in the confirmed reproduction, the delete command never reached the orchestration backend.
-
-### Verified reproduction
-
-Two stopped threads had the identical title **"Categorize and split dirty commits"**:
-
-| Provider | Thread ID                              | Database state after deleting the GPT row |
-| -------- | -------------------------------------- | ----------------------------------------- |
-| Codex    | `542eab66-3463-4987-9bbb-e61f7c0e4b2a` | `deleted_at = null`                       |
-| Claude   | `9786f3ea-69f9-4cb8-9b45-4648634d11dc` | `deleted_at = null`                       |
-
-The user selected the Codex/GPT row and clicked **Yes** in the confirmation dialog. A live,
-read-only inspection immediately afterwards found:
-
-- the Codex row still present in `projection_threads` with `deleted_at = null`;
-- no `thread.deleted` event for that thread;
-- no new entry in `orchestration_command_receipts` for that thread; and
-- its projected provider session already in `stopped`, with no active turn or error.
-
-Therefore this instance was not a successful database deletion that the sidebar failed to render.
-The orchestration service never received `thread.delete`.
-
-### Most likely failure boundary
-
-`apps/web/src/hooks/useThreadActions.ts` does several awaited cleanup steps before it dispatches the
-durable delete command:
-
-1. optionally stop the provider session;
-2. await `terminalEnvironment.close`;
-3. only then dispatch `threadEnvironment.delete`.
-
-For this reproduction there was no linked worktree and the session was already stopped. That leaves
-the awaited terminal-close command as the only normal asynchronous step between confirmation and
-the missing delete dispatch. A stalled or interrupted terminal-close request is therefore the
-strongest current lead, although client-side tracing is still needed to prove it.
-
-The ordering is especially suspicious because
-`apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts` already stops the provider session
-and closes thread terminals after a durable `thread.deleted` event. Client-side cleanup before the
-tombstone duplicates that responsibility and creates a point where deletion can silently stop
-halfway.
-
-Identical titles made the incident harder to inspect, but they are not themselves sufficient to
-explain the failure: commands are scoped by environment and thread ID, not title.
-
-### Expected behavior
-
-Once the user confirms, the app must either persist `thread.deleted` and remove the exact selected
-thread, or show an actionable failure. A cleanup request must never leave the operation silently
-unfinished.
-
-### Investigation and fix direction
-
-- Add phase-level tracing keyed by environment ID and thread ID for confirmation, provider stop,
-  terminal close, delete dispatch, command receipt, and projection update.
-- Add a regression test where terminal close never settles or is interrupted; the durable delete
-  must still be dispatched.
-- Prefer dispatching `thread.delete` first and leaving provider/terminal cleanup to the existing
-  server-side deletion reactor. If client pre-cleanup remains necessary, make it bounded and
-  best-effort rather than a prerequisite.
-- Do not silently suppress an interrupted delete operation. Surface a failure and keep enough
-  context for a retry.
-- Include the provider name and a short thread-ID suffix in deletion diagnostics so same-title
-  threads can be distinguished unambiguously.
+> **2026-07-29 bulk-fix sweep.** Eight entries in this file were fixed across three phases by
+> delegated Codex agents (gpt-5.6-sol, high effort) orchestrated from a Claude session. All fixes
+> are **uncommitted in the working tree** and require an app build to reach the installed client.
+> Every fix was independently re-verified by the orchestrator: **471 tests across the 17 touched
+> suites pass together.** Dispatch briefs and raw agent reports are preserved in `.codex-briefs/`.
+>
+> Full-sweep audit command (all fixed issues at once):
+>
+> ```sh
+> ./node_modules/.bin/vp test run \
+>   apps/server/src/orchestration/decider.settled.test.ts \
+>   apps/server/src/orchestration/projector.test.ts \
+>   apps/server/src/provider/Layers/ProviderService.test.ts \
+>   apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts \
+>   apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts \
+>   apps/web/src/components/ChatView.logic.test.ts \
+>   apps/web/src/components/Sidebar.logic.test.ts \
+>   apps/web/src/hooks/useThreadActions.test.ts \
+>   apps/web/src/session-logic.test.ts \
+>   apps/web/src/components/AgentsPanel.test.tsx \
+>   apps/web/src/timestampFormat.timezone.test.ts \
+>   apps/web/src/components/chat/MessagesTimeline.test.tsx \
+>   apps/web/src/components/chat/MessagesTimeline.lifecycle.test.tsx \
+>   apps/web/src/components/chat/timelineScrollAnchoring.test.tsx \
+>   apps/web/src/components/chat/AgentsLiveStrip.test.tsx \
+>   packages/client-runtime/src/state/threadAgents.test.ts \
+>   packages/client-runtime/src/state/threads-sync.test.ts
+> ```
+>
+> Installed-app smoke checks still outstanding (automated tests prove the state machines, not the
+> rendered app): stop a running turn; delete one of two same-titled threads; let a thread finish
+> unopened; restart the app with a live companion job; reopen a long stale thread after reconnect;
+> trigger an `AskUserQuestion`, restart, and confirm the questions reappear as plain text.
 
 ---
 
-# 🟡 **SUB-AGENT ACTIVITY CLOCKS CAN SHOW UTC AS IF IT WERE LOCAL TIME**
+# 🟢 [FIXED 2026-07-29] THREAD DELETION COULD DO NOTHING AFTER THE USER CLICKED `YES`
 
-## **STATUS: CONFIRMED IN THE INSTALLED BUILD. FIX EXISTS IN CURRENT SOURCE BUT HAS NOT REACHED THAT BUILD.**
+## Original bug
 
-Times displayed inside sub-agent tool calls can be exactly 5 hours 30 minutes behind the Windows
-clock when the computer is using India Standard Time. This is a presentation bug, not clock drift
-and not corrupted database timestamps.
+After confirming **Delete**, the thread could remain in the sidebar with no error. Verified: the
+delete command never reached the orchestration backend — no `thread.deleted` event, no command
+receipt, `deleted_at` still null. `useThreadActions.ts` awaited client-side cleanup (provider stop,
+`terminalEnvironment.close`) **before** dispatching the durable delete, so a stalled cleanup await
+silently swallowed the deletion. The server-side `ThreadDeletionReactor` already performs that
+cleanup after the tombstone, so the client gating was pure downside.
 
-### Verified evidence
+## Fix
 
-- Windows reported `2026-07-28 18:28:36 +05:30` in the `India Standard Time` zone.
-- A persisted activity timestamp was `2026-07-28T12:53:08.906Z`. The trailing `Z` means UTC, so its
-  correct local value is `18:23:08.906 IST`.
-- The installed Agents panel showed the UTC clock portion instead of applying the `+05:30` offset.
-- A nearby test process independently printed a local start time of `18:22`, agreeing with the
-  converted event time and confirming that the system and provider clocks were aligned.
+`apps/web/src/hooks/useThreadActions.ts` now dispatches the durable `threadEnvironment.delete`
+FIRST; provider-stop/terminal-close are left to
+`apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts`. A failed delete surfaces an
+actionable retry toast instead of resolving silently. Deletion diagnostics include the provider
+name and a short thread-ID suffix so same-title threads are distinguishable.
 
-### Root cause
+## How to audit
 
-The installed client bundle renders activity times with the equivalent of:
-
-```ts
-entry.at.slice(11, 19);
-```
-
-That extracts the `HH:mm:ss` text directly from the ISO UTC timestamp. It does not convert the
-instant into the renderer's local time zone, but the result is presented without a `UTC` label, so
-it looks like an incorrect local clock.
-
-The current source in `apps/web/src/components/AgentsPanel.tsx` already uses
-`formatTimestamp(entry.at, settings.timestampFormat)`. The shared formatter uses
-`Intl.DateTimeFormat`, which converts the instant into the renderer's local time zone. The installed
-`app.asar` still contains the older substring implementation, so the correction requires an app
-build containing the current source.
-
-### Expected behavior and regression coverage
-
-- Never display a wall-clock timestamp by slicing an ISO string.
-- Use the shared timestamp formatter for every Agents panel and tool-call time.
-- Keep elapsed durations distinct from wall-clock times.
-- Add a regression test under a non-UTC time zone, such as `Asia/Kolkata`, proving that a `Z`
-  timestamp is rendered with the local offset.
-- If UTC is ever intentionally displayed, label it explicitly as `UTC`.
+- Code: `apps/web/src/hooks/useThreadActions.ts` — confirm the delete dispatch is not gated behind
+  any awaited cleanup; confirm the failure path shows a toast with provider + ID suffix.
+- Tests: `./node_modules/.bin/vp test run apps/web/src/hooks/useThreadActions.test.ts`
+  — includes a regression where terminal-close never settles (delete must still dispatch) and one
+  where a failed delete surfaces a visible error (toast contains `Codex` and suffix `…7c0e4b2a`).
+- App: delete one of two same-titled threads under different providers; the exact row must vanish
+  or a failure toast must appear.
 
 ---
 
-# 🟠 **OPENING AN EXISTING CHAT CAN REPLAY ITS ENTIRE HISTORY AS LIVE ACTIVITY**
+# 🟢 [FIXED IN SOURCE + REGRESSION LOCKED 2026-07-29 — NEEDS APP BUILD] SUB-AGENT ACTIVITY CLOCKS SHOWED UTC AS LOCAL TIME
 
-## **STATUS: INTERMITTENTLY OBSERVED, NOT YET DIAGNOSED.**
+## Original bug
 
-Sometimes selecting an existing chat does not hydrate directly into its current persisted state.
-Instead, the interface appears to replay the thread chronologically from its beginning before finally
-settling on the present:
+The installed build rendered activity times via `entry.at.slice(11, 19)` — raw UTC `HH:mm:ss` with
+no conversion and no `UTC` label (5h30m off under IST). Presentation-only; timestamps in the
+database were correct.
 
-- the user's earliest messages appear first;
-- assistant messages and tool activity advance through their original sequence;
-- sub-agents visibly repeat their complete lifecycles, including starting, working, changing status,
-  and finishing; and
-- after the historical sequence finishes, the thread returns to its actual current state.
+## Fix
 
-The effect resembles a time-lapse or "time warp" through the conversation. Historical events are
-presented as if they were arriving live, even though every event was already persisted with its
-original timestamp.
+Current source uses `formatTimestamp(entry.at, settings.timestampFormat)`
+(`Intl.DateTimeFormat`, renderer-local zone) — see `apps/web/src/components/AgentsPanel.tsx`
+(activity feed call site ~line 538). On 2026-07-29 a straggler audit (`rg --text` for
+`.slice(11`/`.substring(11`/`.substr(11`/`.split("T")` across `apps/web/src` and
+`packages/client-runtime`, including the NUL-byte `ChatComposer.tsx`) found **zero** remaining
+ISO-slicing display paths. A permanent timezone regression test was added.
 
-### Expected behavior
+**Shipping requires a new app build** — the installed `app.asar` may still contain the old code.
 
-Opening a chat should immediately hydrate its latest materialized state. Existing messages should
-render as static history, and each sub-agent should appear only in its latest persisted state.
-Animations, status transitions, notifications, and completion effects should run only for events
-received after the live subscription begins.
+## How to audit
 
-### Impact
-
-- Old agents appear to start working again, which falsely suggests live backend activity.
-- Long threads can produce substantial visual churn, delay, and CPU usage before becoming usable.
-- One-shot arrival and completion animations may replay when they should remain acknowledged.
-- The user cannot reliably distinguish historical playback from new work.
-
-### Investigation leads
-
-The failure is likely at the snapshot-to-live-stream boundary. Investigate whether:
-
-- initial thread hydration dispatches persisted events individually through the same reducer path as
-  new WebSocket events;
-- a reconnect or thread selection subscribes from sequence zero instead of the latest hydrated
-  cursor;
-- historical `agent.snapshot` activities are applied one by one instead of collapsing directly to
-  the latest roster; or
-- transition and animation logic lacks an explicit `initialHydration` guard.
-
-Capture the affected thread ID, selection timestamp, whether the app had just reconnected, event
-sequence/cursor values, and a performance trace when reproducing. The important invariant is:
-**hydrate history once, then animate only genuinely new events.**
+- Tests: `./node_modules/.bin/vp test run apps/web/src/timestampFormat.timezone.test.ts`
+  — forces `Asia/Kolkata`; proves `2026-07-28T12:53:08.906Z` renders `18:23:08` (never raw
+  `12:53:08`) and that durations stay durations (`30m`), not wall-clock labels.
+- Code: re-run the straggler grep above (with `--text`!) — must stay at zero hits.
+- App (post-build): compare an agent activity time against the Windows clock under IST.
 
 ---
 
-# 🔴 **CLAUDE STRUCTURED QUESTION CAN VANISH WHILE THE TURN STAYS RUNNING**
+# 🟢 [FIXED 2026-07-29] OPENING AN EXISTING CHAT COULD REPLAY ITS ENTIRE HISTORY AS LIVE ACTIVITY
 
-## **STATUS: CONFIRMED, NOT FIXED. Live request may be recoverable without restarting.**
+## Original bug (intermittent, now explained)
 
-A Claude `AskUserQuestion` call can be accepted and persisted correctly while its question card never
-appears in the composer. Ordinary messages sent afterwards are stored and forwarded to Claude's queue,
-but they cannot run because the current provider call is still blocked waiting for the structured
-answer. The user sees a permanent `Working` timer and messages that appear to disappear.
+Selecting a thread sometimes replayed the conversation chronologically as if live — sub-agents
+visibly re-ran lifecycles, one-shot animations re-fired — before settling. Diagnosed 2026-07-29:
 
-### Verified evidence
+- A warm cache seeds its resume cursor correctly
+  (`packages/client-runtime/src/state/threads.ts` ~142), and the server streams every persisted
+  event after that cursor **individually** (`apps/server/src/ws.ts` ~1414).
+- Each catch-up event previously passed through the normal reducer AND was published to React on
+  the 16 ms live-update window → a long gap replayed as a ~60 FPS time-lapse.
+- Intermittent because only a **stale warm cache or reconnect gap** has anything to replay; cold
+  loads receive one collapsed snapshot. No cursor-zero bug exists (resume uses `afterSequence`,
+  ~372, with sequence dedup ~275).
 
-Thread `fe577358-c5a6-415b-b180-f9a76d0f6f70` ("Research update-capable installer"), Claude session
-`df06d083-8720-455f-a884-416930998889`, request
-`0e3fa3dc-eccf-4116-aac8-9a2ef5c173a1`:
+## Fix
 
-- Claude's raw JSONL ends at an `AskUserQuestion` tool call containing two complete questions.
-- `orchestration_events` contains the matching `user-input.requested` activity.
-- `projection_thread_activities` contains the complete request and all options.
-- `projection_threads.pending_user_input_count` is `1`.
-- Both later "Hey are you stuck?" messages exist in `projection_thread_messages`.
-- Claude recorded two `queue-operation: enqueue` entries for those messages.
-- The turn and both session tables still report `running`.
+- `packages/client-runtime/src/state/threads.ts` (~295): persisted catch-up is reduced
+  immediately but **publication to React is deferred until the `synchronized` marker**; only
+  post-marker events use the coalesced live window.
+- `apps/web/src/components/chat/MessagesTimeline.logic.ts` (~668) + `MessagesTimeline.tsx`:
+  explicit `initialHydration` guard — catch-up resets one-shot lifecycle state instead of being
+  interpreted as arrivals.
+- `apps/web/src/components/chat/AgentsLiveStrip.tsx`: hydrated rosters render without the live
+  pulse until sync commits.
+- `apps/web/src/components/ChatView.tsx` (~1618): hydration boundary derived from thread
+  synchronization status + thread identity.
 
-This isolates the failure after provider ingestion and persistence: the client did not hydrate or
-render a valid pending-input activity. It is not message loss and it is not an actively thinking
-model.
+## How to audit
 
-### Why restart recovery is special
-
-The structured request payload is durable, but the function that can answer it is not.
-`ClaudeAdapter.ts` keeps pending `AskUserQuestion` callbacks in its in-memory `pendingUserInputs`
-map. A server/app restart can therefore leave a perfectly preserved question card whose request ID
-no longer has a live callback. Re-emitting that old card after restart is unsafe: submitting it can
-only fail with `Unknown pending user-input request`.
-
-### Recovery
-
-1. **Before restarting**, submit `thread.user-input.respond` directly with the preserved request ID.
-   If the adapter still owns the callback, Claude continues from the exact blocked position and then
-   drains the queued messages.
-2. If the provider reports an unknown/stale request, close V3 Code, back up the database, settle the
-   stale pending-input activity, interrupt the wedged turn, and restore the questions as ordinary
-   visible assistant text. Reopen the app and answer them in a fresh turn.
-3. Never recreate an interactive question card using a request ID whose live callback is gone.
-
-### Where to fix
-
-| Area                              | Path                                                                    |
-| --------------------------------- | ----------------------------------------------------------------------- |
-| Claude pending callback lifecycle | `apps/server/src/provider/Layers/ClaudeAdapter.ts`                      |
-| Pending-input projection          | `apps/server/src/orchestration/Layers/ProjectionPipeline.ts`            |
-| Client derivation and rendering   | `apps/web/src/session-logic.ts`, `apps/web/src/components/ChatView.tsx` |
-
-The durable fix needs both client hydration coverage and a restart policy: either rehydrate a
-provider-answerable callback, or explicitly expire the persisted request and prompt the user again.
+- Tests: `./node_modules/.bin/vp test run packages/client-runtime/src/state/threads-sync.test.ts
+apps/web/src/components/chat/MessagesTimeline.lifecycle.test.tsx
+apps/web/src/components/chat/AgentsLiveStrip.test.tsx` — key regressions:
+  long incrementally-supplied history never takes the arrival path; persisted resume events
+  collapse and sub-cursor replay is ignored; a genuinely new post-hydration message still animates.
+- Invariant to check in code: nothing between the resume-stream handler and React publication may
+  publish per-event before the sync marker commits.
+- App: reconnect, open a long stale thread — it must appear immediately settled; send a message —
+  only that new activity animates.
 
 ---
 
-# 🔴 **A DELEGATED CODEX JOB CAN BE SILENTLY INTERRUPTED MID-RUN AND REPORT NOTHING**
+# 🟢 [FIXED 2026-07-29] CLAUDE STRUCTURED QUESTION COULD VANISH WHILE THE TURN STAYED RUNNING
 
-## **STATUS: CONFIRMED, ROOT CAUSE UNKNOWN. Observed three times on 2026-07-27. Work is recoverable.**
+## Original bug
 
-A `codex:codex-rescue` sub-agent launches a detached job, the job runs real work for several minutes,
-and is then **cancelled by something outside itself**. The parent session is never told. There is no
-error, no failed card, no output — the delegation simply never comes back, and the caller is left
-waiting indefinitely on a job that died.
+An `AskUserQuestion` was ingested and persisted end-to-end (`user-input.requested` event, complete
+activity row, `pending_user_input_count = 1`) but the question card never rendered; the turn
+blocked forever and later messages queued invisibly. Two defects: (1) the client did not derive a
+persisted pending-input activity into a card on hydration; (2) `ClaudeAdapter.ts` keeps answer
+callbacks in an in-memory `pendingUserInputs` map, so after a restart the persisted request was
+unanswerable — and re-emitting the old card would be unsafe.
 
-This is distinct from the companion-job stranding issue further down. There, the job _finishes_ and
-the card is stranded. Here the job is _killed_ and the result is destroyed.
+## Fix (explicit-expiry policy)
 
-## Symptom
+- `apps/web/src/session-logic.ts` (~417) + `apps/web/src/components/ChatView.tsx` (~2270): a
+  persisted unanswered request now always derives into a rendered question card on hydration
+  (including degenerate payloads: empty options, missing descriptions), with responding-state
+  tracked correctly.
+- `apps/server/src/orchestration/Layers/ProjectionPipeline.ts` (~724): **projection bootstrap is
+  the restart boundary** — on startup it expires pending Claude requests whose callbacks died with
+  the previous process: settles the pending-input activity, persists the original questions as
+  visible assistant text, zeroes the pending count, and marks the blocked turn/session
+  interrupted. Idempotent.
+- `apps/server/src/provider/Layers/ClaudeAdapter.ts` (~4652): responding to an unknown/expired
+  request ID returns actionable recovery guidance instead of a bare failure.
+- Rationale: the callback exists only in memory and cannot be reconstructed; an interactive card
+  must never outlive its callback.
 
-- The rescue subagent returns `launched successfully` with a job id in ~25s. **This is meaningless.**
-  The forwarder reports that the job started, not that it will finish.
-- Nothing further ever arrives. No `[automated]` turn input, no failure, no card transition.
-- Waiting longer does not help. The job is already dead by the time you start wondering.
+## How to audit
 
-## Verified evidence — three runs, same day
-
-Jobs 1 and 2 were dispatched from session `887fbf7d-ebfa-4f69-8f2e-afb59a9c5913` on a read-only
-research brief. Job 3 came from a different session (`18a5e029-ed9d-4c55-a44e-eca707a99096`) on a
-**write** brief — the motion-foundation slice of the interaction-polish plan. All three used
-`--model gpt-5.6-sol --effort high`.
-
-|                            | Job 1                  | Job 2 (relaunch of the same brief) | Job 3 (different session, write task) |
-| -------------------------- | ---------------------- | ---------------------------------- | ------------------------------------- |
-| Job id                     | `task-ms3hzjly-pwjmgj` | `task-ms3ibzhi-1fm9ff`             | `task-ms3k0p9e-suby04`                |
-| Started (local)            | 22:55:33               | 23:05:13                           | 23:52:19                              |
-| Tool calls completed       | **44**                 | **66**                             | **43**                                |
-| `agent_message` narrations | 3                      | 2                                  | 7                                     |
-| Ended                      | `turn_aborted`         | `turn_aborted`                     | `turn_aborted`                        |
-| `reason`                   | `interrupted`          | `interrupted`                      | `interrupted`                         |
-| Ran for                    | 335.6s (~5m36s)        | 520.2s (~8m40s)                    | 1186.9s (~19m47s)                     |
-| Delivered to parent        | **nothing**            | **nothing**                        | **nothing**                           |
-
-Aborted turn ids: `019fa49c-646d-7cd3-b42a-5b4f616f71c4`, `019fa4a5-4238-7b90-a3ca-806811642abc`,
-and `019fa4d0-7c82-7a10-a74e-015dd30e7ef2`.
-
-**The three durations — 5m36s, 8m40s, 19m47s — rule out a fixed timeout or deadline.** Whatever
-cancels these fires on an event, not a clock. Tool-call count is not the trigger either: job 3 died
-after _fewer_ calls (43) than job 1, which survived 44.
-
-### What job 3 adds
-
-- **Write work survives; the report does not.** Jobs 1–2 were read-only research, so an abort
-  destroyed everything. Job 3's file edits were already on disk, so the slice was recoverable — but
-  it died mid-verification and left a **failing test** (`ui/card.test.tsx` still asserted the inline
-  focus classes it had just replaced with the `motion-focus` recipe). An aborted write job can
-  therefore leave the tree red with no signal that anything is wrong.
-- **Detection is manual.** `codex-companion.mjs status` kept reporting `running` / `verifying` with
-  `updatedAt` frozen at the last log line. The only reliable tell was that the elapsed time had
-  outgrown the command cadence — every previous command took 0.4s–35s, and the last one had been
-  "running" for 21 minutes. `Get-Process -Id <pid>` then confirmed the process was gone.
-- Job 3 aborted at 18:42:21Z, **9 seconds after** its last command started (18:42:12Z) and 17s after
-  the previous one completed cleanly. The abort lands mid-command, not at a turn boundary.
-
-**Do not `/codex:cancel` a job you suspect is already dead** — see the stale-`pid` hazard below. The
-PID has likely been recycled onto an unrelated process, and cancel kills the whole process tree.
-
-`reason: "interrupted"` is the same reason code a user pressing stop produces. Nobody pressed stop.
-Something in the delegation path is issuing a cancel, or dropping a connection that Codex interprets
-as one.
-
-## Where the work actually survives
-
-**The transcripts are complete and on disk.** This is the single most useful fact in this entry.
-
-```
-~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ISO-timestamp>-<uuid>.jsonl
-```
-
-For the two runs above:
-
-```
-rollout-2026-07-27T22-55-33-019fa49c-33ea-71b1-bf30-3f68f5d21b3a.jsonl   (816 KB, 193 lines)
-rollout-2026-07-27T23-05-13-019fa4a5-106b-7c60-a017-f53b82b659e3.jsonl   (1.0 MB, 281 lines)
-```
-
-Each line is JSON with a `payload.type`. What you get, and what you do not:
-
-| `payload.type`         | Recoverable? | Contains                                                                    |
-| ---------------------- | ------------ | --------------------------------------------------------------------------- |
-| `function_call`        | ✅           | every command the agent ran, with full arguments                            |
-| `function_call_output` | ✅           | the full output it saw — file contents, grep hits, everything               |
-| `agent_message`        | ✅           | the agent's narration to the user; usually carries its headline conclusions |
-| `user_message`         | ✅           | the dispatched prompt — use this to identify _which_ rollout is yours       |
-| `turn_aborted`         | ✅           | `reason`, `turn_id`, `started_at`, `completed_at`, `duration_ms`            |
-| `reasoning`            | ❌           | `summary` is an empty array and `encrypted_content` is opaque               |
-
-So the agent's **evidence and stated conclusions survive; its private deliberation does not.** In
-practice the `agent_message` entries plus the `function_call_output` bodies were enough to reconstruct
-the substantive findings of both runs, including answers the interrupted agents had already reached
-but never got to report.
-
-### Recovery procedure
-
-Identify the rollout by grepping for a distinctive phrase from the prompt you dispatched — the job id
-is **not** in the transcript, so it cannot be used to find the file:
-
-```powershell
-rg -l "some distinctive phrase from your brief" $env:USERPROFILE\.codex\sessions\2026\07\27
-```
-
-Then extract narration and outcome without loading the whole file:
-
-```powershell
-Get-Content $f | ForEach-Object {
-  try { $o = $_ | ConvertFrom-Json } catch { return }
-  if ($o.payload.type -eq 'agent_message') { "=== $($o.payload.message)" }
-  elseif ($o.payload.type -eq 'turn_aborted') { "=== ABORTED: $($o.payload.reason) after $([int]($o.payload.duration_ms/1000))s" }
-}
-```
-
-Pair `function_call` with `function_call_output` **by index** (they alternate 1:1) and truncate each
-body, or a single read will blow out the context of whoever is doing the recovery.
-
-## Where the job record lives — and a trap
-
-The record is **not** in any `%TEMP%\codex-jobs-*`, `%TEMP%\codex-companion\*`, or
-`%TEMP%\codex-plugin-*` directory. Those exist, are populated, and are _stale decoys_. The live store
-is:
-
-```
-~/.claude/plugins/data/codex-openai-codex/state/<workspace-hash>/state.json
-```
-
-Searching the temp directories instead produced a confident, wrong conclusion that the first job had
-"never registered" — when in fact it was running at that moment. **Check this file first.**
-
-Two further traps in that file:
-
-- **`startedAt` is UTC while the app and process list are local.** A job stamped
-  `2026-07-27T18:23:58Z` started at `23:53:58` local (IST, +5:30). Mistaking this for a five-hour-old
-  job makes a live job look abandoned.
-- **The job list is capped (8 entries observed) and both interrupted jobs were absent from it
-  afterwards**, even though older _completed_ jobs from earlier the same day survived. One of them had
-  been directly observed in that file as `"status": "running", "pid": 46996` while it was alive. So an
-  interrupted job appears to be removed rather than marked failed — leaving no on-disk trace that it
-  ever ran. **The rollout transcript is then the only record.**
-
-The store also carries `running` entries whose pids are long dead (observed: `34528`, `28900`), the
-same stale-liveness weakness described in the companion-job entry below. A `pid` in this file is never
-safe to trust.
-
-## Impact
-
-- ~110 tool calls of paid research were discarded across the two runs.
-- The caller had no way to know. Both jobs were reported as successfully launched and then simply went
-  quiet, which is indistinguishable from "still working" for an unbounded period.
-- Any conclusion drawn from a delegated job that "never came back" is suspect: the job may have found
-  the answer and been killed before it could say so. In this instance the interrupted runs had already
-  produced findings that **overturned the plan built from the run that did succeed**.
-
-## Diagnosis leads (none confirmed)
-
-- Different durations rule out a fixed timeout.
-- The broker process for job 2 (`node`, pid `28000`, spawned with the job at 23:05:07) was dead
-  shortly after, and its `%TEMP%\cxc-*` working directory had been removed. Whether the broker dying
-  causes the interrupt or is a consequence of it is unknown.
-- `reason: "interrupted"` is a cancellation code, not a crash or a resource failure. Something sends
-  it. The cancel path in the plugin is a candidate, especially given it is already known (below) to act
-  on unverified pids.
-- Not a credits/usage-limit failure — that surfaces as an explicit limit message or an
-  `app-server connection closed` at startup, and produces no tool calls at all.
-
-## Where to look
-
-| Area                            | Path                                                    |
-| ------------------------------- | ------------------------------------------------------- |
-| Rescue forwarder / job dispatch | `codex-companion.mjs` (plugin, not this repo)           |
-| Job record reader               | `apps/server/src/provider/codexCompanionJobs.ts:196`    |
-| Companion watcher lifecycle     | `apps/server/src/provider/Layers/ClaudeAdapter.ts:2619` |
-
-**Strongly recommended:** treat a job that vanishes from the state store without a terminal status as a
-failure and surface it to the caller. Silence is currently indistinguishable from progress, which is the
-core defect — the same "the panel lies about who is working" failure this fork exists to fix.
+- Tests: `./node_modules/.bin/vp test run apps/web/src/session-logic.test.ts
+apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
+apps/server/src/provider/Layers/ClaudeAdapter.test.ts` — covers hydration rendering, restart
+  expiry (visible recovery text, zero pending count, interrupted state, idempotence), and
+  unknown-request guidance.
+- Invariant: grep ProjectionPipeline for the bootstrap expiry (`isStalePendingUserInputFailureDetail`,
+  `deriveOpenPendingUserInputActivities`) and confirm it runs on startup, not only on new events.
+- App: trigger a structured question, restart the app — the questions must reappear as plain
+  assistant text with the turn settled; answering stale state must produce a visible error.
 
 ---
 
-# 🟣 NEWLY COMPLETED THREAD CAN LOSE ITS `DONE` BADGE AND UNSEEN-COMPLETION GLOW
+# 🟠 [ROOT CAUSE FOUND 2026-07-29; IN-REPO DETECTION FIXED; PLUGIN FIX PENDING UPSTREAM] A DELEGATED CODEX JOB CAN BE KILLED MID-RUN BY CLAUDE SESSION TEARDOWN
 
-## **STATUS: CONFIRMED, NOT FIXED. Regression diagnosed on 2026-07-27.**
+## Root cause (confirmed — this was the "silently interrupted" mystery)
 
-A thread that has just finished working can fall directly into the ordinary muted/inactive row
-presentation. The row no longer says `Done`, does not show the themed completion check, and does not
-receive the violet/pink unseen-completion glow—even when the user has not reopened the completed
-thread to inspect its output.
+Detached companion jobs are **OS-detached but not lifecycle-detached**. In plugin v1.0.6:
 
-### Observed symptom
+- `codex-companion.mjs::spawnDetachedTaskWorker` correctly uses `detached: true`,
+  `stdio: "ignore"`, `unref()`.
+- But `session-lifecycle-hook.mjs::cleanupSessionJobs` runs at Claude **SessionEnd**, selects every
+  job tagged with the ending session, calls `terminateProcessTree(job.pid)`, and **removes the
+  record from state** — after `handleSessionEnd` has already shut down the broker
+  (`appClient.close()`), which can abort the active turn.
 
-- Let a background or current thread finish normally.
-- Do not click or reopen that thread after completion.
-- Its sidebar row becomes gray and visually indistinguishable from an older idle thread.
-- Only the provider glyph remains on the right; there is no explicit completion state.
+So ending/restarting a Claude session executes its background jobs. Broker shutdown explains
+rollouts with an explicit `turn_aborted: interrupted`; worker-tree termination explains rollouts
+that simply stop with no terminal marker. A controlled experiment confirmed a properly detached
+Node child survives launcher death — ordinary OS teardown is ruled out. No evidence of
+`/codex:cancel` involvement. (Evidence note: the 2026-07-29 kill left NO `turn_aborted` line —
+the rollout ends abruptly at a `token_count` event; two adjacent child-job rollouts from the same
+day do contain explicit `interrupted` records. Both kill shapes are real.)
 
-### Expected behavior
+### Independently verified 2026-07-29 (second, blind Codex agent) — with corrections
 
-A newly completed, unseen thread should retain the themed `Done` check and bounded completion glow
-until the user opens that thread. Opening it should acknowledge the completion and return the row to
-its quiet seen/idle presentation. The state must remain understandable from the check and `Done`
-label, not color alone.
+A separate agent re-derived the root cause from plugin source knowing only the claim. Verdict:
+**substantially correct**, with these precision fixes (file:line refs are into the installed
+plugin at `~/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/`):
 
-### Confirmed primary root cause
+- `cleanupSessionJobs` (`session-lifecycle-hook.mjs:42`) calls `terminateProcessTree` only for
+  `queued`/`running` jobs, but deletes EVERY record of the ending session — and `saveState`
+  (`lib/state.mjs:92`) also deletes the per-job JSON and log files. Removal is more destructive
+  than "dropped from the list".
+- SessionEnd order (`session-lifecycle-hook.mjs:83`): `sendBrokerShutdown` →
+  `cleanupSessionJobs` (kill workers) → `teardownBrokerSession` (kill broker PID + artifacts) →
+  `clearBrokerSession`. The hook waits only for the broker's shutdown ACK, which the broker sends
+  BEFORE closing the app-server (`app-server-broker.mjs:160`), so app-server close and worker
+  kill can overlap.
+- Workers ride the workspace's shared broker on the NORMAL path (`lib/app-server.mjs:335`,
+  `lib/codex.mjs:613`) — but fall back to a worker-owned direct app-server when the broker is
+  busy/missing (`lib/codex.mjs:620`). Dependency, not invariant.
+- Broker shutdown closes the direct app-server client, which on Windows force-kills the
+  app-server tree after 50 ms (`lib/app-server.mjs:232`) — sufficient to kill an in-flight turn.
+- Latent hang hazard: `captureTurn` (`lib/codex.mjs:559`) waits only for terminal notifications
+  and does not tie the broker socket's death to its completion promise — if the app-server dies
+  mid-turn, a SURVIVING worker can hang forever instead of failing cleanly.
+- A naive "skip the kill + skip `sendBrokerShutdown`" patch is INSUFFICIENT:
+  `teardownBrokerSession` kills the broker PID anyway, and `clearBrokerSession` orphans it. All
+  three broker teardown steps must be guarded — and even then: no explicit `background` flag
+  exists on job records (only the presence of a stored `request` distinguishes them,
+  `codex-companion.mjs:684`), surviving jobs are invisible to session-filtered `/codex:status`
+  (`lib/job-control.mjs:15`; explicit `/codex:status <job-id>` still works, `:242`), finished
+  workers never shut the broker down (orphaned `codex app-server`s), a crashed worker leaves
+  permanent `running` state (no liveness reconciliation), and state writes are unlocked
+  read-modify-write (`lib/state.mjs:118`).
 
-The completed turn is persisted correctly, but the final ready-session event erases the thread
-shell's pointer to it:
+## In-repo hardening (fixed, tested)
 
-1. `thread.turn-diff-completed` writes the completed turn ID to
-   `projection_threads.latest_turn_id`.
-2. A later `thread.session-set` reports `status: "ready"` and `activeTurnId: null`.
-3. `apps/server/src/orchestration/Layers/ProjectionPipeline.ts` blindly replaces
-   `latest_turn_id` with that null active-turn value.
-4. `ProjectionSnapshotQuery` can then expose only `latestTurn: null` for the sidebar shell.
-5. `hasUnseenCompletion` returns false immediately when `latestTurn` is absent, so neither the
-   `Done` badge nor the completion glow can render.
+- `apps/server/src/provider/codexCompanionJobs.ts` (~463): correlates job records with their
+  rollout transcripts; incrementally detects `turn_aborted`; distinguishes job-local silence from
+  unrelated state writes; probes PIDs read-only (never kills).
+- `apps/server/src/provider/Layers/ClaudeAdapter.ts` (~2609): rollout aborts, vanished records,
+  and dead/stale workers become **failed agent cards with an explicit reason** plus an
+  `[automated]` failure message into the thread. Restart reconciliation is never silent.
+- Detection latency: next rollout/vanish poll; ~30 s for a confirmed-dead PID with stale
+  artifacts; finite stale fallback otherwise. Indefinite silence is no longer possible.
 
-This is a projection/state-ordering regression, not missing CSS, and it affects background threads
-as well as the currently open thread.
+## Plugin-side fix still required (recommendation, file upstream against plugin v1.0.6)
 
-### Verified evidence
+The verified design (supersedes the naive two-part patch):
 
-In the actual reported thread, `065af0fb-1e86-44f5-a569-fd626f655df0` ("Spectacular send button
-animation polish"), turn `019fa3c0…` exists in `projection_turns` as completed at
-`2026-07-27T13:26:32.577Z` with a ready checkpoint. Event sequence `95170` sets the completed turn
-pointer; later sequence `95313` clears it through the ready `thread.session-set`.
+1. Persist explicit `background: true` + runtime-ownership metadata on background job records —
+   do not infer background-ness from the stored `request`.
+2. Give each detached background worker its OWN direct app-server (or dedicated per-job broker)
+   instead of the ending Claude session's shared broker; sanitize inherited broker env vars.
+3. `cleanupSessionJobs`: preserve active detached-background records and worker PIDs at
+   SessionEnd; shut the session broker down normally. If the shared-broker architecture must
+   stay, use leases/refcounting — SessionEnd releases the session's lease, each worker holds one
+   released in `finally`, broker exits after an idle grace period, and the "anything active?"
+   check must be workspace-scoped, not session-scoped.
+4. Never delete non-terminal job records (or their JSON/logs) during teardown; mark explicit
+   cancellations terminal with `errorMessage`.
+5. Make surviving detached jobs visible from later sessions (dedicated "detached jobs" section in
+   status; today only explicit `/codex:status <job-id>` crosses sessions).
+6. Add PID-liveness reconciliation (dead PID ⇒ `queued/running` → `failed`) and tie the broker
+   socket's death into `captureTurn`'s completion promise so a worker fails cleanly instead of
+   hanging when the app-server dies mid-turn.
+7. Store a worker token + process creation time; verify both before any `terminateProcessTree`
+   (stale/recycled-PID hazard — see the cancel note under the companion-card entry).
 
-### Secondary client-side defects
+### Local stopgap APPLIED to the installed plugin (2026-07-29, verified)
 
-Two independent client behaviors would still weaken the treatment after the projection is fixed:
+The cleaner stopgap is applied to the installed copy at
+`~/.claude/plugins/cache/openai-codex/codex/1.0.6/` (six files edited:
+`scripts/codex-companion.mjs`, `scripts/session-lifecycle-hook.mjs`, `scripts/lib/codex.mjs`,
+`scripts/lib/job-control.mjs`, `scripts/lib/process.mjs`, `scripts/lib/render.mjs`; byte-identical
+pre-edit backups alongside as `*.orig` — restoring them is the full revert). What it does:
+explicit `background: true` on job records; workers get broker env vars stripped and force a
+direct worker-owned app-server (`disableBroker`), so SessionEnd broker teardown proceeds
+unchanged and cannot cut a worker's transport; SessionEnd preserves active background PIDs,
+records, JSON, and logs; status gains a "Detached jobs (other sessions)" section plus dead/stale
+reconciliation (dead PID ⇒ `failed` with reason, record retained); `captureTurn` races transport
+death so a worker fails in seconds instead of hanging; cancel refuses to kill a PID whose
+identity (creation time/command line) cannot be positively verified; and the
+spawn-before-record-write enqueue race got a bounded worker-side retry (that race stranded a real
+job as permanently-`queued` earlier the same day).
 
-- `ChatView.tsx` marks the open thread visited on every `serverThread.updatedAt`, including the
-  completion update. This passively acknowledges finished work without a thread click.
-- `resolveSidebarV2RowSurfaceClassName` intentionally gives the active-row surface precedence over
-  unread completion, so an active-and-unread row cannot receive the perimeter glow.
+Verified end-to-end through the installed launcher/worker/hook/state-store/status paths with a
+controlled app-server stub: survival across a real SessionEnd hook invocation, cross-session
+visibility, dead-PID reconciliation, mid-turn app-server death failing closed (1.8 s), and
+cancel-refusal on unverifiable identity. The one caveat: the real Codex runtime could not run in
+the patch job's sandbox, so a live-runtime survival run is still worth doing once convenient.
+**A plugin update to any newer version silently reverts all of this** — if delegated jobs start
+dying at session restarts again, check the `*.orig` files still have patched siblings before
+re-diagnosing.
 
-### Repair and focused coverage
+### 📌 TODO — package the fixed plugin WITH v3code (the durable completion of this issue)
 
-- Preserve the existing completed-turn pointer when a non-running session reports
-  `activeTurnId: null`; a running non-null active turn should still replace it.
-- A visit baseline should advance on explicit route/thread engagement, not every passive server
-  update.
-- Combine active and unread-completion styling instead of suppressing the branded ring for the
-  active row.
-- Add a projection regression covering `running → turn-diff-completed → ready`, a client lifecycle
-  test proving completion remains unread until explicit activation, and a sidebar style test for
-  active plus unread completion.
+The stopgap above is deliberately fragile. This entry is not fully closed until the patched
+plugin ships with the repo so it cannot be silently reverted and needs no separate install.
+Decided approach (2026-07-29):
 
----
+1. Fork `openai/codex-plugin-cc` on GitHub (`H-Ekana`) as the canonical home of the fix; land the
+   verified 7-point design there; file the upstream PR from the fork.
+2. Vendor a snapshot of the patched plugin into this repo (e.g. `vendor/claude-plugins/codex/`)
+   with a repo-local marketplace manifest (`vendor/claude-plugins/.claude-plugin/marketplace.json`
+   pointing at the local path), and enable it via the checked-in `.claude/settings.json`
+   (marketplace + `enabledPlugins`) so opening the repo auto-provides the plugin, version-pinned
+   by commit. Keep it synced via the existing `vpr sync:repos` mechanism.
+3. Cutover checklist: uninstall the upstream `codex@openai-codex` install on each machine
+   (two installs would double-register the SessionEnd hook and `/codex:*` skills), and do it
+   while no detached jobs are running — the job state store is keyed by plugin+marketplace
+   identity, so a re-identified install starts a fresh store and orphans in-flight jobs.
+4. Then delete the cache-patch stopgap note above and mark this entry fully fixed.
 
-# [FIXED] PARENT CODEX OUTPUT DISAPPEARS AFTER A SUB-AGENT INTERACTS WITH `/root`
+Any future issue-sweep that finds this TODO unfinished should treat it as open work even if the
+stopgap is currently holding.
 
-## **STATUS: FIXED IN THE WORKTREE ON 2026-07-27. Requires an updated app build/restart.**
+## How to audit
 
-A Codex parent could keep producing assistant messages, tool calls, file changes, and turn lifecycle
-events while V3 Code stopped adding them to the conversation. The chat showed an old acknowledgement
-and a permanent `Working for ...` spinner; later user messages received real backend replies that
-were invisible in the GUI.
-
-### Confirmed root cause
-
-When a child communicated with its parent, Codex emitted a `subAgentActivity` item targeting the
-canonical parent thread with `agentPath: "/root"`. `CodexSessionRuntime.rememberSubAgentActivity`
-blindly registered that target as a child. Every later parent notification was then diverted into a
-synthetic `collab/agentActivity` event and returned before normal conversation handling.
-
-The adapter's existing bare-`/root` guard hid the bogus root agent card, but it could not restore the
-already-diverted parent messages. The apparent steer/turn-id mismatch was a downstream symptom:
-parent `turn/completed` and the next `turn/started` were diverted along with the assistant output.
-
-### Verified evidence
-
-Thread `065af0fb-1e86-44f5-a569-fd626f655df0` ("Spectacular send button animation polish"),
-Codex session `019fa047-fe68-7583-bc11-a404224fe117`:
-
-- The last projected assistant message finalized at `07:20:32Z`.
-- At `07:21:19Z`, a child emitted `subAgentActivity` targeting the parent at `/root`.
-- From that point onward, the native provider log wrapped parent notifications as
-  `collab/agentActivity`; 840 wrapped parent assistant deltas never became canonical content events.
-- The original provider turn completed at `07:31:22Z`, and the user's follow-up started another turn
-  at `07:33:33Z`. V3 projected neither lifecycle event, so the GUI falsely appeared continuously
-  active.
-- The raw Codex session contains the missing replies and successful work through `07:43:03Z`.
-
-### Resolution
-
-`apps/server/src/provider/Layers/CodexSessionRuntime.ts` now:
-
-- refuses to register bare `/root` activity or the canonical provider thread as a child;
-- deletes a stale root entry when encountered so an already-poisoned runtime can self-heal; and
-- independently prevents the canonical provider thread from ever taking the child diversion path.
-
-Focused regression coverage in `CodexSessionRuntime.test.ts` verifies canonical-root rejection,
-poisoned-registry safety, real nested-child routing, and existing v1 receiver routing.
-
-### Recovery and diagnosis
-
-- This is distinct from the interrupted-turn wedge below. `scripts/fix-stuck-threads.mjs` does not
-  restore conversation events that were never projected.
-- Existing missing messages are still available in the matching
-  `~/.codex/sessions/.../rollout-...-<threadId>.jsonl`.
-- Affected running processes need an updated build/restart before the fix applies.
-
----
-
-# 🔴 **INTERRUPTED TURNS WEDGE THE THREAD FOREVER**
-
-## **STATUS: NOT FIXED. Repair script exists. Root cause is still live.**
-
-**Pressing stop is what breaks the chat.** The turn settles, the session row never clears, and the
-thread spins `Working for 8h` until someone edits the database by hand.
-
-This is a primary reason V3 Code was forked. It has been silently wedging threads since at least
-**2026-06-22**, across `codex`, `grok`, and `claudeAgent`. It directly defeats the product purpose —
-"users can understand who is working, what each agent is doing" — because the panel lies about it.
-
----
-
-## Symptom
-
-- Header shows `Working for 7h 57m` and never stops.
-- The red stop button does nothing.
-- The model finished hours ago. Its final reply exists but is never rendered.
-- Only recoverable by manually patching `state.sqlite`.
-
-## Root cause
-
-Three tables disagree after an interrupt:
-
-| Table                        | Field                       | Value                          |
-| ---------------------------- | --------------------------- | ------------------------------ |
-| `projection_turns`           | `state` / `completed_at`    | `interrupted` / set ✅ settled |
-| `projection_thread_sessions` | `status` / `active_turn_id` | `running` / still set ❌ stale |
-| `provider_session_runtime`   | `status`                    | `running` ❌ stale             |
-
-The UI reads the **session** row, so it reports work that finished hours earlier. Stop no-ops because
-there is no live turn left to stop.
-
-## Evidence — 100% correlation
-
-Measured against a real 249 MB `state.sqlite`:
-
-| turn state      | total | left session stuck |
-| --------------- | ----- | ------------------ |
-| completed       | 189   | **0**              |
-| error           | 2     | **0**              |
-| **interrupted** | **3** | **3**              |
-
-**Every interrupted turn wedges its session. No completed or error turn ever does.** The defect is
-isolated to the interrupt/stop path.
-
-## Repair (data only — does NOT fix the bug)
-
-```bash
-# Close V3 Code first.
-node scripts/fix-stuck-threads.mjs           # dry run
-node scripts/fix-stuck-threads.mjs --apply   # backs up the DB, then clears stale rows
-```
-
-Only clears sessions whose active turn is provably settled; refuses to touch a live turn. Confirmed
-working — recovered two 8-hour threads with full context and sub-agent history intact.
-
-## Where to fix
-
-| Area                       | Path                                                 |
-| -------------------------- | ---------------------------------------------------- |
-| Turn/session state machine | `apps/server/src/orchestration/decider.ts`           |
-| Projection writer          | `apps/server/src/orchestration/projector.ts`         |
-| Session runtime rows       | `apps/server/src/provider/Layers/ProviderService.ts` |
-
-`projector.test.ts` (~293-324) **already asserts** `activeTurnId: "turn-1"` → `null`. The mechanism
-exists and is tested — the interrupt path just misses it.
-
-**Strongly recommended:** a startup reconciliation that clears any session whose `active_turn_id`
-points at an already-settled turn. That turns a permanent wedge into a self-healing one, and would
-have fixed the June thread automatically instead of leaving it broken for five weeks.
-
-Full brief for an agent working outside the app: **`docs/project/stuck-thread-bug-handoff.md`**
+- Tests: `./node_modules/.bin/vp test run apps/server/src/provider/codexCompanionJobs.test.ts
+apps/server/src/provider/Layers/ClaudeAdapter.test.ts` — proves `turn_aborted`, vanished jobs,
+  and dead/stale workers surface as failures with reasons in both card and thread.
+- Until the plugin ships its fix: assume any Claude session restart may still kill that session's
+  live companion jobs — but the kill now becomes a visible failure instead of silence.
+- Recovery of killed work is unchanged: the rollout transcript
+  (`~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl`) preserves every `function_call`/output and
+  `agent_message`; find it by grepping for a distinctive phrase from the dispatched brief (the job
+  id is NOT in the transcript). The job store is
+  `~/.claude/plugins/data/codex-openai-codex/state/<workspace-hash>/state.json`; `startedAt` is
+  UTC; a stored `pid` is never trustworthy.
 
 ---
 
-# 🔴 **A COMPANION JOB THAT OUTLIVES A SERVER RESTART STRANDS ITS AGENT CARD FOREVER**
+# 🟢 [FIXED 2026-07-29] NEWLY COMPLETED THREAD LOST ITS `DONE` BADGE AND UNSEEN-COMPLETION GLOW
 
-## **STATUS: NOT FIXED. Repair script exists. Root cause is still live.**
+## Original bug
 
-Observed 2026-07-27. A `codex:codex-rescue` card sat at `running` with a live-ticking timer for
-40+ minutes after its Codex job had already finished. Survived a UI reload, a hard reload, and a
-full app close/reopen.
+A just-finished, never-reopened thread fell straight to the muted idle row. Root cause chain:
+`thread.turn-diff-completed` set `projection_threads.latest_turn_id`; a later ready
+`thread.session-set` with `activeTurnId: null` blindly overwrote it in `ProjectionPipeline.ts`;
+`hasUnseenCompletion` then saw `latestTurn: null` and bailed. Two client accomplices: `ChatView`
+marked the open thread visited on every passive `serverThread.updatedAt`, and
+`resolveSidebarV2RowSurfaceClassName` let the active-row surface suppress the unread glow.
 
-## Symptom
+## Fix
 
-An agent card renders `running` indefinitely. The elapsed timer keeps counting. The card's activity
-line is frozen at some earlier moment while the underlying job log kept advancing past it. Reloading
-and restarting the app do not clear it — they are the two things guaranteed _not_ to work.
+- `apps/server/src/orchestration/Layers/ProjectionPipeline.ts` (~887): a NON-running session
+  reporting `activeTurnId: null` preserves the existing completed-turn pointer; a running session
+  with a non-null turn still replaces it.
+- `apps/web/src/components/ChatView.tsx` (~2056) + `ChatView.logic.ts` (~31): visit baseline
+  advances only on explicit route/thread engagement.
+- `apps/web/src/components/Sidebar.logic.ts` (~465): unread-completion glow is additive with the
+  active-row surface; state readable from the check + `Done` label, not color alone.
 
-## Root cause
+## How to audit
 
-The per-thread agent roster is carried **latest-wins in the payload of an `agent.snapshot` thread
-activity** (`packages/contracts/src/threadAgents.ts`). It is an ordinary persisted row, so the UI
-rebuilds from it on every reload and every cold start.
+- Tests: `./node_modules/.bin/vp test run
+apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts
+apps/web/src/components/ChatView.logic.test.ts apps/web/src/components/Sidebar.logic.test.ts`
+  — includes the `running → turn-diff-completed → ready` pointer-survival regression, the
+  passive-update-stays-unread lifecycle test, and the active+unread combined-style test.
+- App: let a background thread finish without clicking it — `Done` check + glow must persist until
+  you open it.
 
-Only a _newer_ snapshot carrying a terminal status (`completed | failed | stopped`, see
-`THREAD_AGENT_TERMINAL_STATUSES` at `packages/contracts/src/threadAgents.ts:41`) clears the card.
-The thing that emits that snapshot is the companion watcher fiber in
-`ClaudeAdapter.ts:2619` — and **nothing rehydrates it.** `startCompanionWatcher`
-(`ClaudeAdapter.ts:2636`) only runs when a launch line is observed live.
+---
 
-So: server dies while a job is being watched → fiber dies with it → job finishes later with nothing
-alive to emit the terminal snapshot → the last non-terminal snapshot stays authoritative forever.
+# [FIXED 2026-07-27] PARENT CODEX OUTPUT DISAPPEARS AFTER A SUB-AGENT INTERACTS WITH `/root`
 
-`COMPANION_WATCH_LIMIT_MS` (2h, `ClaudeAdapter.ts:114`) is the only backstop, and it lives inside the
-very process that died.
+Codex emitted `subAgentActivity` targeting the parent at `agentPath: "/root"`;
+`CodexSessionRuntime.rememberSubAgentActivity` registered the parent as a child, diverting all
+later parent notifications into synthetic `collab/agentActivity` events (840 lost assistant deltas
+in the verified thread). Fixed in `apps/server/src/provider/Layers/CodexSessionRuntime.ts`: bare
+`/root`/canonical-thread registration refused, stale root entries self-heal, canonical thread can
+never take the child path. Regression coverage in `CodexSessionRuntime.test.ts`. Missing messages
+remain recoverable from the matching `~/.codex/sessions/.../rollout-*.jsonl`.
 
-### Observed timeline
+---
 
-| Time (local) | Event                                                               |
-| ------------ | ------------------------------------------------------------------- |
-| 18:25:32     | Last `agent.snapshot` written — agent still `running`, no `endedAt` |
-| 18:25:33     | App process restarts — **watcher fiber dies one second later**      |
-| 18:31:34     | Codex job `task-ms37sqhu-ffd21e` completes successfully             |
-| —            | No watcher alive. No terminal snapshot ever written.                |
+# 🟢 [FIXED 2026-07-29] INTERRUPTED TURNS WEDGED THE THREAD FOREVER
 
-The timer ticks because the entry has `status: "running"`, no `endedAt`, and a `currentActivity`
-string; the client counts from `firstStartedAt` against the wall clock. Clearing `status` alone is
-not enough — `currentActivity` and `phaseTitle` must also be dropped or the running line persists.
+## Original bug (a primary reason this fork exists)
 
-## Repair (data only — does NOT fix the bug)
+Pressing stop settled `projection_turns` (`interrupted`, `completed_at` set) but left
+`projection_thread_sessions` (`running`, `active_turn_id` set) and `provider_session_runtime`
+(`running`) stale. The UI reads the session row → permanent `Working for Nh`, dead stop button.
+Measured correlation was absolute: 3/3 interrupted turns wedged; 0/189 completed, 0/2 error.
 
-```bash
-# Close V3 Code first. --force writes against a live app at the risk of the
-# server re-emitting its in-memory roster over the correction.
-node scripts/fix-stuck-agent-cards.mjs                    # dry run
-node scripts/fix-stuck-agent-cards.mjs --apply            # backs up the DB, appends corrected snapshot
-node scripts/fix-stuck-agent-cards.mjs --stale-minutes 30 # default threshold is 15
-```
+## Fix
 
-Scans every thread's latest snapshot, settles only agents idle beyond the threshold, refuses to
-touch anything still plausibly live.
+- `apps/server/src/orchestration/decider.ts` (~826): interrupting a live session emits a terminal
+  `thread.session-set` — clears `activeTurnId`, status `interrupted` — matching the
+  completed/error paths.
+- `apps/server/src/provider/Layers/ProviderService.ts` (~228): settles runtime state after
+  interrupt AND performs **startup reconciliation**: any session whose `active_turn_id` points at
+  an already-settled turn (`completed | error | interrupted`) is cleared transactionally, with a
+  liveness recheck so a genuinely running turn is never touched. Historical wedges self-heal on
+  next launch.
 
-### The repair alone is NOT enough — hydration is lazy
+## How to audit
 
-Writing the corrected snapshot fixes the database but **does not change the UI**, and neither a
-renderer reload nor a full cold restart will pick it up. `ProviderRuntimeIngestion.ts:1658` only
-re-reads the roster when `eventTouchesAgents || activityPressure` — an agent-touching event, or
-`AGENT_SNAPSHOT_REFRESH_ACTIVITY_COUNT` (400) activities since the last snapshot. A freshly started
-server has not hydrated either, so it keeps serving its boot-time roster.
+- Tests: `./node_modules/.bin/vp test run apps/server/src/orchestration/decider.settled.test.ts
+apps/server/src/orchestration/projector.test.ts
+apps/server/src/provider/Layers/ProviderService.test.ts` — interrupt emits the terminal session
+  event; projection clears the active turn; cold-start reconciliation clears stale rows and leaves
+  live rows alone.
+- DB spot-check after an interrupt: the three tables must agree (no `running` session/runtime row
+  pointing at a settled turn).
+- `scripts/fix-stuck-threads.mjs` remains as a data-repair tool for old databases, but the startup
+  reconciliation should make it unnecessary. Handoff doc:
+  `docs/project/stuck-thread-bug-handoff.md`.
+- App: press stop mid-turn — the header must settle promptly.
 
-**After running the repair, spawn any trivial subagent.** That is the cheapest trigger: the server
-hydrates from the corrected snapshot, emits a fresh one, and the card settles live over the
-WebSocket with no restart.
+---
 
-This cost several wasted debugging cycles — the data was verifiably correct (right revision, decodes
-cleanly, wins the selection) while the UI stayed wrong, because nothing had asked the server to look
-at it. If the card still reads `running` after a repair, do not re-verify the data; trigger a
-hydration.
+# 🟢 [FIXED 2026-07-29] A COMPANION JOB THAT OUTLIVED A SERVER RESTART STRANDED ITS AGENT CARD FOREVER
 
-## Where to fix
+## Original bug
 
-| Area                         | Path                                                    |
-| ---------------------------- | ------------------------------------------------------- |
-| Watcher lifecycle            | `apps/server/src/provider/Layers/ClaudeAdapter.ts:2619` |
-| Watcher start (no rehydrate) | `apps/server/src/provider/Layers/ClaudeAdapter.ts:2636` |
-| Job record reader            | `apps/server/src/provider/codexCompanionJobs.ts:196`    |
-| Roster contract              | `packages/contracts/src/threadAgents.ts:41`             |
+The roster is latest-wins via persisted `agent.snapshot` activities
+(`packages/contracts/src/threadAgents.ts`; terminal statuses ~41). Only the companion watcher
+fiber emits the terminal snapshot, and nothing rehydrated it after a server restart — so a job
+finishing post-restart left the last `running` snapshot authoritative forever (live-ticking timer,
+survives reloads and cold starts). The 2 h watch limit lived inside the dead process.
 
-**Strongly recommended:** a startup reconciliation that re-attaches watchers for jobs whose records
-are still non-terminal, and settles any roster entry whose job record is already terminal or whose
-process is gone. Same shape as the reconciliation recommended for the interrupted-turn wedge above —
-it turns a permanent stranding into a self-healing one.
+## Fix
 
-## Adjacent hazard — `cancel` can kill an unrelated process
+- `apps/server/src/provider/Layers/ClaudeAdapter.ts`: watcher correlations are **persisted** and
+  **restored during session startup** — a still-non-terminal job gets its watcher re-attached (no
+  launch line needed); a terminal job emits its terminal snapshot; a job **vanished** from the
+  state store is surfaced as `failed` with an explicit reason. Stored PIDs are never trusted or
+  killed; liveness is corroborated via job records/log mtimes.
+- `apps/server/src/provider/codexCompanionJobs.ts`: reads the capped `state.json`, per-job
+  records/log mtimes, durable watcher registrations; omission from a valid store = vanished.
+- `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`: terminal settlement clears
+  `currentActivity` AND `phaseTitle` (status alone left the running line). Reconciliation emits an
+  agent-touching event, so hydration happens immediately — the old "spawn a dummy subagent to
+  trigger hydration" workaround is obsolete.
 
-The same missing liveness check bites harder in the plugin's cancel path. The job record stores a
-`pid`; cancel issues `taskkill /PID <pid> /T /F` **without verifying the process is still the job it
-started**. After the job dies, the OS recycles the PID — in the observed case onto
-`scripts/v3-electron-dev.mjs`, the user's own Electron dev stack. `/T` kills the whole tree.
+Correction to older evidence: the "8-entry cap" was the status _display_ default; the persistent
+store caps at 50 (upstream plugin source).
 
-It only failed to fire because Git Bash mangled `/PID` into `C:/Program Files/Git/PID` (MSYS path
-conversion). Run the same cancel from PowerShell and it would have taken down the dev stack.
+## How to audit
 
-Lives in the plugin (`codex-companion.mjs`), not this repo, but any fix here should assume a stale
-`pid` is never safe to trust.
+- Tests: `./node_modules/.bin/vp test run apps/server/src/provider/codexCompanionJobs.test.ts
+apps/server/src/provider/Layers/ClaudeAdapter.test.ts
+apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts` — restart reattachment,
+  continued watching, terminal settlement, vanished-job failure, bogus-PID tolerance, and the
+  cleared-`phaseTitle` snapshot shape.
+- App: restart the app while a companion job runs; after it finishes, the card must settle by
+  itself. `scripts/fix-stuck-agent-cards.mjs` remains as a legacy data repair.
+
+## ⚠️ Still-live adjacent hazard — plugin `cancel` can kill an unrelated process
+
+`codex-companion.mjs` cancel issues `taskkill /PID <pid> /T /F` without verifying the PID still
+belongs to the job; recycled PIDs make this a loaded gun (it once targeted the Electron dev
+stack and only misfired due to MSYS path mangling). Plugin-side; covered by recommendation #6 in
+the session-teardown entry above. Until fixed: never `/codex:cancel` a job you suspect is dead.
 
 ---
 
 # 🟢 FIXED — Codex root thread appeared as its own sub-agent
 
-`CodexAdapter` derived an agent nickname from the last segment of Codex's `agentPath`
-(`/root/marlow` → `marlow`). The parent conversation is a bare `/root`, so it became an agent
-literally named **`root`** in the SUB-AGENTS list — showing the main thread's own replies as
-"sub-agent activity", incrementing `run N` on every user turn, and summing its whole-conversation
-token total (22.9M in one observed case) into the roster alongside the children it spawned.
-
-Fixed by requiring path depth >= 2. `/root/root` still resolves correctly. Regression test asserts
-a bare `/root` emits nothing; verified to fail without the guard.
+`CodexAdapter` derived an agent nickname from the last `agentPath` segment, so the bare `/root`
+parent became a sub-agent named `root` (own replies as "sub-agent activity", 22.9M-token roster
+entry). Fixed by requiring path depth >= 2; `/root/root` still resolves. Regression test asserts
+bare `/root` emits nothing.
 
 ---
 
-# 🟡 Agents panel is provider-blind for detached jobs
+# 🟢 [ADDRESSED 2026-07-29 — server follow-ups remain] AGENTS PANEL WAS PROVIDER-BLIND FOR DETACHED JOBS
 
-A `codex:codex-rescue` sub-agent launches a **detached** Codex process and exits in ~30s, so its card
-goes green while the real job runs for many more minutes, invisible to the roster. Users cannot tell
-what is running without shelling out to `codex-companion.mjs status --json`.
+## Original gap and what closed it
 
-Related: Claude sub-agents produce a far sparser activity feed than Codex ones — same UI, same
-fields, but `task_progress` emits coarse periodic summaries where the Codex app-server emits a
-separate item event per reasoning block, command and file change.
+A rescue card went green in ~30 s while the real detached job ran invisibly. Two rounds of work
+closed most of it: the server now tails detached jobs and replays progress onto the forwarder's
+card, re-pinning it to `running` until the job settles (`codexCompanionJobs.ts`; see AGENTS.md),
+and on 2026-07-29 the client slice landed:
 
-Plan, blocker register and roadmap: **`docs/project/ideal-agents-sidebar.md`**
+- `apps/web/src/components/AgentsPanel.tsx` (~90): lifecycle labeling — **Launching job** →
+  **Detached job** — live phase/activity with local timestamps, detached provenance retained
+  after settling, and truthful **Usage unavailable** instead of wrapper tokens.
+- `packages/client-runtime/src/state/threadAgents.ts` (~229): detects handed-off companion rows
+  and excludes wrapper tokens from footer totals.
+
+## Remaining gaps (recommendations, server-owned)
+
+1. Make job ownership authoritative immediately at correlation (suppress the wrapper's
+   `task.completed` instead of re-pinning after it) — a transient wrapper-completion race remains.
+2. Propagate the companion record's true `startedAt` so elapsed time starts at job launch, not
+   watcher attach.
+3. Move detached watching into a provider-neutral runtime (currently Claude-adapter-specific).
+4. Installed-app smoke verification of launch → handoff → restart → terminal.
+5. Real Codex usage is not exposed by the companion; "Usage unavailable" is honest but a data gap.
+
+Related, still open: Claude sub-agents emit a sparser activity feed than Codex ones
+(`task_progress` coarse summaries vs per-item events). Roadmap: `docs/project/ideal-agents-sidebar.md`.
+
+## How to audit
+
+- Tests: `./node_modules/.bin/vp test run apps/web/src/components/AgentsPanel.test.tsx
+packages/client-runtime/src/state/threadAgents.test.ts` — launch → detached → settled lifecycle,
+  phase/activity rendering, wrapper-token exclusion (ordinary usage still counted).
+- App: dispatch a rescue job and watch the card through the full lifecycle; it must never show
+  green-and-done while the detached job still runs.
 
 ---
 
-# 🟠 **CLAUDE WORKFLOW AGENTS STAY `active` AFTER THE WORKFLOW HAS COMPLETED**
+# 🟢 [FIXED 2026-07-29] CLAUDE WORKFLOW AGENTS STAYED `active` AFTER THE WORKFLOW COMPLETED
 
-## **STATUS: CONFIRMED, NOT FIXED. Cosmetic, but it misreports token spend as ongoing.**
+## Original bug
 
-Observed 2026-07-28. A Claude `Workflow` run (`wf_ae2c3275-7c1`, 12 diagnostic agents) rendered
-`12 running · 49 settled · Σ 1.9M tok` in the workflow panel roughly **18 minutes after every process
-involved had exited**. A later reproduction showed the same twelve cards labeled `active`, each at
-exactly `66m 9s`, while the footer still reported `12 running · 49 settled · Σ 1.9M tok`. The user
-reasonably read this as "the workflow is still running and burning my usage limit".
+A finished `Workflow` run rendered all children `active` with **identical elapsed times** and a
+stale footer (`12 running · Σ 1.9M tok`) long after every process exited, surviving thread
+reopen. (Identical timers were the diagnostic tell — staggered live agents can't tie.) Root cause:
+`deriveLatestAgentSnapshot` in `packages/client-runtime/src/state/threadAgents.ts` selected only
+the highest-revision `agent.snapshot` and ignored matching persisted `task.completed` activities,
+so the last running frame stayed authoritative on rehydration.
 
-This survives leaving and reopening the thread. Completion results exist, but the last persisted
-workflow-progress state continues to describe the diagnostic agents as non-terminal.
+## Fix
 
-Same family as _"A companion job that outlives a server restart strands its agent card forever"_
-above — a non-terminal status stays authoritative because the thing that would emit the terminal
-status died with the run — but a **different subsystem and a different tell**, so it is filed
-separately.
+- `packages/client-runtime/src/state/threadAgents.ts` (~48, ~113, ~282): hydration reconciles
+  children against recorded terminal task results, rejects results from older activations, and
+  settles source-dead workflow children; footer counts derive from the reconciled states.
+- `apps/web/src/components/AgentsPanel.tsx` (~275): settled/end-marked entries never start live
+  elapsed timers.
 
-## How to tell it apart from a genuinely live run
+## How to audit
 
-The distinguishing symptom is that **every agent shows the identical elapsed time** — first all
-twelve read `33m 7s`, and a later rendering showed all twelve at `66m 9s`. That is diagnostic:
-
-- The stranded-agent-card bug above ticks **live** (client counts `firstStartedAt` against the wall
-  clock). A workflow panel may preserve a frozen progress frame or recompute its elapsed label after
-  hydration, but it still preserves the stale non-terminal statuses.
-- Agents that really are running were started staggered and would show _different_ elapsed times.
-  Twelve identical timers cannot be twelve live processes.
-
-## Evidence used to confirm death (all four agree, and all are cheap)
-
-1. **No file has been written since the run ended.** Newest file in the workflow transcript dir was
-   `10:27:49`; `journal.jsonl` last written `10:26:45`; checked at `10:45:37` — 18 minutes silent. A
-   live agent writes to its `agent-<id>.jsonl` continuously.
-2. **No process exists.** The only long-lived `node` was from the _previous day_; everything else
-   post-dated the check and belonged to the checking session itself.
-3. **`TaskList` returns nothing.**
-4. **Internally contradictory state.** `journal.jsonl` contains recorded _final results_ for 11 of
-   the 12 agents the panel claims are `running`. An agent cannot both have returned and still be
-   running.
-
-## Practical consequences
-
-- **`Σ tok` is a total already spent, not a rate.** A stale panel does not mean tokens are still
-  accruing.
-- Do not "stop" a run on the panel's word alone. Check mtimes in the transcript dir first — if it has
-  been quiet for minutes, there is nothing to stop and `TaskStop` will report failure on an
-  already-dead task, which reads alarmingly and is meaningless.
-- Results are **not** lost when this happens. `journal.jsonl` holds each completed `agent()` call's
-  return value and can be read directly:
-
-```bash
-node -e "
-const fs=require('fs');
-const lines=fs.readFileSync('journal.jsonl','utf8').split('\n').filter(Boolean).map(l=>JSON.parse(l));
-for (const d of lines.filter(o=>o.result!==undefined)) console.log(d.agentId, JSON.stringify(d.result).slice(0,200));
-"
-```
-
-Recovering a stopped run this way is what produced
-`docs/project/nightly-motion-polish-diagnosis.md` — 11 of 12 agents' findings survived the run being
-killed.
-
-## Investigation target
-
-Trace the terminal workflow update from Claude's completed `Workflow` result through persistence,
-thread hydration, and the workflow-panel reducer. The required invariant is: once a workflow has
-returned or every child has a terminal result, reopening the thread must materialize every child as
-terminal and must never revive the last `running` progress frame.
+- Tests: `./node_modules/.bin/vp test run packages/client-runtime/src/state/threadAgents.test.ts
+apps/web/src/components/AgentsPanel.test.tsx` — returned-workflow materializes all children
+  terminal; a stale non-terminal frame with recorded results cannot revive `running` cards;
+  footer matches card states; settled timers are static.
+- App: reopen a thread with a completed workflow — zero running agents, static durations,
+  consistent footer. Note `Σ tok` is spend-to-date, not a rate. Completed `agent()` results
+  remain recoverable from the run's `journal.jsonl` regardless.
