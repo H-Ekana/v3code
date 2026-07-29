@@ -635,6 +635,10 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   // so the SDK's optional platform packages (each a ~200MB bundled executable)
   // are dead weight. The trailing dash keeps the SDK's own JS package.
   "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+  // Nothing in the packaged app enables source-map translation (no
+  // --enable-source-maps, no source-map-support), so the ~49MB of .map files
+  // across web/server/desktop bundles is pure installer and disk weight.
+  "!**/*.map",
 ] as const;
 // The WSL backend launches the server with plain `wsl.exe -- node`, which
 // cannot read inside an asar archive — and the server bundle externalizes its
