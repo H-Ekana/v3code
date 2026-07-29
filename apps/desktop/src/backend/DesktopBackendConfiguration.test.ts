@@ -142,9 +142,7 @@ describe("DesktopBackendConfiguration", () => {
         if (process.env.T3CODE_TRACE_MIN_LEVEL === undefined) {
           assert.equal(first.env.T3CODE_TRACE_MIN_LEVEL, "Warn");
         }
-        if (process.env.T3CODE_TRACE_TIMING_ENABLED === undefined) {
-          assert.equal(first.env.T3CODE_TRACE_TIMING_ENABLED, "false");
-        }
+        assert.isUndefined(first.env.T3CODE_TRACE_TIMING_ENABLED);
 
         assert.equal(first.bootstrap.mode, "desktop");
         assert.equal(first.bootstrap.noBrowser, true);

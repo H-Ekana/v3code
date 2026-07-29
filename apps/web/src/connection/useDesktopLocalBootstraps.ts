@@ -23,8 +23,10 @@ const poll = () => {
 
 const subscribe = (listener: () => void): (() => void) => {
   listeners.add(listener);
+  // Refresh on every mount so a late-arriving consumer never renders a
+  // snapshot older than one interval (matches the previous per-hook read).
+  poll();
   if (pollHandle === null) {
-    poll();
     pollHandle = setInterval(poll, DESKTOP_LOCAL_BOOTSTRAP_POLL_MS);
   }
   return () => {

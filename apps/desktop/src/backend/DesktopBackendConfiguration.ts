@@ -405,22 +405,18 @@ const buildObservabilityFragment = (observabilitySettings: BackendObservabilityS
   }),
 });
 
-// Packaged builds default the backend child's file tracer to Warn without
-// span timing — the Info-level span firehose is a steady CPU/disk cost on
-// end-user machines. Explicit T3CODE_* values in process.env keep winning
-// (extendEnv merges process.env under this object), as does a configured
-// OTLP exporter, and dev builds keep full-fidelity tracing.
+// Packaged builds default the backend child's file tracer to Warn — the
+// Info-level span firehose is a steady CPU/disk cost on end-user machines,
+// while Warn+ spans (with their log events and real timestamps) still reach
+// the trace file. The spawner spreads this object over process.env, so seed
+// the default only when the user has not set the variable themselves; a
+// configured OTLP exporter or a dev build keeps full-fidelity tracing.
 const quietBackendTraceEnvDefaults = (
   isDevelopment: boolean,
   observabilitySettings: BackendObservabilitySettings,
 ): Record<string, string> => {
   if (isDevelopment || Option.isSome(observabilitySettings.otlpTracesUrl)) return {};
-  return {
-    ...(process.env.T3CODE_TRACE_MIN_LEVEL === undefined ? { T3CODE_TRACE_MIN_LEVEL: "Warn" } : {}),
-    ...(process.env.T3CODE_TRACE_TIMING_ENABLED === undefined
-      ? { T3CODE_TRACE_TIMING_ENABLED: "false" }
-      : {}),
-  };
+  return process.env.T3CODE_TRACE_MIN_LEVEL === undefined ? { T3CODE_TRACE_MIN_LEVEL: "Warn" } : {};
 };
 
 const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolvePrimary")(

@@ -253,12 +253,11 @@ function isThermallyConstrained(snapshot: HostPowerSnapshot): boolean {
   return snapshot.thermalState === "serious" || snapshot.thermalState === "critical";
 }
 
-function resolvePowerSampleIntervalMs(
-  snapshot: HostPowerSnapshot,
-  liveSubscriberCount: number,
-): number {
+function resolvePowerSampleIntervalMs(snapshot: HostPowerSnapshot): number {
   if (snapshot.stale || snapshot.source === "unknown") {
-    return liveSubscriberCount > 0 ? SAMPLE_INTERVAL_MS : UNKNOWN_BACKGROUND_SAMPLE_INTERVAL_MS;
+    // Recovery cadence while host power is unknown; the no-subscriber clamp
+    // below keeps the background cost down.
+    return SAMPLE_INTERVAL_MS;
   }
   if (
     snapshot.suspended ||
@@ -276,7 +275,7 @@ export function resolveNativeSampleIntervalMs(
   snapshot: HostPowerSnapshot,
   liveSubscriberCount: number,
 ): number {
-  const intervalMs = resolvePowerSampleIntervalMs(snapshot, liveSubscriberCount);
+  const intervalMs = resolvePowerSampleIntervalMs(snapshot);
   if (liveSubscriberCount > 0) return intervalMs;
   // Without a live subscriber each sample only feeds the sidecar's in-memory
   // history, so a full system process enumeration every second is wasted work.
