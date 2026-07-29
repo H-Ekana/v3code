@@ -45,6 +45,7 @@ import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   primaryServerConfigAtom,
   primaryServerConfigEventAtom,
+  primaryServerObservabilityAtom,
   primaryServerWelcomeAtom,
 } from "../state/server";
 import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
@@ -281,9 +282,18 @@ function errorDetails(error: unknown): string {
 }
 
 function AuthenticatedTracingBootstrap() {
+  const observability = useAtomValue(primaryServerObservabilityAtom);
+  const otlpTracesEnabled = observability?.otlpTracesEnabled === true;
+
   useEffect(() => {
-    void configureClientTracing();
-  }, []);
+    // Client span export runs a periodic POST loop and produces a span per
+    // RPC; only pay for that when the server actually forwards traces to a
+    // configured OTLP exporter. There is no teardown API, so disabling the
+    // exporter again applies on the next launch.
+    if (otlpTracesEnabled) {
+      void configureClientTracing();
+    }
+  }, [otlpTracesEnabled]);
 
   return null;
 }
