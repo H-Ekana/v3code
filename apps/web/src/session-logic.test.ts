@@ -5,8 +5,11 @@ import {
   TurnId,
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
+import { ComposerPendingUserInputPanel } from "./components/chat/ComposerPendingUserInputPanel";
 import {
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
@@ -178,6 +181,104 @@ describe("derivePendingApprovals", () => {
 });
 
 describe("derivePendingUserInputs", () => {
+  it("hydrates a persisted unanswered structured request long after it was recorded", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-persisted",
+        createdAt: "2026-07-28T18:00:00.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        sequence: 41,
+        payload: {
+          requestId: "req-user-input-persisted",
+          questions: [
+            {
+              id: "Which recovery policy?",
+              header: "Recovery",
+              question: "Which recovery policy should be used?",
+              options: [
+                {
+                  label: "Expire",
+                  description: "Expire the stale callback and ask again",
+                },
+                {
+                  label: "Rehydrate",
+                  description: "Restore an answerable callback",
+                },
+              ],
+              multiSelect: false,
+            },
+            {
+              id: "Anything else?",
+              header: "Notes",
+              question: "Anything else to preserve?",
+              options: [],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: "later-hydrated-activity",
+        createdAt: "2026-07-28T18:30:00.000Z",
+        kind: "runtime.warning",
+        summary: "Later persisted activity",
+        tone: "info",
+        sequence: 99,
+        payload: {},
+      }),
+    ];
+
+    const pendingUserInputs = derivePendingUserInputs(activities);
+    expect(pendingUserInputs).toEqual([
+      {
+        requestId: "req-user-input-persisted",
+        createdAt: "2026-07-28T18:00:00.000Z",
+        questions: [
+          {
+            id: "Which recovery policy?",
+            header: "Recovery",
+            question: "Which recovery policy should be used?",
+            options: [
+              {
+                label: "Expire",
+                description: "Expire the stale callback and ask again",
+              },
+              {
+                label: "Rehydrate",
+                description: "Restore an answerable callback",
+              },
+            ],
+            multiSelect: false,
+          },
+          {
+            id: "Anything else?",
+            header: "Notes",
+            question: "Anything else to preserve?",
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      },
+    ]);
+
+    const markup = renderToStaticMarkup(
+      createElement(ComposerPendingUserInputPanel, {
+        pendingUserInputs,
+        respondingRequestIds: [],
+        answers: {},
+        questionIndex: 0,
+        onToggleOption: () => undefined,
+        onAdvance: () => undefined,
+      }),
+    );
+    expect(markup).toContain("composer-question-panel");
+    expect(markup).toContain("Which recovery policy should be used?");
+    expect(markup).toContain("Expire");
+    expect(markup).toContain("Rehydrate");
+  });
+
   it("tracks open structured prompts and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

@@ -1131,7 +1131,7 @@ describe("resolveThreadRowClassName", () => {
 });
 
 describe("resolveSidebarV2RowSurfaceClassName", () => {
-  it("keeps completed unseen work on a quiet neutral row surface", () => {
+  it("gives completed unseen work a branded perimeter glow", () => {
     const className = resolveSidebarV2RowSurfaceClassName({
       isActive: false,
       isSelected: false,
@@ -1140,15 +1140,14 @@ describe("resolveSidebarV2RowSurfaceClassName", () => {
       shouldRecede: false,
     });
 
-    expect(className).toContain("bg-transparent");
-    expect(className).toContain("hover:bg-sidebar-row-hover");
-    expect(className).not.toContain("ring-astro-highlight");
-    expect(className).not.toContain("color-mix");
-    expect(className).not.toContain("shadow-[");
+    expect(className).toContain("ring-astro-highlight/55");
+    expect(className).toContain("var(--primary)_42%");
+    expect(className).toContain("var(--astro-highlight)_12%");
+    expect(className).toContain("shadow-[0_0_8px");
     expect(className).toContain("motion-reduce:transition-none");
   });
 
-  it("keeps the active-route surface authoritative after unread completion", () => {
+  it("combines the active-route surface with the unread completion glow", () => {
     const className = resolveSidebarV2RowSurfaceClassName({
       isActive: true,
       isSelected: false,
@@ -1158,7 +1157,8 @@ describe("resolveSidebarV2RowSurfaceClassName", () => {
     });
 
     expect(className).toContain("bg-sidebar-row-active");
-    expect(className).not.toContain("ring-astro-highlight/55");
+    expect(className).toContain("ring-astro-highlight/55");
+    expect(className).toContain("shadow-[0_0_8px");
   });
 });
 

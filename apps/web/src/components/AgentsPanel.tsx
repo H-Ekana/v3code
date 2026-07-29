@@ -6,6 +6,7 @@ import {
 import {
   deriveAgentPanelState,
   formatAgentTokenCount,
+  isDetachedCompanionAgent,
   isTerminalAgentStatus,
   type AgentPanelGroup,
   type AgentPanelPhase,
@@ -84,6 +85,31 @@ const STATUS_LABEL: Record<ThreadAgentSnapshot["status"], string> = {
   completed: "Completed",
   failed: "Failed",
   stopped: "Stopped",
+};
+
+export type AgentExecutionMode = "launching-job" | "detached-job";
+
+/**
+ * A codex-rescue row changes authority without changing identity: first it is
+ * the short-lived Claude forwarder, then `runId` identifies the detached Codex
+ * companion job whose watcher owns the card. Make that handoff visible instead
+ * of asking users to infer it from the provider corner mark or elapsed timer.
+ */
+export function resolveAgentExecutionMode(agent: ThreadAgentSnapshot): AgentExecutionMode | null {
+  if (isDetachedCompanionAgent(agent)) return "detached-job";
+  const isCodexRescue =
+    agent.agentType === "codex:codex-rescue" &&
+    agent.delegateProvider !== undefined &&
+    agent.delegateProvider !== agent.provider;
+  if (!isCodexRescue) return null;
+  return agent.status === "pending" || agent.status === "running" || agent.status === "waiting"
+    ? "launching-job"
+    : null;
+}
+
+const AGENT_EXECUTION_MODE_LABEL: Record<AgentExecutionMode, string> = {
+  "launching-job": "Launching job",
+  "detached-job": "Detached job",
 };
 
 const EMPTY_AGENT_SNAPSHOTS: ReadonlyArray<ThreadAgentSnapshot> = [];
@@ -272,8 +298,14 @@ function AgentProviderIcon({ agent }: { agent: ThreadAgentSnapshot }) {
  * so per-second updates never cause React commits. Frozen once `endedAt` is
  * set or the agent settles.
  */
-function AgentElapsed({ agent }: { agent: ThreadAgentSnapshot }) {
-  const textRef = useRef<HTMLSpanElement>(null);
+export function resolveAgentElapsedTiming(
+  agent: ThreadAgentSnapshot,
+  nowMs = Date.now(),
+): {
+  readonly initialText: string | null;
+  readonly shouldTick: boolean;
+  readonly startMs: number | null;
+} {
   const settled = isTerminalAgentStatus(agent.status) || agent.status === "idle";
   // Current-activation start (falls back to firstStartedAt for pre-field
   // snapshots) so a resumed agent's timer excludes prior runs and idle gaps.
@@ -282,11 +314,23 @@ function AgentElapsed({ agent }: { agent: ThreadAgentSnapshot }) {
   const endMs =
     (agent.endedAt ? parseTimestampDate(agent.endedAt)?.getTime() : null) ??
     (settled ? (parseTimestampDate(agent.lastActivityAt)?.getTime() ?? null) : null);
+  // An end marker is authoritative even if its timestamp is malformed. In
+  // that case omit the duration instead of silently turning it into a live
+  // wall-clock timer. Settled rows likewise never tick.
+  const shouldTick = !settled && agent.endedAt === undefined;
   const initialText =
-    startMs === null ? null : formatDuration(Math.max(0, (endMs ?? Date.now()) - startMs));
+    startMs === null || (!shouldTick && endMs === null)
+      ? null
+      : formatDuration(Math.max(0, (endMs ?? nowMs) - startMs));
+  return { initialText, shouldTick, startMs };
+}
+
+function AgentElapsed({ agent }: { agent: ThreadAgentSnapshot }) {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const { initialText, shouldTick, startMs } = resolveAgentElapsedTiming(agent);
 
   useEffect(() => {
-    if (startMs === null || endMs !== null) return;
+    if (startMs === null || !shouldTick) return;
     const update = () => {
       if (textRef.current) {
         textRef.current.textContent = formatDuration(Math.max(0, Date.now() - startMs));
@@ -295,7 +339,7 @@ function AgentElapsed({ agent }: { agent: ThreadAgentSnapshot }) {
     update();
     const id = setInterval(update, 1000);
     return () => clearInterval(id);
-  }, [startMs, endMs]);
+  }, [shouldTick, startMs]);
 
   if (initialText === null) {
     return null;
@@ -337,6 +381,7 @@ function AgentCard({
   const hasFeed = agent.recentActivity.length > 0;
   const hasDetails = hasFeed || shells.length > 0;
   const isLive = agent.status === "running" || agent.status === "waiting";
+  const executionMode = resolveAgentExecutionMode(agent);
   // The Codex companion writes its live job phase (investigating | editing |
   // running | verifying | reviewing | finalizing) into `phaseTitle` on every
   // watcher tick, and nothing ever rendered it — the richest work-kind signal
@@ -393,6 +438,16 @@ function AgentCard({
               {agent.agentType}
             </Badge>
           ) : null}
+          {executionMode ? (
+            <Badge
+              variant="outline"
+              size="sm"
+              className="shrink-0 text-muted-foreground"
+              data-agent-execution-mode={executionMode}
+            >
+              {AGENT_EXECUTION_MODE_LABEL[executionMode]}
+            </Badge>
+          ) : null}
           {agent.model ? (
             <Badge variant="outline" size="sm" className="shrink-0 text-muted-foreground">
               {agent.model}
@@ -431,14 +486,16 @@ function AgentCard({
           </div>
         ) : null}
         <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-          {agent.usage ? (
+          {executionMode === "detached-job" ? (
+            <span title="The companion does not expose Codex token usage">Usage unavailable</span>
+          ) : agent.usage ? (
             <span className="font-mono tabular-nums text-foreground">
               {formatAgentTokenCount(agent.usage.totalTokens)}{" "}
               <span className="text-muted-foreground">tok</span>
               {agent.status === "running" ? <span className="text-sky-500"> ↑</span> : null}
             </span>
           ) : null}
-          {agent.usage?.toolUses ? (
+          {executionMode !== "detached-job" && agent.usage?.toolUses ? (
             <>
               <span className="text-border">·</span>
               <span>{agent.usage.toolUses} tools</span>

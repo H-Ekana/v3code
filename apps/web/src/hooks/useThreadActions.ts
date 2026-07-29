@@ -3,7 +3,11 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  type AtomCommandResult,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { canSettle, canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -14,7 +18,6 @@ import { useCallback, useMemo, useRef } from "react";
 
 import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
-import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
@@ -94,8 +97,71 @@ export class ThreadSnoozeBlockedError extends Schema.TaggedErrorClass<ThreadSnoo
   }
 }
 
+interface DurableThreadDeleteOptions<A, E> {
+  readonly target: ScopedThreadRef;
+  readonly providerName: string | null | undefined;
+  readonly dispatch: () => Promise<AtomCommandResult<A, E>>;
+}
+
+export function formatThreadDeleteDiagnostic(
+  providerName: string | null | undefined,
+  threadId: ThreadId,
+): string {
+  const provider = providerName?.trim() || "Unknown provider";
+  const threadIdSuffix = threadId.slice(-8);
+  return `${provider} thread …${threadIdSuffix}`;
+}
+
+export async function dispatchDurableThreadDelete<A, E>({
+  target,
+  providerName,
+  dispatch,
+}: DurableThreadDeleteOptions<A, E>): Promise<AtomCommandResult<A, E>> {
+  const diagnostic = formatThreadDeleteDiagnostic(providerName, target.threadId);
+  const logContext = {
+    environmentId: target.environmentId,
+    providerName: providerName?.trim() || "Unknown provider",
+    threadId: target.threadId,
+    threadIdSuffix: target.threadId.slice(-8),
+  };
+
+  console.info(`[thread-delete] dispatching durable delete for ${diagnostic}`, logContext);
+  let result: AtomCommandResult<A, E>;
+  try {
+    result = await dispatch();
+  } catch (defect) {
+    result = AsyncResult.failure<A, E>(Cause.die(defect));
+  }
+  if (result._tag === "Success") {
+    console.info(`[thread-delete] durable delete completed for ${diagnostic}`, logContext);
+    return result;
+  }
+
+  const error = squashAtomCommandFailure(result);
+  const errorMessage =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+      ? error.message.trim()
+      : "";
+  const message = errorMessage || "The delete command did not complete.";
+  console.error(`[thread-delete] durable delete failed for ${diagnostic}`, {
+    ...logContext,
+    error,
+  });
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Could not delete thread",
+      description: `${diagnostic} was not deleted. Try Delete again. ${message}`,
+      data: { threadRef: target },
+    }),
+  );
+  return result;
+}
+
 export function useThreadActions() {
-  const closeTerminal = useAtomCommand(terminalEnvironment.close);
   const archiveThreadMutation = useAtomCommand(threadEnvironment.archive, {
     reportFailure: false,
   });
@@ -117,7 +183,6 @@ export function useThreadActions() {
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
     reportFailure: false,
   });
-  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession);
   const removeWorktree = useAtomCommand(vcsEnvironment.removeWorktree, {
     reportFailure: false,
   });
@@ -219,9 +284,14 @@ export function useThreadActions() {
       const resolved = resolveThreadTarget(target);
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
-        const result = await deleteThreadMutation({
-          environmentId: target.environmentId,
-          input: { threadId: target.threadId },
+        const result = await dispatchDurableThreadDelete({
+          target,
+          providerName: null,
+          dispatch: () =>
+            deleteThreadMutation({
+              environmentId: target.environmentId,
+              input: { threadId: target.threadId },
+            }),
         });
         if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
@@ -277,18 +347,6 @@ export function useThreadActions() {
         shouldDeleteWorktree = confirmationResult.value;
       }
 
-      if (thread.session && thread.session.status !== "stopped") {
-        await stopThreadSession({
-          environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId },
-        });
-      }
-
-      await closeTerminal({
-        environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId, deleteHistory: true },
-      });
-
       const deletedThreadIds = deletedIds ?? new Set<ThreadId>();
       const currentRouteThreadRef = getCurrentRouteThreadRef();
       const shouldNavigateToFallback =
@@ -300,9 +358,14 @@ export function useThreadActions() {
         deletedThreadIds,
         sortOrder: sidebarThreadSortOrder,
       });
-      const deleteResult = await deleteThreadMutation({
-        environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId },
+      const deleteResult = await dispatchDurableThreadDelete({
+        target: threadRef,
+        providerName: thread.session?.providerName,
+        dispatch: () =>
+          deleteThreadMutation({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId },
+          }),
       });
       if (deleteResult._tag === "Failure") {
         return deleteResult;
@@ -379,12 +442,21 @@ export function useThreadActions() {
       if (cleanupFailure) {
         const error = squashAtomCommandFailure(cleanupFailure);
         const message = error instanceof Error ? error.message : "Unknown error removing worktree.";
-        console.error("Failed to remove orphaned worktree after thread deletion", {
-          threadId: threadRef.threadId,
-          projectCwd: threadProject.workspaceRoot,
-          worktreePath: orphanedWorktreePath,
-          error,
-        });
+        const deletionDiagnostic = formatThreadDeleteDiagnostic(
+          thread.session?.providerName,
+          threadRef.threadId,
+        );
+        console.error(
+          `Failed to remove orphaned worktree after deletion of ${deletionDiagnostic}`,
+          {
+            providerName: thread.session?.providerName ?? "Unknown provider",
+            threadId: threadRef.threadId,
+            threadIdSuffix: threadRef.threadId.slice(-8),
+            projectCwd: threadProject.workspaceRoot,
+            worktreePath: orphanedWorktreePath,
+            error,
+          },
+        );
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -400,7 +472,6 @@ export function useThreadActions() {
       clearComposerDraftForThread,
       clearProjectDraftThreadById,
       clearTerminalUiState,
-      closeTerminal,
       deleteThreadMutation,
       getCurrentRouteThreadRef,
       refreshVcsStatus,
@@ -408,7 +479,6 @@ export function useThreadActions() {
       router,
       resolveThreadTarget,
       sidebarThreadSortOrder,
-      stopThreadSession,
     ],
   );
 

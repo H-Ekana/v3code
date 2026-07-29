@@ -437,21 +437,16 @@ function parseUserInputQuestions(
         .map<UserInputQuestion["options"][number] | null>((option) => {
           if (!option || typeof option !== "object") return null;
           const optionRecord = option as Record<string, unknown>;
-          if (
-            typeof optionRecord.label !== "string" ||
-            typeof optionRecord.description !== "string"
-          ) {
+          if (typeof optionRecord.label !== "string") {
             return null;
           }
           return {
             label: optionRecord.label,
-            description: optionRecord.description,
+            description:
+              typeof optionRecord.description === "string" ? optionRecord.description : "",
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
-        return null;
-      }
       return {
         id: question.id,
         header: question.header,

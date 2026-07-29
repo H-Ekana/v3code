@@ -2,7 +2,11 @@ import { ProviderDriverKind, type ThreadAgentSnapshot } from "@t3tools/contracts
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import AgentsPanel, { computeAgentLifecycleAccents } from "./AgentsPanel";
+import AgentsPanel, {
+  computeAgentLifecycleAccents,
+  resolveAgentElapsedTiming,
+  resolveAgentExecutionMode,
+} from "./AgentsPanel";
 
 const TIMESTAMP = "2026-07-27T10:00:00.000Z";
 
@@ -97,6 +101,75 @@ describe("AgentsPanel provider identity", () => {
   });
 });
 
+describe("detached companion job lifecycle", () => {
+  const rescueAgent = (overrides: Partial<ThreadAgentSnapshot> = {}): ThreadAgentSnapshot =>
+    agent({
+      agentId: "codex-rescue",
+      provider: ProviderDriverKind.make("claudeAgent"),
+      delegateProvider: ProviderDriverKind.make("codex"),
+      agentType: "codex:codex-rescue",
+      name: "Trace detached work",
+      ...overrides,
+    });
+
+  it("labels the live forwarder as launching before a companion job takes ownership", () => {
+    const snapshot = rescueAgent();
+    const markup = renderAgent(snapshot);
+
+    expect(resolveAgentExecutionMode(snapshot)).toBe("launching-job");
+    expect(markup).toContain('data-agent-execution-mode="launching-job"');
+    expect(markup).toContain("Launching job");
+    expect(markup).not.toContain("Detached job");
+  });
+
+  it("labels the card as detached once the companion run id is present", () => {
+    const snapshot = rescueAgent({
+      runId: "task-live-123",
+      phaseTitle: "verifying",
+      currentActivity: "Running focused tests",
+      usage: { totalTokens: 12_345, toolUses: 7 },
+    });
+    const markup = renderAgent(snapshot);
+
+    expect(resolveAgentExecutionMode(snapshot)).toBe("detached-job");
+    expect(markup).toContain('data-agent-execution-mode="detached-job"');
+    expect(markup).toContain("Detached job");
+    expect(markup).toContain("verifying");
+    expect(markup).toContain("Running focused tests");
+    expect(markup).toContain("Usage unavailable");
+    expect(markup).not.toContain("12.3k");
+    expect(markup).not.toContain("7 tools");
+  });
+
+  it("retains detached provenance when the companion job settles", () => {
+    const snapshot = rescueAgent({
+      runId: "task-done-123",
+      status: "completed",
+      endedAt: "2026-07-27T10:05:00.000Z",
+      resultSummary: "Focused tests passed",
+    });
+    const markup = renderAgent(snapshot);
+
+    expect(resolveAgentExecutionMode(snapshot)).toBe("detached-job");
+    expect(markup).toContain('data-agent-execution-mode="detached-job"');
+    expect(markup).toContain("Detached job");
+    expect(markup).toContain("Focused tests passed");
+  });
+
+  it("does not infer detachment from a delegated provider alone", () => {
+    const snapshot = agent({
+      agentId: "delegated-but-in-process",
+      provider: ProviderDriverKind.make("claudeAgent"),
+      delegateProvider: ProviderDriverKind.make("codex"),
+      agentType: "custom-delegator",
+      runId: "workflow-run",
+    });
+
+    expect(resolveAgentExecutionMode(snapshot)).toBeNull();
+    expect(renderAgent(snapshot)).not.toContain("data-agent-execution-mode");
+  });
+});
+
 describe("AgentsPanel sections", () => {
   it("shows completed sub-agents under an expanded Finished toggle by default", () => {
     const markup = renderAgent(
@@ -139,6 +212,37 @@ describe("AgentsPanel sections", () => {
     expect(markup).toContain("Running sibling");
     expect(markup).toContain("Completed sibling");
     expect(markup).toContain('aria-label="Finished sub-agents · 1"');
+  });
+
+  it("renders workflow card states and footer counts from the same settled roster", () => {
+    const workflow = agent({
+      agentId: "workflow",
+      provider: ProviderDriverKind.make("claudeAgent"),
+      kind: "workflow",
+      name: "Finished workflow",
+      status: "completed",
+      phases: [{ index: 0, title: "Diagnose" }],
+    });
+    const children = ["first", "second"].map((agentId) =>
+      agent({
+        agentId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        kind: "workflow_agent",
+        name: agentId,
+        status: "stopped",
+        parentAgentId: "workflow",
+        phaseIndex: 0,
+        phaseTitle: "Diagnose",
+        endedAt: "2026-07-27T10:00:05.000Z",
+      }),
+    );
+    const markup = renderToStaticMarkup(
+      <AgentsPanel agents={[workflow, ...children]} mode="embedded" />,
+    );
+
+    expect(markup.match(/class="sr-only">Stopped<\/span>/g)).toHaveLength(2);
+    expect(markup).toContain("2 settled");
+    expect(markup).not.toContain(" running</span>");
   });
 
   it("omits the Finished toggle when no sub-agents are settled", () => {
@@ -246,6 +350,36 @@ describe("AgentCard work kind", () => {
 
     expect(markup).toContain("Reading the diff");
     expect(markup).not.toContain("Inspect");
+  });
+});
+
+describe("AgentElapsed", () => {
+  it("keeps a source-dead workflow child static at its recorded end", () => {
+    const timing = resolveAgentElapsedTiming(
+      agent({
+        agentId: "source-dead",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        status: "stopped",
+        firstStartedAt: "2026-07-27T10:00:00.000Z",
+        endedAt: "2026-07-27T10:00:05.000Z",
+      }),
+      Date.parse("2026-07-27T12:00:00.000Z"),
+    );
+
+    expect(timing).toMatchObject({ initialText: "5.0s", shouldTick: false });
+  });
+
+  it("never starts a live timer for settled hydration with no valid end timestamp", () => {
+    const timing = resolveAgentElapsedTiming(
+      agent({
+        agentId: "settled-invalid-end",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        status: "completed",
+        lastActivityAt: "not-a-timestamp",
+      }),
+    );
+
+    expect(timing).toMatchObject({ initialText: null, shouldTick: false });
   });
 });
 

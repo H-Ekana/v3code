@@ -458,10 +458,12 @@ export function resolveSidebarV2RowSurfaceClassName(input: {
       : input.isSelected
         ? "bg-sidebar-row-selected text-sidebar-foreground"
         : input.isUnread
-          ? "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover"
+          ? "bg-[color-mix(in_srgb,var(--sidebar-row-active)_84%,var(--primary))] text-sidebar-foreground hover:bg-[color-mix(in_srgb,var(--sidebar-row-active)_78%,var(--primary))]"
           : input.shouldRecede
             ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
             : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+    input.isUnread &&
+      "z-10 ring-1 ring-inset ring-astro-highlight/55 shadow-[0_0_8px_color-mix(in_srgb,var(--primary)_42%,transparent),inset_0_0_12px_color-mix(in_srgb,var(--astro-highlight)_12%,transparent)] hover:ring-astro-highlight/70",
     input.isInFlight && !input.isActive && !input.isSelected && "opacity-70 hover:opacity-100",
   );
 }
