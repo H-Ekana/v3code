@@ -675,7 +675,7 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect("keeps replayed updates synchronizing until the completion marker arrives", () =>
+  it.effect("collapses persisted resume events and ignores replay below the hydrated cursor", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_THREAD, completionMarker: true });
       yield* awaitThreadState(
@@ -683,26 +683,52 @@ describe("EnvironmentThreads", () => {
         (value) => value.status === "synchronizing" && Option.isSome(value.data),
       );
       expect(yield* Ref.get(harness.lastRequestCompletionMarker)).toBe(true);
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+      yield* collectPublished(harness.observed);
 
+      // A defensive replay at/below the hydrated cursor is ignored. Newer
+      // persisted events are reduced into the authoritative value, but none of
+      // their intermediate states may publish as live activity.
       yield* Queue.offer(
         harness.inputs,
-        titleUpdated("Caught-up title", CACHED_SNAPSHOT_SEQUENCE + 1),
+        titleUpdated("Already hydrated", CACHED_SNAPSHOT_SEQUENCE),
       );
-      const catchingUp = yield* awaitThreadState(
-        harness.observed,
-        (value) =>
-          value.status === "synchronizing" &&
-          Option.isSome(value.data) &&
-          value.data.value.title === "Caught-up title",
+      yield* Queue.offer(harness.inputs, titleUpdated("Catch-up 1", CACHED_SNAPSHOT_SEQUENCE + 1));
+      yield* Queue.offer(harness.inputs, titleUpdated("Catch-up 2", CACHED_SNAPSHOT_SEQUENCE + 2));
+      yield* settle;
+      yield* TestClock.adjust(PUBLISH_WINDOW);
+      yield* settle;
+
+      const duringHydration = yield* collectPublished(harness.observed);
+      expect(
+        duringHydration.flatMap((value) =>
+          Option.match(value.data, { onNone: () => [], onSome: (thread) => [thread.title] }),
+        ),
+      ).toEqual([]);
+      expect(Option.getOrThrow((yield* Ref.get(harness.latest)).data).title).toBe(
+        BASE_THREAD.title,
       );
-      expect(catchingUp.status).toBe("synchronizing");
 
       yield* Queue.offer(harness.inputs, synchronized());
-      const live = yield* awaitThreadState(
+      const hydrated = yield* awaitThreadState(
         harness.observed,
         (value) => value.status === "live" && Option.isSome(value.data),
       );
-      expect(Option.getOrThrow(live.data).title).toBe("Caught-up title");
+      expect(Option.getOrThrow(hydrated.data).title).toBe("Catch-up 2");
+
+      // Once hydration has committed, a genuinely new event still publishes.
+      yield* Queue.offer(
+        harness.inputs,
+        titleUpdated("Actually live", CACHED_SNAPSHOT_SEQUENCE + 3),
+      );
+      const live = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          value.status === "live" &&
+          Option.isSome(value.data) &&
+          value.data.value.title === "Actually live",
+      );
+      expect(Option.getOrThrow(live.data).title).toBe("Actually live");
     }),
   );
 

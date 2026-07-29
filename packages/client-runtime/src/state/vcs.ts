@@ -23,7 +23,11 @@ import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
 
 const OFFLINE_BRANCH_LIST_LIMIT = 100;
-const VCS_REFS_REVALIDATE_INTERVAL = "5 seconds";
+// Each refresh fans out to ~6 git subprocesses on the server, and several
+// listRefs atoms are typically subscribed at once (branch toolbar, diff
+// panel). At 5 seconds this produced continuous multi-per-second git spawn
+// churn; branch lists do not change often enough to justify that.
+const VCS_REFS_REVALIDATE_INTERVAL = "30 seconds";
 
 function canUseVcsRefsCache(input: VcsListRefsInput): boolean {
   return (

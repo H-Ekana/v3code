@@ -25,7 +25,12 @@ const persistedAgent = {
   updatedAt: "2026-07-21T03:52:03.936Z",
 };
 
-function activity(kind: string, payload: unknown, sequence: number): OrchestrationThreadActivity {
+function activity(
+  kind: string,
+  payload: unknown,
+  sequence: number,
+  createdAt = "2026-07-21T03:52:03.936Z",
+): OrchestrationThreadActivity {
   return {
     id: `evt-${sequence}`,
     tone: "info",
@@ -34,8 +39,37 @@ function activity(kind: string, payload: unknown, sequence: number): Orchestrati
     payload,
     turnId: null,
     sequence,
-    createdAt: "2026-07-21T03:52:03.936Z",
+    createdAt,
   } as OrchestrationThreadActivity;
+}
+
+function staleWorkflowRoster(): ReadonlyArray<ThreadAgentSnapshot> {
+  const workflow = {
+    ...persistedAgent,
+    agentId: "wf-1",
+    kind: "workflow",
+    name: "diagnostic workflow",
+    status: "running",
+    currentActivity: "Collecting workflow results",
+    phases: [{ index: 0, title: "Diagnose" }],
+  } as unknown as ThreadAgentSnapshot;
+  const first = {
+    ...persistedAgent,
+    agentId: "wf-1:wf:0",
+    kind: "workflow_agent",
+    name: "First diagnostic",
+    status: "running",
+    parentAgentId: "wf-1",
+    phaseIndex: 0,
+    phaseTitle: "Diagnose",
+    currentActivity: "Writing final report",
+  } as unknown as ThreadAgentSnapshot;
+  const second = {
+    ...first,
+    agentId: "wf-1:wf:1",
+    name: "Second diagnostic",
+  } as unknown as ThreadAgentSnapshot;
+  return [workflow, first, second];
 }
 
 describe("deriveLatestAgentSnapshot", () => {
@@ -49,6 +83,106 @@ describe("deriveLatestAgentSnapshot", () => {
     expect(agents[0]?.status).toBe("completed");
     expect(agents[0]?.usage?.totalTokens).toBe(22_798);
     expect(agents[0]?.resultSummary).toBe("Hi! How can I help you today?");
+  });
+
+  it("hydrates a returned workflow with every child terminal", () => {
+    const agents = deriveLatestAgentSnapshot([
+      activity(
+        "task.completed",
+        { taskId: "wf-1", status: "completed", summary: "Workflow returned" },
+        10,
+        "2026-07-21T04:00:00.000Z",
+      ),
+      // The contradictory frame was persisted after the return and still says
+      // both children are running. Terminal evidence must outrank it.
+      activity(
+        "agent.snapshot",
+        { agents: staleWorkflowRoster(), revision: 7 },
+        11,
+        "2026-07-21T04:00:01.000Z",
+      ),
+    ]);
+
+    expect(agents.map((agent) => agent.status)).toEqual(["completed", "stopped", "stopped"]);
+    expect(agents.every((agent) => agent.endedAt === "2026-07-21T04:00:00.000Z")).toBe(true);
+    expect(agents.every((agent) => agent.currentActivity === undefined)).toBe(true);
+  });
+
+  it("does not revive stale running cards when every workflow child recorded a result", () => {
+    const agents = deriveLatestAgentSnapshot([
+      activity(
+        "task.completed",
+        { taskId: "wf-1:wf:0", status: "completed", summary: "First result" },
+        20,
+        "2026-07-21T04:01:00.000Z",
+      ),
+      activity(
+        "task.completed",
+        { taskId: "wf-1:wf:1", status: "failed", summary: "Second result" },
+        21,
+        "2026-07-21T04:01:01.000Z",
+      ),
+      activity(
+        "agent.snapshot",
+        { agents: staleWorkflowRoster(), revision: 8 },
+        22,
+        "2026-07-21T04:01:02.000Z",
+      ),
+    ]);
+
+    expect(agents.map((agent) => agent.status)).toEqual(["completed", "completed", "failed"]);
+    expect(agents.slice(1).map((agent) => agent.resultSummary)).toEqual([
+      "First result",
+      "Second result",
+    ]);
+    expect(agents.some((agent) => agent.status === "running")).toBe(false);
+  });
+
+  it("keeps a reactivated workflow child live when its recorded result belongs to an older run", () => {
+    const roster = staleWorkflowRoster().map((agent) =>
+      agent.agentId === "wf-1:wf:0"
+        ? { ...agent, lastStartedAt: "2026-07-21T05:00:00.000Z" }
+        : agent,
+    );
+    const agents = deriveLatestAgentSnapshot([
+      activity(
+        "task.completed",
+        { taskId: "wf-1:wf:0", status: "completed", summary: "Earlier result" },
+        25,
+        "2026-07-21T04:01:00.000Z",
+      ),
+      activity("agent.snapshot", { agents: roster, revision: 9 }, 26, "2026-07-21T05:00:01.000Z"),
+    ]);
+
+    expect(agents.find((agent) => agent.agentId === "wf-1:wf:0")?.status).toBe("running");
+  });
+
+  it("keeps hydrated footer counts equal to the terminal workflow cards", () => {
+    const agents = deriveLatestAgentSnapshot([
+      activity(
+        "task.completed",
+        { taskId: "wf-1", status: "completed", summary: "Workflow returned" },
+        30,
+        "2026-07-21T04:02:00.000Z",
+      ),
+      activity(
+        "agent.snapshot",
+        { agents: staleWorkflowRoster(), revision: 9 },
+        31,
+        "2026-07-21T04:02:01.000Z",
+      ),
+    ]);
+    const state = deriveAgentPanelState(agents);
+    const cards = state.groups.flatMap((group) => [
+      ...group.phases.flatMap((phase) => phase.agents),
+      ...group.rest,
+    ]);
+
+    expect(cards).toHaveLength(2);
+    expect(cards.every((card) => card.status === "stopped")).toBe(true);
+    expect(state.runningCount).toBe(0);
+    expect(state.waitingCount).toBe(0);
+    expect(state.settledCount).toBe(cards.length);
   });
 
   it("treats the newest agents array as authoritative even when its rows fail to decode", () => {
@@ -87,6 +221,25 @@ describe("deriveAgentPanelState", () => {
   const base = deriveLatestAgentSnapshot([
     activity("agent.snapshot", { agents: [persistedAgent] }, 1),
   ]);
+
+  it("excludes thin-forwarder usage after a detached companion handoff", () => {
+    const ordinary: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "ordinary",
+    };
+    const detached: ThreadAgentSnapshot = {
+      ...(base[0] as ThreadAgentSnapshot),
+      agentId: "rescue",
+      provider: "claudeAgent" as ThreadAgentSnapshot["provider"],
+      delegateProvider: "codex" as ThreadAgentSnapshot["provider"],
+      agentType: "codex:codex-rescue",
+      runId: "task-live-123",
+    };
+
+    const state = deriveAgentPanelState([ordinary, detached]);
+
+    expect(state.totalTokens).toBe(ordinary.usage?.totalTokens);
+  });
 
   it("counts settled agents and sums tokens", () => {
     const state = deriveAgentPanelState(base);

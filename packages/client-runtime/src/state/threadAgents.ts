@@ -21,6 +21,13 @@ interface RosterCandidate {
   readonly revision: number;
 }
 
+interface TerminalTaskEvidence {
+  readonly taskId: string;
+  readonly status: "completed" | "failed" | "stopped";
+  readonly completedAt: string;
+  readonly summary?: string;
+}
+
 function peekRoster(payload: unknown): RosterCandidate | undefined {
   if (payload === null || typeof payload !== "object") {
     return undefined;
@@ -39,6 +46,147 @@ function peekRoster(payload: unknown): RosterCandidate | undefined {
         ? record.revision
         : -1,
   };
+}
+
+function peekTerminalTaskEvidence(
+  activity: OrchestrationThreadActivity,
+): TerminalTaskEvidence | undefined {
+  if (
+    activity.kind !== "task.completed" ||
+    activity.payload === null ||
+    typeof activity.payload !== "object"
+  ) {
+    return undefined;
+  }
+  const payload = activity.payload as {
+    taskId?: unknown;
+    status?: unknown;
+    summary?: unknown;
+    detail?: unknown;
+  };
+  if (
+    typeof payload.taskId !== "string" ||
+    (payload.status !== "completed" && payload.status !== "failed" && payload.status !== "stopped")
+  ) {
+    return undefined;
+  }
+  const summary =
+    typeof payload.summary === "string"
+      ? payload.summary
+      : typeof payload.detail === "string"
+        ? payload.detail
+        : undefined;
+  return {
+    taskId: payload.taskId,
+    status: payload.status,
+    completedAt: activity.createdAt,
+    ...(summary ? { summary } : {}),
+  };
+}
+
+function evidenceBelongsToCurrentActivation(
+  agent: ThreadAgentSnapshot,
+  evidence: TerminalTaskEvidence,
+): boolean {
+  const startedAt = Date.parse(agent.lastStartedAt ?? agent.firstStartedAt);
+  const completedAt = Date.parse(evidence.completedAt);
+  // A persisted completion with the same task id is authoritative when either
+  // timestamp is legacy/unparseable. When both are valid, reject only evidence
+  // from an earlier activation of a resumable task id.
+  return Number.isNaN(startedAt) || Number.isNaN(completedAt) || completedAt >= startedAt;
+}
+
+function settleAgentFromEvidence(
+  agent: ThreadAgentSnapshot,
+  evidence: TerminalTaskEvidence,
+): ThreadAgentSnapshot {
+  const { currentActivity, ...rest } = agent;
+  void currentActivity;
+  return {
+    ...rest,
+    status: evidence.status,
+    endedAt: evidence.completedAt,
+    ...(evidence.summary ? { resultSummary: evidence.summary } : {}),
+  };
+}
+
+function reconcileTerminalTaskEvidence(
+  agents: ReadonlyArray<ThreadAgentSnapshot>,
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyArray<ThreadAgentSnapshot> {
+  const terminalByTaskId = new Map<string, TerminalTaskEvidence>();
+  for (const activity of activities) {
+    const evidence = peekTerminalTaskEvidence(activity);
+    if (evidence) {
+      // Activity order is chronological in hydrated thread detail. A later
+      // terminal result for a reused task id supersedes an earlier activation.
+      terminalByTaskId.set(evidence.taskId, evidence);
+    }
+  }
+
+  const nextById = new Map(agents.map((agent) => [String(agent.agentId), agent]));
+  for (const agent of agents) {
+    const evidence = terminalByTaskId.get(String(agent.agentId));
+    if (evidence && evidenceBelongsToCurrentActivation(agent, evidence)) {
+      nextById.set(String(agent.agentId), settleAgentFromEvidence(agent, evidence));
+    }
+  }
+
+  const workflows = agents.filter((agent) => agent.kind === "workflow");
+  for (const originalWorkflow of workflows) {
+    const workflowId = String(originalWorkflow.agentId);
+    const workflow = nextById.get(workflowId) ?? originalWorkflow;
+    const originalChildren = agents.filter(
+      (agent) =>
+        agent.kind === "workflow_agent" && agent.parentAgentId === originalWorkflow.agentId,
+    );
+    const children = originalChildren.map((child) => nextById.get(String(child.agentId)) ?? child);
+    const allChildrenTerminal =
+      children.length > 0 &&
+      children.every((child) => THREAD_AGENT_TERMINAL_STATUSES.has(child.status));
+    const workflowAlreadySettled =
+      workflow.status === "idle" || THREAD_AGENT_TERMINAL_STATUSES.has(workflow.status);
+    if (!allChildrenTerminal && !workflowAlreadySettled) {
+      continue;
+    }
+
+    const latestChildCompletionAt = children
+      .filter((child) => THREAD_AGENT_TERMINAL_STATUSES.has(child.status))
+      .map((child) => child.endedAt ?? child.lastActivityAt)
+      .sort()
+      .at(-1);
+    const sourceEndedAt = workflow.endedAt ?? latestChildCompletionAt ?? workflow.lastActivityAt;
+
+    if (allChildrenTerminal && !workflowAlreadySettled) {
+      nextById.set(
+        workflowId,
+        settleAgentFromEvidence(workflow, {
+          taskId: workflowId,
+          status: "completed",
+          completedAt: sourceEndedAt,
+        }),
+      );
+    }
+
+    for (const child of children) {
+      if (child.status === "idle" || THREAD_AGENT_TERMINAL_STATUSES.has(child.status)) {
+        continue;
+      }
+      // A returned/settled workflow has no live source left that can advance a
+      // stale progress-frame child. Do not claim it succeeded without its own
+      // result; settle it neutrally at the workflow's terminal boundary.
+      nextById.set(
+        String(child.agentId),
+        settleAgentFromEvidence(child, {
+          taskId: String(child.agentId),
+          status: "stopped",
+          completedAt: sourceEndedAt,
+        }),
+      );
+    }
+  }
+
+  return agents.map((agent) => nextById.get(String(agent.agentId)) ?? agent);
 }
 
 export function deriveLatestAgentSnapshot(
@@ -71,7 +219,20 @@ export function deriveLatestAgentSnapshot(
       decoded.push(result.value);
     }
   }
-  return decoded;
+  // The roster is the latest progress frame, not an authority allowed to
+  // contradict terminal results persisted beside it. Reconcile only after
+  // decoding the winning roster so a stale non-terminal frame cannot revive a
+  // returned workflow or a child whose current activation recorded a result.
+  return reconcileTerminalTaskEvidence(decoded, activities);
+}
+
+export function isDetachedCompanionAgent(agent: ThreadAgentSnapshot): boolean {
+  return (
+    agent.agentType === "codex:codex-rescue" &&
+    agent.delegateProvider !== undefined &&
+    agent.delegateProvider !== agent.provider &&
+    agent.runId !== undefined
+  );
 }
 
 export function isTerminalAgentStatus(status: ThreadAgentSnapshot["status"]): boolean {
@@ -236,7 +397,13 @@ export function deriveAgentPanelState(agents: ReadonlyArray<ThreadAgentSnapshot>
       } else if (agent.status === "waiting") waitingCount += 1;
       else settledCount += 1; // idle + terminal
     }
-    if (!isContainer || !workflowsWithMembers.has(agent.agentId)) {
+    if (
+      (!isContainer || !workflowsWithMembers.has(agent.agentId)) &&
+      !isDetachedCompanionAgent(agent)
+    ) {
+      // The companion exposes no Codex usage. Once the row hands off, its
+      // retained count belongs to the thin forwarder and must not be reported
+      // as the detached job's token total.
       totalTokens += agent.usage?.totalTokens ?? 0;
     }
   }

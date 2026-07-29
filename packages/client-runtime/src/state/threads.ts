@@ -210,7 +210,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 
   const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
     thread: OrchestrationThread,
-    options: { readonly publish: "immediate" | "coalesced" },
+    options: { readonly publish: "immediate" | "coalesced" | "deferred" },
   ) {
     const waiting = yield* Ref.get(awaitingCompletion);
     yield* writeState(() => ({
@@ -218,7 +218,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       status: waiting ? "synchronizing" : "live",
       error: Option.none(),
     }));
-    yield* options.publish === "immediate" ? publishState : requestPublish;
+    if (options.publish === "immediate") {
+      yield* publishState;
+    } else if (options.publish === "coalesced") {
+      yield* requestPublish;
+    }
     // Active threads can update many times per second and retain large tool
     // payloads. The server remains the source of truth while a turn is active;
     // persist once it settles so cache encoding stays off the streaming path.
@@ -282,9 +286,14 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
     const result = applyThreadDetailEvent(current.data.value, item.event);
     if (result.kind === "updated") {
-      // The high-frequency streaming path: applied now, published on the next
-      // window boundary.
-      yield* setThread(result.thread, { publish: "coalesced" });
+      const waiting = yield* Ref.get(awaitingCompletion);
+      // Persisted catch-up is authoritative state hydration, not live activity.
+      // Reduce it immediately so the resume cursor stays current, but publish
+      // only once when the synchronized marker arrives. Genuine post-marker
+      // streaming keeps the existing frame-window coalescing.
+      yield* setThread(result.thread, {
+        publish: waiting ? "deferred" : "coalesced",
+      });
     } else if (result.kind === "deleted") {
       yield* setDeleted();
     }
