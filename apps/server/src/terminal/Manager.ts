@@ -37,6 +37,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as Equal from "effect/Equal";
@@ -620,12 +621,24 @@ function parseFirstChildPidFromPgrep(stdout: string): number | null {
   return null;
 }
 
-function windowsInspectSubprocess(
-  terminalPid: number,
-  platform: NodeJS.Platform,
-): Effect.Effect<
-  TerminalSubprocessInspectResult,
-  TerminalSubprocessCheckError,
+interface WindowsProcessTable {
+  readonly available: boolean;
+  readonly processNameById: ReadonlyMap<number, string>;
+  readonly childrenByParent: ReadonlyMap<number, ReadonlyArray<number>>;
+}
+
+const EMPTY_WINDOWS_PROCESS_TABLE: WindowsProcessTable = {
+  available: false,
+  processNameById: new Map(),
+  childrenByParent: new Map(),
+};
+
+// One full-system Win32_Process enumeration. This is expensive (a PowerShell
+// spawn plus a WMI sweep), so it must run once per poll round and be shared
+// across every terminal session — never once per terminal.
+function fetchWindowsProcessTable(): Effect.Effect<
+  WindowsProcessTable,
+  never,
   ProcessRunner.ProcessRunner
 > {
   const command =
@@ -646,7 +659,7 @@ function windowsInspectSubprocess(
   }).pipe(
     Effect.map((result) => {
       if (result.code !== 0) {
-        return { hasRunningSubprocess: false, childCommand: null, processIds: [] } as const;
+        return EMPTY_WINDOWS_PROCESS_TABLE;
       }
       const processNameById = new Map<number, string>();
       const childrenByParent = new Map<number, number[]>();
@@ -659,6 +672,26 @@ function windowsInspectSubprocess(
         const children = childrenByParent.get(parentPid) ?? [];
         children.push(pid);
         childrenByParent.set(parentPid, children);
+      }
+      return { available: true, processNameById, childrenByParent } satisfies WindowsProcessTable;
+    }),
+    Effect.orElseSucceed(() => EMPTY_WINDOWS_PROCESS_TABLE),
+  );
+}
+
+function windowsInspectSubprocess(
+  terminalPid: number,
+  platform: NodeJS.Platform,
+  processTable: Effect.Effect<WindowsProcessTable, never, ProcessRunner.ProcessRunner>,
+): Effect.Effect<
+  TerminalSubprocessInspectResult,
+  TerminalSubprocessCheckError,
+  ProcessRunner.ProcessRunner
+> {
+  return processTable.pipe(
+    Effect.map(({ available, processNameById, childrenByParent }) => {
+      if (!available) {
+        return { hasRunningSubprocess: false, childCommand: null, processIds: [] } as const;
       }
       const directChildren = childrenByParent.get(terminalPid) ?? [];
       const childPid = directChildren[0];
@@ -683,14 +716,6 @@ function windowsInspectSubprocess(
         processIds: [...processIds],
       } as const;
     }),
-    Effect.mapError(
-      (cause) =>
-        new TerminalSubprocessCheckError({
-          cause,
-          terminalPid,
-          command: "powershell",
-        }),
-    ),
   );
 }
 
@@ -840,13 +865,20 @@ const posixInspectSubprocess = Effect.fn("terminal.posixInspectSubprocess")(func
   };
 });
 
-function defaultSubprocessInspectorForPlatform(platform: NodeJS.Platform) {
+function defaultSubprocessInspectorForPlatform(
+  platform: NodeJS.Platform,
+  windowsProcessTable: Effect.Effect<
+    WindowsProcessTable,
+    never,
+    ProcessRunner.ProcessRunner
+  > = fetchWindowsProcessTable(),
+) {
   return Effect.fn("terminal.defaultSubprocessInspector")(function* (terminalPid: number) {
     if (!Number.isInteger(terminalPid) || terminalPid <= 0) {
       return { hasRunningSubprocess: false, childCommand: null, processIds: [] };
     }
     if (platform === "win32") {
-      return yield* windowsInspectSubprocess(terminalPid, platform);
+      return yield* windowsInspectSubprocess(terminalPid, platform, windowsProcessTable);
     }
     return yield* posixInspectSubprocess(terminalPid, platform);
   });
@@ -1190,14 +1222,26 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const subprocessPollIntervalMs =
+    options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
+  // The Windows process table comes from one full WMI enumeration. Cache it
+  // for just under a poll round so the concurrent per-terminal checks in a
+  // round share a single enumeration instead of issuing one each — with many
+  // terminals the uncached version pinned the WMI service.
+  const windowsProcessTable =
+    platform === "win32"
+      ? yield* Effect.cachedWithTTL(
+          fetchWindowsProcessTable(),
+          Duration.millis(Math.max(1, subprocessPollIntervalMs - 100)),
+        )
+      : Effect.succeed(EMPTY_WINDOWS_PROCESS_TABLE);
   const subprocessInspector =
     options.subprocessInspector ??
     ((terminalPid) =>
-      defaultSubprocessInspectorForPlatform(platform)(terminalPid).pipe(
-        Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
-      ));
-  const subprocessPollIntervalMs =
-    options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
+      defaultSubprocessInspectorForPlatform(
+        platform,
+        windowsProcessTable,
+      )(terminalPid).pipe(Effect.provideService(ProcessRunner.ProcessRunner, processRunner)));
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;

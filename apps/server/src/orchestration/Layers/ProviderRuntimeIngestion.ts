@@ -237,6 +237,9 @@ export function foldTaskAgentEvent(
     resolveDelegateProvider(payload.agentType) ??
     previous?.delegateProvider ??
     resolveDelegateProvider(previous?.agentType);
+  const runId = payload.runId ?? previous?.runId;
+  const companionSettled =
+    settledNow && delegateProvider === ProviderDriverKind.make("codex") && runId !== undefined;
   const next: ThreadAgentSnapshot = {
     agentId: payload.taskId,
     provider: event.provider,
@@ -296,14 +299,14 @@ export function foldTaskAgentEvent(
     ...(payload.phaseIndex !== undefined || previous?.phaseIndex !== undefined
       ? { phaseIndex: payload.phaseIndex ?? previous?.phaseIndex }
       : {}),
-    ...((payload.phaseTitle ?? previous?.phaseTitle)
+    ...(!companionSettled && (payload.phaseTitle ?? previous?.phaseTitle)
       ? { phaseTitle: payload.phaseTitle ?? previous?.phaseTitle }
       : {}),
     ...((payload.phases ?? previous?.phases) ? { phases: payload.phases ?? previous?.phases } : {}),
     ...((payload.scriptPath ?? previous?.scriptPath)
       ? { scriptPath: payload.scriptPath ?? previous?.scriptPath }
       : {}),
-    ...((payload.runId ?? previous?.runId) ? { runId: payload.runId ?? previous?.runId } : {}),
+    ...(runId ? { runId } : {}),
     ...((payload.outputFile ?? previous?.outputFile)
       ? { outputFile: payload.outputFile ?? previous?.outputFile }
       : {}),

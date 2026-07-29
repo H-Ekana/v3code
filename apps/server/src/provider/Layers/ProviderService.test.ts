@@ -710,6 +710,139 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("ProviderServiceLive reconciles settled active turns without touching live turns", () =>
+  Effect.gen(function* () {
+    const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-provider-reconcile-"));
+    const dbPath = NodePath.join(tempDir, "orchestration.sqlite");
+    const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(persistenceLayer),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const staleThreadId = asThreadId("thread-stale-settled");
+    const liveThreadId = asThreadId("thread-live-running");
+
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id,
+          status,
+          provider_name,
+          provider_instance_id,
+          runtime_mode,
+          active_turn_id,
+          last_error,
+          updated_at
+        )
+        VALUES
+          (${staleThreadId}, 'running', 'codex', ${codexInstanceId}, 'full-access',
+            'turn-stale', NULL, '2026-01-01T00:00:00.000Z'),
+          (${liveThreadId}, 'running', 'codex', ${codexInstanceId}, 'full-access',
+            'turn-live', NULL, '2026-01-01T00:00:00.000Z')
+      `;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_files_json
+        )
+        VALUES
+          (${staleThreadId}, 'turn-stale', 'interrupted',
+            '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z',
+            '2026-01-01T00:00:02.000Z', '[]'),
+          (${liveThreadId}, 'turn-live', 'running',
+            '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z', NULL, '[]')
+      `;
+      yield* directory.upsert({
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: staleThreadId,
+        status: "running",
+        runtimePayload: { activeTurnId: "turn-stale" },
+      });
+      yield* directory.upsert({
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: liveThreadId,
+        status: "running",
+        runtimePayload: { activeTurnId: "turn-live" },
+      });
+    }).pipe(Effect.provide(Layer.mergeAll(directoryLayer, persistenceLayer)));
+
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+      Layer.provideMerge(persistenceLayer),
+    );
+
+    yield* Effect.gen(function* () {
+      yield* ProviderService.ProviderService;
+      const sql = yield* SqlClient.SqlClient;
+      const sessionRows = yield* sql<{
+        readonly threadId: string;
+        readonly status: string;
+        readonly activeTurnId: string | null;
+      }>`
+        SELECT
+          thread_id AS "threadId",
+          status,
+          active_turn_id AS "activeTurnId"
+        FROM projection_thread_sessions
+        WHERE thread_id IN (${staleThreadId}, ${liveThreadId})
+        ORDER BY thread_id ASC
+      `;
+      const runtimeRows = yield* sql<{
+        readonly threadId: string;
+        readonly status: string;
+        readonly runtimePayload: string | null;
+      }>`
+        SELECT
+          thread_id AS "threadId",
+          status,
+          runtime_payload_json AS "runtimePayload"
+        FROM provider_session_runtime
+        WHERE thread_id IN (${staleThreadId}, ${liveThreadId})
+        ORDER BY thread_id ASC
+      `;
+
+      assert.deepEqual(sessionRows, [
+        { threadId: liveThreadId, status: "running", activeTurnId: "turn-live" },
+        { threadId: staleThreadId, status: "stopped", activeTurnId: null },
+      ]);
+      assert.equal(runtimeRows[0]?.threadId, liveThreadId);
+      assert.equal(runtimeRows[0]?.status, "running");
+      assert.deepEqual(JSON.parse(runtimeRows[0]?.runtimePayload ?? "null"), {
+        activeTurnId: "turn-live",
+      });
+      assert.equal(runtimeRows[1]?.threadId, staleThreadId);
+      assert.equal(runtimeRows[1]?.status, "stopped");
+      assert.deepEqual(JSON.parse(runtimeRows[1]?.runtimePayload ?? "null"), {
+        activeTurnId: null,
+        lastRuntimeEvent: "provider.startupReconcile",
+      });
+    }).pipe(
+      Effect.provide(providerLayer),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect(
   "ProviderServiceLive restores rollback routing after restart using persisted thread mapping",
   () =>
@@ -1278,6 +1411,25 @@ routing.layer("ProviderServiceLive routing", (it) => {
           assert.equal(runtimePayload.activeTurnId, `turn-${String(session.threadId)}`);
           assert.equal(runtimePayload.lastError, null);
           assert.equal(runtimePayload.lastRuntimeEvent, "provider.sendTurn");
+        }
+      }
+
+      yield* provider.interruptTurn({ threadId: session.threadId });
+      const interruptedRuntime = yield* runtimeRepository.getByThreadId({
+        threadId: session.threadId,
+      });
+      assert.equal(Option.isSome(interruptedRuntime), true);
+      if (Option.isSome(interruptedRuntime)) {
+        assert.equal(interruptedRuntime.value.status, "stopped");
+        const payload = interruptedRuntime.value.runtimePayload;
+        assert.equal(payload !== null && typeof payload === "object", true);
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          const runtimePayload = payload as {
+            activeTurnId: string | null;
+            lastRuntimeEvent: string | null;
+          };
+          assert.equal(runtimePayload.activeTurnId, null);
+          assert.equal(runtimePayload.lastRuntimeEvent, "provider.interruptTurn");
         }
       }
     }),

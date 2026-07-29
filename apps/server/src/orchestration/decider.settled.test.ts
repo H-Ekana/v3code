@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationReadModel,
   type OrchestrationSession,
   type OrchestrationThread,
@@ -348,6 +349,37 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       const userAgainEvents = Array.isArray(userAgain) ? userAgain : [userAgain];
       expect(userAgainEvents).toHaveLength(1);
       expect(userAgainEvents[0]?.type).toBe("thread.unsettled");
+    }),
+  );
+
+  it.effect("interrupts the live session in the same decision as the turn", () =>
+    Effect.gen(function* () {
+      const activeTurnId = TurnId.make("turn-1");
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("cmd-turn-interrupt"),
+          threadId: ThreadId.make("thread-1"),
+          turnId: activeTurnId,
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null, null, {
+          ...makeSession("running"),
+          activeTurnId,
+        }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.turn-interrupt-requested",
+        "thread.session-set",
+      ]);
+      const sessionEvent = events[1];
+      expect(sessionEvent?.type).toBe("thread.session-set");
+      if (sessionEvent?.type === "thread.session-set") {
+        expect(sessionEvent.payload.session.status).toBe("interrupted");
+        expect(sessionEvent.payload.session.activeTurnId).toBeNull();
+        expect(sessionEvent.payload.session.updatedAt).toBe(NOW);
+      }
     }),
   );
 

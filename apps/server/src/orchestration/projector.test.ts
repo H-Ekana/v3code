@@ -341,6 +341,40 @@ describe("orchestration projector", () => {
     expect(settledThread?.latestTurn?.turnId).toBe("turn-1");
     expect(settledThread?.latestTurn?.state).toBe("completed");
     expect(settledThread?.latestTurn?.completedAt).toBe(settledAt);
+
+    const afterInterrupted = await Effect.runPromise(
+      projectEvent(
+        afterRunning,
+        makeEvent({
+          sequence: 3,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: settledAt,
+          commandId: "cmd-interrupted",
+          payload: {
+            threadId: "thread-1",
+            session: {
+              threadId: "thread-1",
+              status: "interrupted",
+              providerName: "codex",
+              providerSessionId: "session-1",
+              providerThreadId: "provider-thread-1",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: settledAt,
+            },
+          },
+        }),
+      ),
+    );
+    const interruptedThread = afterInterrupted.threads[0];
+    expect(interruptedThread?.session?.status).toBe("interrupted");
+    expect(interruptedThread?.session?.activeTurnId).toBeNull();
+    expect(interruptedThread?.latestTurn?.turnId).toBe("turn-1");
+    expect(interruptedThread?.latestTurn?.state).toBe("interrupted");
+    expect(interruptedThread?.latestTurn?.completedAt).toBe(settledAt);
   });
 
   it("updates canonical thread runtime mode from thread.runtime-mode-set", async () => {

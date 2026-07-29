@@ -36,10 +36,28 @@ import * as TestClock from "effect/testing/TestClock";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
+import {
+  BUNDLED_CODEX_PLUGIN_DIR_ENV,
+  writeCompanionWatcherRegistration,
+} from "../codexCompanionJobs.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderAdapterRequestError,
+  ProviderAdapterValidationError,
+} from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+
+// The bundled Codex plugin is vendored in this checkout, so without an explicit
+// override every session in this file would pick up the dev fallback and the
+// assertions about untouched query options would depend on the working tree.
+// Pointing the contract env var at a path that does not exist is the documented
+// "nothing to load" state.
+process.env[BUNDLED_CODEX_PLUGIN_DIR_ENV] = NodePath.join(
+  NodeOS.tmpdir(),
+  "t3code-absent-bundled-codex-plugin",
+);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
@@ -707,6 +725,475 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("reattaches a non-terminal companion watcher after restart", () => {
+    const pluginData = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-plugin-restart-"));
+    const workspace = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "v3code-ws-restart-"));
+    const canonicalWorkspace = NodeFS.realpathSync.native(workspace);
+    const slug = NodePath.basename(workspace).replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const hash = NodeCrypto.createHash("sha256")
+      .update(canonicalWorkspace)
+      .digest("hex")
+      .slice(0, 16);
+    const stateDir = NodePath.join(pluginData, "state", `${slug}-${hash}`);
+    const jobsDir = NodePath.join(stateDir, "jobs");
+    NodeFS.mkdirSync(jobsDir, { recursive: true });
+
+    const jobId = "task-restart-live-1";
+    const runningRecord = {
+      id: jobId,
+      status: "running",
+      phase: "verifying",
+      title: "Codex Task",
+      createdAt: "2026-07-29T06:00:00.000Z",
+      startedAt: "2026-07-29T06:00:01.000Z",
+      // Deliberately bogus: restart recovery must not treat a recycled PID as
+      // liveness authority or use it for process control.
+      pid: 424_242,
+    };
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "state.json"),
+      JSON.stringify({ version: 1, jobs: [runningRecord] }),
+      "utf8",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, `${jobId}.json`),
+      JSON.stringify(runningRecord),
+      "utf8",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, `${jobId}.log`),
+      "[2026-07-29T06:00:02.000Z] Running command: vp test run focused.test.ts\n",
+      "utf8",
+    );
+    writeCompanionWatcherRegistration(jobsDir, {
+      threadId: THREAD_ID,
+      agentId: "agent-restart-live",
+      jobId,
+      createdAt: "2026-07-29T06:00:00.000Z",
+    });
+
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = pluginData;
+    const harness = makeHarness({ cwd: workspace, baseDir: pluginData });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      // No launch line is emitted in this process. The durable registration is
+      // the only way this fresh adapter can recover the prior watch.
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      for (let tick = 0; tick < 40; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const running = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" &&
+          event.payload.status === "running" &&
+          event.payload.taskId === "agent-restart-live",
+      );
+      assert.equal(running?.type, "task.updated");
+      if (running?.type === "task.updated") {
+        assert.equal(running.payload.runId, jobId);
+        assert.equal(running.payload.phaseTitle, "verifying");
+      }
+
+      const completedRecord = {
+        ...runningRecord,
+        status: "completed",
+        phase: "done",
+        pid: null,
+        completedAt: "2026-07-29T06:05:00.000Z",
+      };
+      NodeFS.writeFileSync(
+        NodePath.join(stateDir, "state.json"),
+        JSON.stringify({ version: 1, jobs: [completedRecord] }),
+        "utf8",
+      );
+      NodeFS.writeFileSync(
+        NodePath.join(jobsDir, `${jobId}.json`),
+        JSON.stringify(completedRecord),
+        "utf8",
+      );
+      yield* TestClock.adjust("2 seconds");
+      for (let tick = 0; tick < 20; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const completed = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" &&
+          event.payload.status === "completed" &&
+          event.payload.taskId === "agent-restart-live",
+      );
+      assert.equal(completed?.type, "task.updated");
+      if (completed?.type === "task.updated") {
+        assert.equal(completed.payload.runId, jobId);
+        assert.equal(completed.payload.phaseTitle, undefined);
+      }
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousPluginData === undefined) {
+            delete process.env.CLAUDE_PLUGIN_DATA;
+          } else {
+            process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+          }
+        }),
+      ),
+    );
+  });
+
+  it.effect("settles terminal and vanished companion registrations on restart", () => {
+    const pluginData = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-plugin-settle-"));
+    const workspace = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "v3code-ws-settle-"));
+    const canonicalWorkspace = NodeFS.realpathSync.native(workspace);
+    const slug = NodePath.basename(workspace).replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const hash = NodeCrypto.createHash("sha256")
+      .update(canonicalWorkspace)
+      .digest("hex")
+      .slice(0, 16);
+    const stateDir = NodePath.join(pluginData, "state", `${slug}-${hash}`);
+    const jobsDir = NodePath.join(stateDir, "jobs");
+    NodeFS.mkdirSync(jobsDir, { recursive: true });
+
+    const terminalJobId = "task-restart-terminal-1";
+    const vanishedJobId = "task-restart-vanished-1";
+    const terminalRecord = {
+      id: terminalJobId,
+      status: "completed",
+      phase: "done",
+      title: "Codex Task",
+      createdAt: "2026-07-29T06:00:00.000Z",
+      completedAt: "2026-07-29T06:05:00.000Z",
+      pid: null,
+    };
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "state.json"),
+      JSON.stringify({ version: 1, jobs: [terminalRecord] }),
+      "utf8",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, `${terminalJobId}.json`),
+      JSON.stringify(terminalRecord),
+      "utf8",
+    );
+    for (const registration of [
+      { agentId: "agent-restart-terminal", jobId: terminalJobId },
+      { agentId: "agent-restart-vanished", jobId: vanishedJobId },
+    ]) {
+      writeCompanionWatcherRegistration(jobsDir, {
+        threadId: THREAD_ID,
+        ...registration,
+        createdAt: "2026-07-29T06:00:00.000Z",
+      });
+    }
+
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = pluginData;
+    const harness = makeHarness({ cwd: workspace, baseDir: pluginData });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      for (let tick = 0; tick < 40; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+      runtimeEventsFiber.interruptUnsafe();
+
+      const terminal = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" && event.payload.taskId === "agent-restart-terminal",
+      );
+      assert.equal(terminal?.type, "task.updated");
+      if (terminal?.type === "task.updated") {
+        assert.equal(terminal.payload.status, "completed");
+        assert.equal(terminal.payload.phaseTitle, undefined);
+        assert.equal(terminal.payload.runId, terminalJobId);
+      }
+
+      const vanished = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" && event.payload.taskId === "agent-restart-vanished",
+      );
+      assert.equal(vanished?.type, "task.updated");
+      if (vanished?.type === "task.updated") {
+        assert.equal(vanished.payload.status, "failed");
+        assert.equal(vanished.payload.phaseTitle, undefined);
+        assert.equal(vanished.payload.runId, vanishedJobId);
+        assert.ok(vanished.payload.errorMessage?.includes("vanished"));
+      }
+      const delivered = yield* readNthPromptText(harness.getLastCreateQueryInput(), 0);
+      assert.ok(delivered?.startsWith("[automated]"));
+      assert.ok(delivered?.includes(vanishedJobId));
+      assert.ok(delivered?.includes("vanished"));
+      assert.equal(
+        NodeFS.existsSync(NodePath.join(jobsDir, vanishedJobId + ".v3code-watcher.json")),
+        false,
+        "terminal reconciliation must not redeliver after another restart",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousPluginData === undefined) {
+            delete process.env.CLAUDE_PLUGIN_DATA;
+          } else {
+            process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+          }
+        }),
+      ),
+    );
+  });
+
+  it.effect("fails and reports a non-terminal job whose rollout records turn_aborted", () => {
+    const pluginData = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-plugin-abort-"));
+    const codexHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-home-abort-"));
+    const workspace = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "v3code-ws-abort-"));
+    const canonicalWorkspace = NodeFS.realpathSync.native(workspace);
+    const slug = NodePath.basename(workspace).replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const hash = NodeCrypto.createHash("sha256")
+      .update(canonicalWorkspace)
+      .digest("hex")
+      .slice(0, 16);
+    const stateDir = NodePath.join(pluginData, "state", slug + "-" + hash);
+    const jobsDir = NodePath.join(stateDir, "jobs");
+    NodeFS.mkdirSync(jobsDir, { recursive: true });
+
+    const jobId = "task-rollout-aborted-1";
+    const threadId = "019fa49c-33ea-71b1-bf30-3f68f5d21b3a";
+    const turnId = "019fa49c-646d-7cd3-b42a-5b4f616f71c4";
+    const runningRecord = {
+      id: jobId,
+      status: "running",
+      phase: "verifying",
+      title: "Codex Task",
+      createdAt: "2026-07-29T06:00:00.000Z",
+      startedAt: "2026-07-29T06:00:01.000Z",
+      updatedAt: "2026-07-29T06:05:00.000Z",
+      threadId,
+      turnId,
+      pid: 424_242,
+    };
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "state.json"),
+      JSON.stringify({ version: 1, jobs: [runningRecord] }),
+      "utf8",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, jobId + ".json"),
+      JSON.stringify(runningRecord),
+      "utf8",
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(jobsDir, jobId + ".log"),
+      "[2026-07-29T06:05:00.000Z] Verifying.\n",
+      "utf8",
+    );
+    writeCompanionWatcherRegistration(jobsDir, {
+      threadId: THREAD_ID,
+      agentId: "agent-rollout-aborted",
+      jobId,
+      createdAt: "2026-07-29T06:00:00.000Z",
+    });
+
+    const rolloutDir = NodePath.join(codexHome, "sessions", "2026", "07", "29");
+    NodeFS.mkdirSync(rolloutDir, { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(rolloutDir, "rollout-2026-07-29T11-30-00-" + threadId + ".jsonl"),
+      JSON.stringify({
+        timestamp: "2026-07-29T06:05:36.000Z",
+        type: "event_msg",
+        payload: {
+          type: "turn_aborted",
+          reason: "interrupted",
+          turn_id: turnId,
+          completed_at: "2026-07-29T06:05:36.000Z",
+          duration_ms: 335_600,
+        },
+      }) + "\n",
+      "utf8",
+    );
+
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CLAUDE_PLUGIN_DATA = pluginData;
+    process.env.CODEX_HOME = codexHome;
+    const harness = makeHarness({ cwd: workspace, baseDir: pluginData });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      for (let tick = 0; tick < 60; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+      runtimeEventsFiber.interruptUnsafe();
+
+      const failed = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" && event.payload.taskId === "agent-rollout-aborted",
+      );
+      assert.equal(failed?.type, "task.updated");
+      if (failed?.type === "task.updated") {
+        assert.equal(failed.payload.status, "failed");
+        assert.equal(failed.payload.runId, jobId);
+        assert.match(failed.payload.errorMessage ?? "", /turn_aborted: interrupted/u);
+        assert.match(failed.payload.errorMessage ?? "", /336 seconds/u);
+      }
+      const delivered = yield* readNthPromptText(harness.getLastCreateQueryInput(), 0);
+      assert.ok(delivered?.startsWith("[automated]"));
+      assert.ok(delivered?.includes(jobId));
+      assert.ok(delivered?.includes("turn_aborted: interrupted"));
+      assert.equal(
+        NodeFS.existsSync(NodePath.join(jobsDir, jobId + ".v3code-watcher.json")),
+        false,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousPluginData === undefined) {
+            delete process.env.CLAUDE_PLUGIN_DATA;
+          } else {
+            process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+          }
+          if (previousCodexHome === undefined) {
+            delete process.env.CODEX_HOME;
+          } else {
+            process.env.CODEX_HOME = previousCodexHome;
+          }
+        }),
+      ),
+    );
+  });
+
+  it.effect("fails and reports a non-terminal job whose per-job artifacts go silent", () => {
+    const pluginData = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-plugin-silent-"));
+    const workspace = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "v3code-ws-silent-"));
+    const canonicalWorkspace = NodeFS.realpathSync.native(workspace);
+    const slug = NodePath.basename(workspace).replace(/[^a-zA-Z0-9._-]+/g, "-");
+    const hash = NodeCrypto.createHash("sha256")
+      .update(canonicalWorkspace)
+      .digest("hex")
+      .slice(0, 16);
+    const stateDir = NodePath.join(pluginData, "state", slug + "-" + hash);
+    const jobsDir = NodePath.join(stateDir, "jobs");
+    NodeFS.mkdirSync(jobsDir, { recursive: true });
+
+    const jobId = "task-silent-nonterminal-1";
+    const runningRecord = {
+      id: jobId,
+      status: "running",
+      phase: "verifying",
+      title: "Codex Task",
+      createdAt: "2026-07-29T06:00:00.000Z",
+      startedAt: "2026-07-29T06:00:01.000Z",
+      updatedAt: "2026-07-29T06:05:00.000Z",
+      // Deterministically absent and too large to be recycled during the test.
+      pid: 2_000_000_000,
+    };
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "state.json"),
+      JSON.stringify({ version: 1, jobs: [runningRecord] }),
+      "utf8",
+    );
+    const jobFile = NodePath.join(jobsDir, jobId + ".json");
+    const logFile = NodePath.join(jobsDir, jobId + ".log");
+    NodeFS.writeFileSync(jobFile, JSON.stringify(runningRecord), "utf8");
+    NodeFS.writeFileSync(logFile, "[2026-07-29T06:05:00.000Z] Verifying.\n", "utf8");
+    NodeFS.utimesSync(jobFile, 0, 0);
+    NodeFS.utimesSync(logFile, 0, 0);
+    writeCompanionWatcherRegistration(jobsDir, {
+      threadId: THREAD_ID,
+      agentId: "agent-silent-nonterminal",
+      jobId,
+      createdAt: "2026-07-29T06:00:00.000Z",
+    });
+
+    const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = pluginData;
+    const harness = makeHarness({ cwd: workspace, baseDir: pluginData });
+    return Effect.gen(function* () {
+      yield* TestClock.adjust("31 minutes");
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      for (let tick = 0; tick < 60; tick += 1) {
+        yield* Effect.yieldNow;
+      }
+      runtimeEventsFiber.interruptUnsafe();
+
+      const failed = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" && event.payload.taskId === "agent-silent-nonterminal",
+      );
+      assert.equal(failed?.type, "task.updated");
+      if (failed?.type === "task.updated") {
+        assert.equal(failed.payload.status, "failed");
+        assert.equal(failed.payload.runId, jobId);
+        assert.match(failed.payload.errorMessage ?? "", /worker process is gone/u);
+        assert.match(failed.payload.errorMessage ?? "", /non-terminal/u);
+        assert.match(failed.payload.errorMessage ?? "", /silent for 3[01] minutes/u);
+      }
+      const delivered = yield* readNthPromptText(harness.getLastCreateQueryInput(), 0);
+      assert.ok(delivered?.includes(jobId));
+      assert.match(delivered ?? "", /silent for 3[01] minutes/u);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousPluginData === undefined) {
+            delete process.env.CLAUDE_PLUGIN_DATA;
+          } else {
+            process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+          }
+        }),
+      ),
+    );
+  });
+
   it.effect("derives auto permission mode from auto runtime policy without skip flag", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1039,6 +1526,78 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.settings, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("loads the bundled Codex plugin and disables the marketplace install", () => {
+    const pluginDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-bundled-codex-"));
+    NodeFS.mkdirSync(NodePath.join(pluginDir, ".claude-plugin"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(pluginDir, ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: "codex", version: "1.0.6-v3code.1" }),
+      "utf8",
+    );
+    const previous = process.env[BUNDLED_CODEX_PLUGIN_DIR_ENV];
+    process.env[BUNDLED_CODEX_PLUGIN_DIR_ENV] = pluginDir;
+
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        // Carries an unrelated setting, so the merge is proven non-destructive.
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+          [{ id: "fastMode", value: true }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.deepEqual(createInput?.options.plugins, [{ type: "local", path: pluginDir }]);
+      assert.deepEqual(createInput?.options.settings, {
+        fastMode: true,
+        // Session plugins shadow the installed copy by manifest name, but the
+        // installed one must still be switched off so its SessionEnd hook and
+        // `/codex:*` skills are not registered twice.
+        enabledPlugins: { "codex@openai-codex": false },
+      });
+      // Isolation mode is deliberately NOT used: user/project/local settings
+      // must keep loading exactly as before.
+      assert.deepEqual(createInput?.options.settingSources, ["user", "project", "local"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previous === undefined) {
+            delete process.env[BUNDLED_CODEX_PLUGIN_DIR_ENV];
+          } else {
+            process.env[BUNDLED_CODEX_PLUGIN_DIR_ENV] = previous;
+          }
+        }),
+      ),
+    );
+  });
+
+  it.effect("leaves query options untouched when no bundled Codex plugin is present", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.plugins, undefined);
       assert.equal(createInput?.options.settings, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -4253,6 +4812,36 @@ describe("ClaudeAdapterLive", () => {
       const updatedInput = (permissionResult as { updatedInput: Record<string, unknown> })
         .updatedInput;
       assert.deepEqual(updatedInput.answers, { "Deploy to which env?": "Staging" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("returns an actionable error for an expired structured-question request", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+      const error = yield* adapter
+        .respondToUserInput(
+          session.threadId,
+          ApprovalRequestId.make("request-from-before-restart"),
+          { "Which framework?": "React" },
+        )
+        .pipe(Effect.flip);
+
+      assert.instanceOf(error, ProviderAdapterRequestError);
+      assert.match(error.detail, /Unknown pending user-input request/u);
+      assert.match(error.detail, /no longer answerable/u);
+      assert.match(error.detail, /new message/u);
+      assert.match(error.detail, /fresh turn/u);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

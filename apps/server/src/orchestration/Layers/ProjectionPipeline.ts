@@ -1,6 +1,8 @@
 import {
   ApprovalRequestId,
   type ChatAttachment,
+  EventId,
+  MessageId,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
   THREAD_AGENT_TERMINAL_STATUSES,
@@ -132,10 +134,22 @@ function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
   );
 }
 
-function derivePendingUserInputCountFromActivities(
+function isStalePendingUserInputFailureDetail(detail: string | null): boolean {
+  if (detail === null) {
+    return false;
+  }
+  return (
+    detail.includes("stale pending user-input request") ||
+    detail.includes("unknown pending user-input request") ||
+    detail.includes("unknown pending user input request") ||
+    detail.includes("unknown pending codex user input request")
+  );
+}
+
+function deriveOpenPendingUserInputActivities(
   activities: ReadonlyArray<ProjectionThreadActivity>,
-): number {
-  const openRequestIds = new Set<string>();
+): ReadonlyMap<ApprovalRequestId, ProjectionThreadActivity> {
+  const openByRequestId = new Map<ApprovalRequestId, ProjectionThreadActivity>();
   const ordered = [...activities].toSorted(
     (left, right) =>
       left.createdAt.localeCompare(right.createdAt) ||
@@ -154,28 +168,74 @@ function derivePendingUserInputCountFromActivities(
     const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
 
     if (activity.kind === "user-input.requested") {
-      openRequestIds.add(requestId);
+      openByRequestId.set(requestId, activity);
       continue;
     }
 
     if (activity.kind === "user-input.resolved") {
-      openRequestIds.delete(requestId);
+      openByRequestId.delete(requestId);
       continue;
     }
 
     if (
       activity.kind === "provider.user-input.respond.failed" &&
-      detail !== null &&
-      (detail.includes("stale pending user-input request") ||
-        detail.includes("unknown pending user-input request") ||
-        detail.includes("unknown pending user input request") ||
-        detail.includes("unknown pending codex user input request"))
+      isStalePendingUserInputFailureDetail(detail)
     ) {
-      openRequestIds.delete(requestId);
+      openByRequestId.delete(requestId);
     }
   }
 
-  return openRequestIds.size;
+  return openByRequestId;
+}
+
+function derivePendingUserInputCountFromActivities(
+  activities: ReadonlyArray<ProjectionThreadActivity>,
+): number {
+  return deriveOpenPendingUserInputActivities(activities).size;
+}
+
+function formatExpiredClaudeUserInputMessage(activity: ProjectionThreadActivity): string {
+  const payload =
+    typeof activity.payload === "object" && activity.payload !== null
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+  const lines = [
+    "Claude restarted while waiting for this structured answer, so the old question controls have expired.",
+    "Reply to the questions below in a new message to continue in a fresh turn:",
+  ];
+
+  for (let index = 0; index < questions.length; index += 1) {
+    const rawQuestion = questions[index];
+    if (typeof rawQuestion !== "object" || rawQuestion === null) {
+      continue;
+    }
+    const question = rawQuestion as Record<string, unknown>;
+    const prompt = typeof question.question === "string" ? question.question.trim() : "";
+    if (!prompt) {
+      continue;
+    }
+    const header = typeof question.header === "string" ? question.header.trim() : "";
+    lines.push("", `${index + 1}. ${header ? `**${header}:** ` : ""}${prompt}`);
+
+    if (!Array.isArray(question.options)) {
+      continue;
+    }
+    for (const rawOption of question.options) {
+      if (typeof rawOption !== "object" || rawOption === null) {
+        continue;
+      }
+      const option = rawOption as Record<string, unknown>;
+      const label = typeof option.label === "string" ? option.label.trim() : "";
+      if (!label) {
+        continue;
+      }
+      const description = typeof option.description === "string" ? option.description.trim() : "";
+      lines.push(`   - ${label}${description ? `: ${description}` : ""}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function deriveHasActionableProposedPlan(input: {
@@ -661,6 +721,120 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       });
     });
 
+    const expirePersistedClaudeUserInputs = Effect.fn("expirePersistedClaudeUserInputs")(
+      function* () {
+        // This runs only while rebuilding projections at process startup. Any
+        // persisted Claude request found here outlived the adapter process that
+        // owned its in-memory Deferred callback and can no longer be answered.
+        const candidateRows = yield* sql<{
+          readonly threadId: string;
+        }>`SELECT threads.thread_id AS "threadId"
+         FROM projection_threads AS threads
+         INNER JOIN projection_thread_sessions AS sessions
+           ON sessions.thread_id = threads.thread_id
+         WHERE threads.pending_user_input_count > 0
+           AND sessions.provider_name = 'claudeAgent'`;
+        if (candidateRows.length === 0) {
+          return;
+        }
+
+        const expiredAt = new Date().toISOString();
+        yield* Effect.forEach(
+          candidateRows,
+          (candidate) =>
+            Effect.gen(function* () {
+              const threadId = ThreadId.make(candidate.threadId);
+              const activities = yield* projectionThreadActivityRepository.listByThreadId({
+                threadId,
+              });
+              const openByRequestId = deriveOpenPendingUserInputActivities(activities);
+              if (openByRequestId.size === 0) {
+                yield* refreshThreadShellSummary(threadId);
+                return;
+              }
+
+              const expiredTurnIds = new Set<string>();
+              yield* Effect.forEach(
+                openByRequestId,
+                ([requestId, requestedActivity]) => {
+                  if (requestedActivity.turnId !== null) {
+                    expiredTurnIds.add(requestedActivity.turnId);
+                  }
+                  const suffix = `claude-user-input-expired:${requestId}`;
+                  return Effect.all([
+                    projectionThreadActivityRepository.upsert({
+                      activityId: EventId.make(suffix),
+                      threadId,
+                      turnId: requestedActivity.turnId,
+                      tone: "info",
+                      kind: "user-input.resolved",
+                      summary: "Structured question expired after restart",
+                      payload: {
+                        requestId,
+                        status: "expired",
+                        reason: "provider-restarted",
+                        detail:
+                          "Claude restarted before this structured question was answered. Reply in a new message to continue in a fresh turn.",
+                      },
+                      createdAt: expiredAt,
+                    }),
+                    projectionThreadMessageRepository.upsert({
+                      messageId: MessageId.make(suffix),
+                      threadId,
+                      turnId: requestedActivity.turnId,
+                      role: "assistant",
+                      text: formatExpiredClaudeUserInputMessage(requestedActivity),
+                      isStreaming: false,
+                      createdAt: expiredAt,
+                      updatedAt: expiredAt,
+                    }),
+                  ]).pipe(Effect.asVoid);
+                },
+                { concurrency: 1 },
+              );
+
+              const turns = yield* projectionTurnRepository.listByThreadId({ threadId });
+              yield* Effect.forEach(
+                turns.filter(
+                  (turn) =>
+                    turn.turnId !== null &&
+                    expiredTurnIds.has(turn.turnId) &&
+                    (turn.state === "pending" || turn.state === "running"),
+                ),
+                (turn) =>
+                  turn.turnId === null
+                    ? Effect.void
+                    : projectionTurnRepository.upsertByTurnId({
+                        ...turn,
+                        turnId: turn.turnId,
+                        state: "interrupted",
+                        completedAt: expiredAt,
+                      }),
+                { concurrency: 1 },
+              );
+
+              const session = yield* projectionThreadSessionRepository.getByThreadId({ threadId });
+              if (
+                Option.isSome(session) &&
+                session.value.activeTurnId !== null &&
+                expiredTurnIds.has(session.value.activeTurnId)
+              ) {
+                yield* projectionThreadSessionRepository.upsert({
+                  ...session.value,
+                  status: "interrupted",
+                  activeTurnId: null,
+                  lastError: null,
+                  updatedAt: expiredAt,
+                });
+              }
+
+              yield* refreshThreadShellSummary(threadId);
+            }),
+          { concurrency: 1 },
+        );
+      },
+    );
+
     const applyThreadsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadsProjection",
     )(function* (event, attachmentSideEffects) {
@@ -883,7 +1057,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.session.activeTurnId,
+            latestTurnId: event.payload.session.activeTurnId ?? existingRow.value.latestTurnId,
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
@@ -1720,6 +1894,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       Effect.provideService(Path.Path, path),
       Effect.provideService(ServerConfig, serverConfig),
       Effect.asVoid,
+      Effect.tap(expirePersistedClaudeUserInputs),
       Effect.tap(() =>
         Effect.logDebug("orchestration projection pipeline bootstrapped").pipe(
           Effect.annotateLogs({ projectors: projectors.length }),

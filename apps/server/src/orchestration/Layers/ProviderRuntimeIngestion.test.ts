@@ -701,6 +701,7 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: RuntimeTaskId.make("rescue-1"),
         status: "running",
         phaseTitle: "verifying",
+        runId: "task-companion-1",
         timelineBypass: true,
       },
     });
@@ -739,6 +740,7 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: RuntimeTaskId.make("rescue-1"),
         status: "failed",
         endTime: "2026-01-01T00:40:00.000Z",
+        runId: "task-companion-1",
         timelineBypass: true,
       },
     });
@@ -747,6 +749,8 @@ describe("ProviderRuntimeIngestion", () => {
     expect(settled?.endedAt).toBe("2026-01-01T00:40:00.000Z");
     // A settled card shows its outcome, not a stale in-flight line.
     expect(settled?.currentActivity).toBeUndefined();
+    // Companion phases describe live work and must not survive settlement.
+    expect(settled?.phaseTitle).toBeUndefined();
     // The feed survives settling — that history is the whole point.
     expect(settled?.recentActivity.at(-1)?.outcome).toBe("error");
   });

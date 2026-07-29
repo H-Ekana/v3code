@@ -824,12 +824,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.interrupt": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
-      return {
+      const interruptRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -843,6 +843,32 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
+      if (
+        thread.session === null ||
+        (thread.session.status !== "starting" && thread.session.status !== "running")
+      ) {
+        return interruptRequestedEvent;
+      }
+      const sessionInterruptedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.session-set",
+        payload: {
+          threadId: command.threadId,
+          session: {
+            ...thread.session,
+            status: "interrupted",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: command.createdAt,
+          },
+        },
+      };
+      return [interruptRequestedEvent, sessionInterruptedEvent];
     }
 
     case "thread.context.compact": {

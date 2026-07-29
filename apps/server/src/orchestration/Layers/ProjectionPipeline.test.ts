@@ -1432,6 +1432,136 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect(
+    "preserves the completed turn pointer across running, turn-diff-completed, then ready",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-completed-pointer");
+        const turnId = TurnId.make("turn-completed-pointer");
+        const createdAt = "2026-01-01T01:00:00.000Z";
+        const runningAt = "2026-01-01T01:00:01.000Z";
+        const completedAt = "2026-01-01T01:01:00.000Z";
+        const readyAt = "2026-01-01T01:01:01.000Z";
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-completed-pointer-created"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: createdAt,
+          commandId: CommandId.make("cmd-completed-pointer-created"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-completed-pointer-created"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-completed-pointer"),
+            title: "Completed pointer",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-completed-pointer-running"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: runningAt,
+          commandId: CommandId.make("cmd-completed-pointer-running"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-completed-pointer-running"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: runningAt,
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const runningPointerRows = yield* sql<{ readonly latestTurnId: string | null }>`
+          SELECT latest_turn_id AS "latestTurnId"
+          FROM projection_threads
+          WHERE thread_id = 'thread-completed-pointer'
+        `;
+        assert.deepEqual(runningPointerRows, [{ latestTurnId: turnId }]);
+
+        yield* eventStore.append({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-completed-pointer-diff"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: completedAt,
+          commandId: CommandId.make("cmd-completed-pointer-diff"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-completed-pointer-diff"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make(
+              "refs/t3/checkpoints/thread-completed-pointer/turn/1",
+            ),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("message-completed-pointer"),
+            completedAt,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-completed-pointer-ready"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: readyAt,
+          commandId: CommandId.make("cmd-completed-pointer-ready"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-completed-pointer-ready"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: readyAt,
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const completedPointerRows = yield* sql<{ readonly latestTurnId: string | null }>`
+          SELECT latest_turn_id AS "latestTurnId"
+          FROM projection_threads
+          WHERE thread_id = 'thread-completed-pointer'
+        `;
+        assert.deepEqual(completedPointerRows, [{ latestTurnId: turnId }]);
+      }),
+  );
+
   it.effect("settles a superseded running turn when a new turn becomes active", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
@@ -2262,6 +2392,196 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         WHERE thread_id = 'thread-stale-user-input'
       `;
       assert.deepEqual(threadRows, [{ pendingUserInputCount: 0 }]);
+    }),
+  );
+
+  it.effect("expires persisted Claude user input safely during restart bootstrap", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-expired-claude-user-input");
+      const turnId = TurnId.make("turn-expired-claude-user-input");
+      const requestId = "request-expired-claude-user-input";
+      const expiryMessageId = MessageId.make("claude-user-input-expired:" + requestId);
+
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("evt-expired-claude-user-input-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-29T06:00:00.000Z",
+        commandId: CommandId.make("cmd-expired-claude-user-input-created"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-expired-claude-user-input-created"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-expired-claude-user-input"),
+          title: "Expired Claude user input",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claude"),
+            model: "claude-opus",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-07-29T06:00:00.000Z",
+          updatedAt: "2026-07-29T06:00:00.000Z",
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-expired-claude-user-input-running"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-29T06:00:01.000Z",
+        commandId: CommandId.make("cmd-expired-claude-user-input-running"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-expired-claude-user-input-running"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: "2026-07-29T06:00:01.000Z",
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-expired-claude-user-input-requested"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-07-29T06:00:02.000Z",
+        commandId: CommandId.make("cmd-expired-claude-user-input-requested"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-expired-claude-user-input-requested"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-expired-claude-user-input-requested"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: {
+              requestId,
+              questions: [
+                {
+                  id: "recovery",
+                  header: "Recovery",
+                  question: "Which recovery policy should be used?",
+                  options: [
+                    {
+                      label: "Expire safely",
+                      description: "Continue in a fresh turn",
+                    },
+                  ],
+                  multiSelect: false,
+                },
+              ],
+            },
+            turnId,
+            createdAt: "2026-07-29T06:00:02.000Z",
+          },
+        },
+      });
+
+      // These events represent durable state from the prior process. This
+      // bootstrap runs with a fresh Claude adapter and therefore no callback
+      // capable of answering the preserved request.
+      yield* projectionPipeline.bootstrap;
+
+      const threadRows = yield* sql<{
+        readonly pendingUserInputCount: number;
+      }>`
+        SELECT pending_user_input_count AS "pendingUserInputCount"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(threadRows, [{ pendingUserInputCount: 0 }]);
+
+      const sessionRows = yield* sql<{
+        readonly status: string;
+        readonly activeTurnId: string | null;
+      }>`
+        SELECT status, active_turn_id AS "activeTurnId"
+        FROM projection_thread_sessions
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(sessionRows, [{ status: "interrupted", activeTurnId: null }]);
+
+      const turnRows = yield* sql<{
+        readonly state: string;
+        readonly completedAt: string | null;
+      }>`
+        SELECT state, completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `;
+      assert.equal(turnRows.length, 1);
+      assert.equal(turnRows[0]?.state, "interrupted");
+      assert.notEqual(turnRows[0]?.completedAt, null);
+
+      const resolvedRows = yield* sql<{
+        readonly summary: string;
+        readonly payloadJson: string;
+      }>`
+        SELECT summary, payload_json AS "payloadJson"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId} AND kind = 'user-input.resolved'
+      `;
+      assert.equal(resolvedRows.length, 1);
+      assert.equal(resolvedRows[0]?.summary, "Structured question expired after restart");
+      assert.deepEqual(JSON.parse(resolvedRows[0]?.payloadJson ?? "{}"), {
+        requestId,
+        status: "expired",
+        reason: "provider-restarted",
+        detail:
+          "Claude restarted before this structured question was answered. Reply in a new message to continue in a fresh turn.",
+      });
+
+      const messageRows = yield* sql<{
+        readonly role: string;
+        readonly text: string;
+      }>`
+        SELECT role, text
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId} AND message_id = ${expiryMessageId}
+      `;
+      assert.equal(messageRows.length, 1);
+      assert.equal(messageRows[0]?.role, "assistant");
+      assert.match(messageRows[0]?.text ?? "", /old question controls have expired/u);
+      assert.match(messageRows[0]?.text ?? "", /Which recovery policy should be used\?/u);
+      assert.match(messageRows[0]?.text ?? "", /Expire safely: Continue in a fresh turn/u);
+      assert.match(messageRows[0]?.text ?? "", /new message/u);
+
+      // The deterministic expiry rows make repeated bootstrap safe and never
+      // recreate an interactive request without a callback.
+      yield* projectionPipeline.bootstrap;
+      const expiryCountRows = yield* sql<{
+        readonly activityCount: number;
+        readonly messageCount: number;
+      }>`
+        SELECT
+          (
+            SELECT COUNT(*)
+            FROM projection_thread_activities
+            WHERE thread_id = ${threadId} AND kind = 'user-input.resolved'
+          ) AS "activityCount",
+          (
+            SELECT COUNT(*)
+            FROM projection_thread_messages
+            WHERE thread_id = ${threadId} AND message_id = ${expiryMessageId}
+          ) AS "messageCount"
+      `;
+      assert.deepEqual(expiryCountRows, [{ activityCount: 1, messageCount: 1 }]);
     }),
   );
 

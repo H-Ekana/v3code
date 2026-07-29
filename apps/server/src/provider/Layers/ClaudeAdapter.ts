@@ -54,6 +54,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -73,11 +74,19 @@ import { ServerConfig } from "../../config.ts";
 import { buildClaudeHarnessInstructions } from "../ClaudeDeveloperInstructions.ts";
 import {
   type CodexCompanionJobRecord,
+  INSTALLED_CODEX_PLUGIN_ID,
+  isCompanionProcessRunning,
   isTerminalCompanionStatus,
+  lookupCompanionJob,
   parseLaunchedCodexJobId,
-  readCompanionJobRecord,
+  readCompanionAbortSince,
   readCompanionProgressSince,
-  resolveCompanionJobsDir,
+  readCompanionWatcherRegistrations,
+  removeCompanionWatcherRegistration,
+  resolveBundledCodexPluginDir,
+  resolveCompanionJobsDirForJob,
+  resolveCompanionJobsDirs,
+  writeCompanionWatcherRegistration,
 } from "../codexCompanionJobs.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
@@ -112,6 +121,15 @@ const COMPANION_POLL_INTERVAL_MS = 2_000;
  * writing a terminal status cannot leave a fiber polling forever.
  */
 const COMPANION_WATCH_LIMIT_MS = 2 * 60 * 60 * 1_000;
+/**
+ * A worker can be killed before writing terminal state. Require both a missing
+ * process and stale job-local artifacts so a normal long model response is not
+ * mistaken for death merely because its log is quiet.
+ */
+const COMPANION_DEAD_PROCESS_GRACE_MS = 30_000;
+/** PID presence is not identity proof, so quiet non-terminal jobs still get a finite fallback. */
+const COMPANION_STALE_JOB_LIMIT_MS = 30 * 60 * 1_000;
+const COMPANION_ROLLOUT_LOOKUP_INTERVAL_MS = 30_000;
 /**
  * Give up if the job record never materialises — the launch line was parsed but
  * the store is somewhere we cannot see (different workspace root, or the plugin
@@ -2483,6 +2501,33 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    * `sendTurn` already does the right thing in both states — it starts a turn
    * when the thread is idle and steers the live one when it is not.
    */
+  const deliverCompanionFailure = Effect.fn("deliverCompanionFailure")(function* (
+    context: ClaudeSessionContext,
+    jobId: string,
+    reason: string,
+  ) {
+    const text = [
+      "[automated] The detached Codex job '" +
+        jobId +
+        "' failed before it could report a final result.",
+      "Runtime diagnosis: " + reason,
+      "Treat any partial filesystem changes from that job as incomplete and verify them before continuing.",
+    ].join("\n");
+
+    yield* sendTurn({
+      threadId: context.session.threadId,
+      input: text,
+      attachments: [],
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("claude.companionJob.failureDeliveryFailed", {
+          jobId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+  });
+
   const deliverCompanionResult = Effect.fn("deliverCompanionResult")(function* (
     context: ClaudeSessionContext,
     jobId: string,
@@ -2527,7 +2572,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
   });
 
-  const watchCompanionJob = (context: ClaudeSessionContext, agentId: string, jobId: string) =>
+  const watchCompanionJob = (
+    context: ClaudeSessionContext,
+    agentId: string,
+    jobId: string,
+    deliverResult: boolean,
+  ) =>
     Effect.gen(function* () {
       // `cwd` is optional on startSession (threads without a persisted one),
       // so fall back to the server's workspace rather than silently disabling.
@@ -2535,14 +2585,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (!workspaceRoot) {
         return;
       }
-      const jobsDir = resolveCompanionJobsDir(workspaceRoot);
+      // Job-aware: with a bundled-plugin store (`codex-inline`) alongside a
+      // legacy marketplace store (`codex-openai-codex`), enumeration order must
+      // not decide which one this watcher reads.
+      const jobsDir = resolveCompanionJobsDirForJob(workspaceRoot, jobId);
       if (!jobsDir) {
         return;
       }
+      /**
+       * The registration may live in a different store than the record — it is
+       * written before the watcher knows which store owns the job — so terminal
+       * cleanup has to sweep every candidate, or a stale registration would
+       * redeliver the same result after each restart.
+       */
+      const clearWatcherRegistration = (): void => {
+        for (const candidate of resolveCompanionJobsDirs(workspaceRoot)) {
+          removeCompanionWatcherRegistration(candidate, jobId);
+        }
+      };
 
       const taskId = RuntimeTaskId.make(agentId);
       let offset = 0;
       let inode: number | undefined;
+      let rolloutOffset = 0;
+      let rolloutPath: string | undefined;
+      let rolloutInode: number | undefined;
+      let nextRolloutLookupAtMs = 0;
       let lastPhase: string | undefined;
       let waitedMs = 0;
       let pollsWithoutRecord = 0;
@@ -2557,10 +2625,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
        * SessionEnd hook deletes job records out from under us, so abandoning a
        * watch is a routine event, not an edge case.
        */
-      const settleAbandoned = Effect.fn("watchCompanionJob.abandon")(function* (reason: string) {
-        if (!pinnedRunning) {
+      const settleAbandoned = Effect.fn("watchCompanionJob.abandon")(function* (
+        reason: string,
+        force = false,
+        notifyThread = true,
+        terminal = true,
+      ) {
+        if (!pinnedRunning && !force) {
           return;
         }
+        const errorMessage = "Lost track of the Codex background job (" + reason + ").";
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
           type: "task.updated",
@@ -2572,22 +2646,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             taskId,
             status: "failed",
             endTime: stamp.createdAt,
-            errorMessage: `Lost track of the Codex background job (${reason}).`,
+            errorMessage,
+            runId: jobId,
             timelineBypass: true,
           },
         });
+        if (notifyThread && !context.stopped) {
+          yield* deliverCompanionFailure(context, jobId, errorMessage);
+        }
+        if (terminal) {
+          clearWatcherRegistration();
+        }
       });
 
       const emitProgressEvents = Effect.fn("watchCompanionJob.poll")(function* () {
-        const record = readCompanionJobRecord(jobsDir, jobId);
+        const lookup = lookupCompanionJob(jobsDir, jobId);
+        const record = lookup.record;
         const progress = readCompanionProgressSince(jobsDir, jobId, offset, inode);
         offset = progress.nextOffset;
         inode = progress.inode;
 
+        if (lookup.storeStatus === "vanished") {
+          yield* settleAbandoned("it vanished from the companion state store", true);
+          return true;
+        }
         if (!record) {
           pollsWithoutRecord += 1;
           if (pollsWithoutRecord >= COMPANION_MISSING_RECORD_POLL_LIMIT) {
-            yield* settleAbandoned("its record disappeared");
+            yield* settleAbandoned("its record disappeared", true);
             return true;
           }
           return false;
@@ -2597,11 +2683,75 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const description = record.title ?? "Codex background job";
         const settled = isTerminalCompanionStatus(record.status);
 
+        if (!settled) {
+          const currentTimeMs = yield* Clock.currentTimeMillis;
+          if (rolloutPath || currentTimeMs >= nextRolloutLookupAtMs) {
+            const abortRead = readCompanionAbortSince(
+              record,
+              rolloutOffset,
+              rolloutPath,
+              rolloutInode,
+            );
+            rolloutOffset = abortRead.nextOffset;
+            rolloutPath = abortRead.rolloutPath;
+            rolloutInode = abortRead.inode;
+            if (!rolloutPath) {
+              nextRolloutLookupAtMs = currentTimeMs + COMPANION_ROLLOUT_LOOKUP_INTERVAL_MS;
+            }
+            if (abortRead.abort) {
+              const duration =
+                abortRead.abort.durationMs === undefined
+                  ? ""
+                  : " after " + Math.round(abortRead.abort.durationMs / 1_000) + " seconds";
+              yield* settleAbandoned(
+                "its Codex rollout recorded turn_aborted: " + abortRead.abort.reason + duration,
+                true,
+              );
+              return true;
+            }
+          }
+
+          const latestActivityMs =
+            lookup.latestJobActivityMtimeMs ??
+            Date.parse(record.updatedAt ?? record.startedAt ?? "");
+          const silentMs = currentTimeMs - latestActivityMs;
+          const processRunning = isCompanionProcessRunning(record.pid);
+          if (
+            Number.isFinite(latestActivityMs) &&
+            processRunning === false &&
+            silentMs >= COMPANION_DEAD_PROCESS_GRACE_MS
+          ) {
+            const silence =
+              silentMs >= 120_000
+                ? Math.floor(silentMs / 60_000) + " minutes"
+                : Math.floor(silentMs / 1_000) + " seconds";
+            yield* settleAbandoned(
+              "its recorded worker process is gone and its non-terminal job log and files were silent for " +
+                silence,
+              true,
+            );
+            return true;
+          }
+          if (Number.isFinite(latestActivityMs) && silentMs >= COMPANION_STALE_JOB_LIMIT_MS) {
+            const silentMinutes = Math.floor(silentMs / 60_000);
+            yield* settleAbandoned(
+              "its record stayed non-terminal while its job log and files were silent for " +
+                silentMinutes +
+                " minutes; PID state cannot prove worker identity",
+              true,
+            );
+            return true;
+          }
+        }
+
         // Re-assert `running` before replaying lines. The forwarder subagent
         // settles long before the job does, and a settled card suppresses
         // `currentActivity` in the reducer — so without this the feed would
         // fill in but the card would still read as finished.
-        if (!settled && (progress.lines.length > 0 || record.phase !== lastPhase)) {
+        if (
+          !settled &&
+          (!pinnedRunning || progress.lines.length > 0 || record.phase !== lastPhase)
+        ) {
           lastPhase = record.phase;
           pinnedRunning = true;
           const stamp = yield* makeEventStamp();
@@ -2615,6 +2765,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               taskId,
               status: "running",
               ...(record.phase ? { phaseTitle: record.phase } : {}),
+              runId: jobId,
               timelineBypass: true,
             },
           });
@@ -2658,12 +2809,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   ? "killed"
                   : "failed",
             endTime: stamp.createdAt,
-            ...(record.phase ? { phaseTitle: record.phase } : {}),
+            runId: jobId,
+            ...(record.status === "failed"
+              ? { errorMessage: record.errorMessage ?? "Codex background job failed." }
+              : record.status === "cancelled"
+                ? { errorMessage: record.errorMessage ?? "Codex background job was cancelled." }
+                : {}),
             timelineBypass: true,
           },
         });
 
-        yield* deliverCompanionResult(context, jobId, record);
+        if (record.status === "failed" && !deliverResult) {
+          yield* deliverCompanionFailure(
+            context,
+            jobId,
+            record.errorMessage ?? "The companion recorded a terminal failure.",
+          );
+        } else if (deliverResult) {
+          if (record.result) {
+            yield* deliverCompanionResult(context, jobId, record);
+          } else if (record.status !== "completed") {
+            yield* deliverCompanionFailure(
+              context,
+              jobId,
+              record.errorMessage ??
+                "The companion recorded a terminal failure without final output.",
+            );
+          }
+        }
+        clearWatcherRegistration();
         return true;
       });
 
@@ -2671,7 +2845,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (context.stopped) {
           // The session is going away; leave the card settled rather than
           // frozen mid-run for whoever reopens the thread.
-          yield* settleAbandoned("the session ended");
+          yield* settleAbandoned("the session ended", false, false, false);
           return;
         }
         const done = yield* emitProgressEvents();
@@ -2688,6 +2862,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     agentId: string,
     jobId: string,
+    options?: {
+      readonly reconcile?: boolean;
+    },
   ) {
     // Checked against the durable set, not the live fiber map: the launch line
     // is re-observable after the job has already settled (the main thread
@@ -2697,11 +2874,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
     context.companionJobsSeen.add(jobId);
+    const workspaceRoot = context.cwd ?? serverConfig.cwd;
+    const jobsDir = workspaceRoot ? resolveCompanionJobsDirForJob(workspaceRoot, jobId) : undefined;
+    if (jobsDir && !options?.reconcile) {
+      writeCompanionWatcherRegistration(jobsDir, {
+        threadId: context.session.threadId,
+        agentId,
+        jobId,
+        createdAt: yield* nowIso,
+      });
+    }
     yield* Effect.logDebug("claude.companionWatcher.starting", { jobId, agentId });
     // Daemon: the job outlives the message handler that observed its launch,
     // and often the turn as well. Teardown is explicit in stopSessionInternal.
     const fiber = yield* Effect.forkDetach(
-      watchCompanionJob(context, agentId, jobId).pipe(
+      watchCompanionJob(context, agentId, jobId, options?.reconcile !== true).pipe(
         Effect.catchCause((cause) =>
           Effect.logDebug("claude.companionWatcher.failed", {
             jobId,
@@ -2718,6 +2905,70 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.companionWatchers.delete(jobId);
       }
     });
+  });
+
+  const reconcileCompanionWatchers = Effect.fn("reconcileCompanionWatchers")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    const workspaceRoot = context.cwd ?? serverConfig.cwd;
+    if (!workspaceRoot) {
+      return;
+    }
+    // Store-wide: a job launched before the bundled plugin took over (or after
+    // it) lives in a different plugin data dir, and reconciling only the first
+    // store leaves the other store's cards stuck forever.
+    const jobsDirs = resolveCompanionJobsDirs(workspaceRoot);
+    if (jobsDirs.length === 0) {
+      return;
+    }
+
+    const reconciledJobIds = new Set<string>();
+    const registrations = jobsDirs.flatMap((dir) =>
+      readCompanionWatcherRegistrations(dir, context.session.threadId).map((registration) => ({
+        registration,
+        jobsDir: dir,
+      })),
+    );
+    for (const { registration, jobsDir } of registrations) {
+      // The same job can be registered in both stores; reconcile it once. The
+      // redundant registration is left alone — the watcher sweeps every store
+      // when the job settles.
+      if (reconciledJobIds.has(registration.jobId)) {
+        continue;
+      }
+      reconciledJobIds.add(registration.jobId);
+      const lookupDir = resolveCompanionJobsDirForJob(workspaceRoot, registration.jobId) ?? jobsDir;
+      const lookup = lookupCompanionJob(lookupDir, registration.jobId);
+      if (lookup.storeStatus === "vanished") {
+        context.companionJobsSeen.add(registration.jobId);
+        const errorMessage =
+          "Lost track of the Codex background job (it vanished from the companion state store).";
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "task.updated",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          payload: {
+            taskId: RuntimeTaskId.make(registration.agentId),
+            status: "failed",
+            endTime: stamp.createdAt,
+            errorMessage,
+            runId: registration.jobId,
+            timelineBypass: true,
+          },
+        });
+        yield* deliverCompanionFailure(context, registration.jobId, errorMessage);
+        for (const candidate of jobsDirs) {
+          removeCompanionWatcherRegistration(candidate, registration.jobId);
+        }
+        continue;
+      }
+      yield* startCompanionWatcher(context, registration.agentId, registration.jobId, {
+        reconcile: true,
+      });
+    }
   });
 
   const handleUserMessage = Effect.fn("handleUserMessage")(function* (
@@ -4182,10 +4433,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "full-access": "bypassPermissions",
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
+      // The patched Codex companion plugin ships inside the app. Loading it as a
+      // session-local plugin shadows any marketplace install of the same
+      // manifest name, so `enabledPlugins` only has to switch off the installed
+      // copy to guarantee exactly one SessionEnd hook and one set of
+      // `/codex:*` skills. Absent bundle => untouched options.
+      const bundledCodexPlugin = resolveBundledCodexPluginDir();
+      yield* Effect.logInfo("claude.bundledCodexPlugin", {
+        loaded: bundledCodexPlugin !== undefined,
+        path: bundledCodexPlugin?.dir ?? null,
+        source: bundledCodexPlugin?.source ?? null,
+      });
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
         ...(ultracode ? { ultracode: true } : {}),
+        ...(bundledCodexPlugin ? { enabledPlugins: { [INSTALLED_CODEX_PLUGIN_ID]: false } } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       const harnessInstructions = buildClaudeHarnessInstructions();
@@ -4201,6 +4464,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           append: harnessInstructions,
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
+        ...(bundledCodexPlugin
+          ? { plugins: [{ type: "local" as const, path: bundledCodexPlugin.dir }] }
+          : {}),
         // `ultracode` is a Claude Code setting, not an API effort level. It is
         // normalized to `xhigh` above and paired with `settings.ultracode`.
         ...(effectiveEffort
@@ -4264,6 +4530,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
         "claude.query.extra_args_json": encodeJsonStringForDiagnostics(extraArgs) ?? "",
         "claude.query.path_to_executable": claudeBinaryPath,
+        "claude.query.bundled_codex_plugin_path": bundledCodexPlugin?.dir ?? "",
       });
 
       const queryRuntime = yield* Effect.try({
@@ -4340,6 +4607,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: input.resumeCursor !== undefined ? { resume: input.resumeCursor } : {},
         providerRefs: {},
       });
+      // Rehydrate detached-job ownership after the session exists and after the
+      // startup event has entered the runtime stream. The first reconciled task
+      // event forces ingestion to hydrate the persisted roster before folding
+      // the correction, avoiding the lazy-hydration trap.
+      yield* reconcileCompanionWatchers(context);
 
       const configuredStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -4570,7 +4842,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "item/tool/respondToUserInput",
-        detail: `Unknown pending user-input request: ${requestId}`,
+        detail:
+          `Unknown pending user-input request: ${requestId}. ` +
+          "This structured question is no longer answerable, usually because the Claude session restarted. " +
+          "Send your answer as a new message so Claude can continue in a fresh turn.",
       });
     }
 

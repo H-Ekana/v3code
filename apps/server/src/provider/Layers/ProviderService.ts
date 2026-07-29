@@ -34,6 +34,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   increment,
@@ -220,6 +221,98 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  // Production provides the shared SQLite client at the outer runtime layer.
+  // Keep it optional for isolated adapter tests that intentionally supply only
+  // the runtime repository. Every write below rechecks the linked turn state,
+  // so a genuinely live active turn cannot be reconciled as stale.
+  const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
+  if (Option.isSome(sqlClient)) {
+    const sql = sqlClient.value;
+    const staleSessions = yield* sql<{ readonly threadId: string }>`
+      SELECT sessions.thread_id AS "threadId"
+      FROM projection_thread_sessions AS sessions
+      INNER JOIN projection_turns AS turns
+        ON turns.thread_id = sessions.thread_id
+        AND turns.turn_id = sessions.active_turn_id
+      WHERE sessions.active_turn_id IS NOT NULL
+        AND turns.state IN ('completed', 'error', 'interrupted')
+    `;
+    if (staleSessions.length > 0) {
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+            UPDATE provider_session_runtime AS runtime
+            SET
+              status = 'stopped',
+              last_seen_at = COALESCE(
+                (
+                  SELECT turns.completed_at
+                  FROM projection_thread_sessions AS sessions
+                  INNER JOIN projection_turns AS turns
+                    ON turns.thread_id = sessions.thread_id
+                    AND turns.turn_id = sessions.active_turn_id
+                  WHERE sessions.thread_id = runtime.thread_id
+                    AND turns.state IN ('completed', 'error', 'interrupted')
+                  LIMIT 1
+                ),
+                runtime.last_seen_at
+              ),
+              runtime_payload_json = CASE
+                WHEN runtime.runtime_payload_json IS NULL
+                  THEN json_object('activeTurnId', NULL)
+                WHEN json_valid(runtime.runtime_payload_json)
+                  THEN json_set(
+                    runtime.runtime_payload_json,
+                    '$.activeTurnId',
+                    json('null'),
+                    '$.lastRuntimeEvent',
+                    'provider.startupReconcile'
+                  )
+                ELSE runtime.runtime_payload_json
+              END
+            WHERE EXISTS (
+              SELECT 1
+              FROM projection_thread_sessions AS sessions
+              INNER JOIN projection_turns AS turns
+                ON turns.thread_id = sessions.thread_id
+                AND turns.turn_id = sessions.active_turn_id
+              WHERE sessions.thread_id = runtime.thread_id
+                AND sessions.active_turn_id IS NOT NULL
+                AND turns.state IN ('completed', 'error', 'interrupted')
+            )
+          `;
+          yield* sql`
+            UPDATE projection_thread_sessions AS sessions
+            SET
+              status = 'stopped',
+              active_turn_id = NULL,
+              updated_at = COALESCE(
+                (
+                  SELECT turns.completed_at
+                  FROM projection_turns AS turns
+                  WHERE turns.thread_id = sessions.thread_id
+                    AND turns.turn_id = sessions.active_turn_id
+                    AND turns.state IN ('completed', 'error', 'interrupted')
+                  LIMIT 1
+                ),
+                sessions.updated_at
+              )
+            WHERE sessions.active_turn_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM projection_turns AS turns
+                WHERE turns.thread_id = sessions.thread_id
+                  AND turns.turn_id = sessions.active_turn_id
+                  AND turns.state IN ('completed', 'error', 'interrupted')
+              )
+          `;
+        }),
+      );
+      yield* Effect.logInfo("reconciled settled provider sessions on startup").pipe(
+        Effect.annotateLogs({ reconciledSessionCount: staleSessions.length }),
+      );
+    }
+  }
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
@@ -753,6 +846,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.turn_id": input.turnId,
         });
         yield* routed.adapter.interruptTurn(routed.threadId, input.turnId);
+        yield* directory.upsert({
+          threadId: input.threadId,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          status: "stopped",
+          runtimePayload: {
+            activeTurnId: null,
+            lastRuntimeEvent: "provider.interruptTurn",
+            lastRuntimeEventAt: yield* nowIso,
+          },
+        });
         yield* analytics.record("provider.turn.interrupted", {
           provider: routed.adapter.provider,
         });
