@@ -8,7 +8,14 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+
 import {
+  BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE,
+  BUNDLED_CODEX_PLUGIN_RELATIVE_DIR,
+  BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME,
   BuildCommandFailedError,
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
@@ -41,6 +48,10 @@ import {
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+
+const decodeCodexPluginManifest = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ name: Schema.String })),
+);
 
 function mockProcess(exitCode: number) {
   return ChildProcessSpawner.makeHandle({
@@ -323,6 +334,73 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("unpacks the fff shared library for filesystem and FFI access", () => {
     assert.deepStrictEqual(DESKTOP_ASAR_UNPACK, ["node_modules/@ff-labs/fff-bin-*/**/*"]);
   });
+
+  it.effect("ships the bundled Codex plugin outside the asar as an extra resource", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      // The Claude CLI runs the plugin's hooks as separate processes with no
+      // asar-aware fs, so an asar-only copy is unreadable at runtime.
+      // extraResources also dodges electron-builder's non-overridable default
+      // `files` exclusions (excludedExts drops **/*.d.ts), which asarUnpack
+      // cannot — asarUnpack only unpacks files that already survived that
+      // filter, so scripts/lib/app-server-protocol.d.ts would go missing.
+      assert.deepStrictEqual(config.extraResources, [
+        { from: "../bundled-claude-plugins/codex", to: "vendor/claude-plugins/codex" },
+      ]);
+      assert.deepStrictEqual(BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE, {
+        from: `../${BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME}`,
+        to: BUNDLED_CODEX_PLUGIN_RELATIVE_DIR,
+      });
+      // The staging source must stay OUTSIDE the electron-builder project dir so
+      // the app `files` matcher can't also sweep it into the archive.
+      assert.isTrue(BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE.from.startsWith("../"));
+      assert.notInclude(
+        config.asarUnpack as ReadonlyArray<string>,
+        `${BUNDLED_CODEX_PLUGIN_RELATIVE_DIR}/**/*`,
+      );
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("stages the vendored Codex plugin tree that actually exists in the repo", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoRoot = path.resolve(import.meta.dirname, "..");
+      const pluginDir = path.join(repoRoot, BUNDLED_CODEX_PLUGIN_RELATIVE_DIR);
+
+      // The build copies this tree verbatim and the desktop runtime resolves the
+      // same relative layout, so a drift here ships an artifact whose plugin path
+      // points at nothing.
+      assert.isTrue(yield* fileSystem.exists(pluginDir));
+      assert.isTrue(yield* fileSystem.exists(path.join(pluginDir, ".claude-plugin/plugin.json")));
+      assert.isTrue(yield* fileSystem.exists(path.join(pluginDir, "hooks/hooks.json")));
+      assert.isTrue(yield* fileSystem.exists(path.join(pluginDir, "scripts/codex-companion.mjs")));
+
+      // electron-builder resolves extraResources `from` against the project dir
+      // (stageAppDir). This is the one link between the stage copy and the
+      // packaged output that neither the typechecker nor createBuildConfig can
+      // catch on its own.
+      const stageRoot = "/tmp/t3code-desktop-stage";
+      assert.equal(
+        path.resolve(path.join(stageRoot, "app"), BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE.from),
+        path.resolve(path.join(stageRoot, BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME)),
+      );
+
+      const manifest = yield* decodeCodexPluginManifest(
+        yield* fileSystem.readFileString(path.join(pluginDir, ".claude-plugin/plugin.json")),
+      );
+      assert.equal(manifest.name, "codex");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("preserves both Linux icon resize failures with structural context", () => {
     const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];

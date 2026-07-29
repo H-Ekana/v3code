@@ -757,6 +757,147 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("resolvePrimary points the packaged backend at the unpacked bundled Codex plugin", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-backend-config-test-",
+      });
+      // Packaged layout: electron-builder copies the vendored plugin into the
+      // resources dir via extraResources — outside app.asar — because the Claude
+      // CLI runs its hooks as external processes with no asar-aware fs.
+      const pluginDir = path.join(baseDir, "vendor/claude-plugins/codex");
+      yield* fileSystem.makeDirectory(path.join(pluginDir, ".claude-plugin"), {
+        recursive: true,
+      });
+      yield* fileSystem.writeFileString(
+        path.join(pluginDir, ".claude-plugin/plugin.json"),
+        '{"name":"codex"}',
+      );
+
+      const config = yield* Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        return yield* configuration.resolvePrimary;
+      }).pipe(
+        Effect.provide(
+          DesktopBackendConfiguration.layer.pipe(
+            Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+            Layer.provideMerge(
+              makeEnvironmentLayer(baseDir, {
+                appPath: path.join(baseDir, "app.asar"),
+                isPackaged: true,
+                resourcesPath: baseDir,
+              }),
+            ),
+          ),
+        ),
+      );
+
+      const resolved = config.env[DesktopBackendConfiguration.BUNDLED_CODEX_PLUGIN_ENV_NAME];
+      assert.equal(resolved, pluginDir);
+      // The whole point of unpacking: the value must be a directory the CLI's
+      // external hook processes can actually open, not an app.asar path.
+      assert.notInclude(resolved ?? "", "app.asar/");
+      assert.notInclude(resolved ?? "", "app.asar\\");
+      assert.isTrue(yield* fileSystem.exists(resolved ?? ""));
+      assert.isTrue(
+        yield* fileSystem.exists(path.join(resolved ?? "", ".claude-plugin/plugin.json")),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("resolvePrimary omits the bundled Codex plugin var when nothing is staged", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const config = yield* configuration.resolvePrimary;
+
+        // The harness environment has resourcesPath "/missing/resources", so the
+        // backend must fall back to its own lookup instead of receiving a path
+        // that does not resolve.
+        assert.isUndefined(config.env[DesktopBackendConfiguration.BUNDLED_CODEX_PLUGIN_ENV_NAME]);
+      }),
+    ),
+  );
+
+  it.effect("resolveWsl passes the bundled Codex plugin dir as a wslpath-translated env arg", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-backend-config-test-",
+      });
+      const unpackedRoot = path.join(baseDir, "app.asar.unpacked");
+      const entryPath = path.join(unpackedRoot, "apps/server/dist/bin.mjs");
+      yield* fileSystem.makeDirectory(path.dirname(entryPath), { recursive: true });
+      yield* fileSystem.writeFileString(entryPath, "");
+      // The server bundle is asar-unpacked; the plugin instead ships as an
+      // extraResource directly under resourcesPath.
+      const pluginDir = path.join(baseDir, "vendor/claude-plugins/codex");
+      yield* fileSystem.makeDirectory(path.join(pluginDir, ".claude-plugin"), {
+        recursive: true,
+      });
+      yield* fileSystem.writeFileString(
+        path.join(pluginDir, ".claude-plugin/plugin.json"),
+        '{"name":"codex"}',
+      );
+
+      const translatedPluginDir = "/mnt/c/v3code/vendor/claude-plugins/codex";
+      const translatedEntryPath = "/mnt/c/v3code/apps/server/dist/bin.mjs";
+      const translationRequests: Array<string> = [];
+      const config = yield* Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        return yield* configuration.resolveWsl({ port: 5000, distro: "Ubuntu" });
+      }).pipe(
+        Effect.provide(
+          DesktopBackendConfiguration.layer.pipe(
+            Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(
+              DesktopWslEnvironment.layerTest({
+                isAvailable: true,
+                distros: [{ name: "Ubuntu", isDefault: true, version: 2 }],
+                windowsToWslPath: (_distro, windowsPath) => {
+                  translationRequests.push(windowsPath);
+                  return Option.some(
+                    windowsPath === pluginDir ? translatedPluginDir : translatedEntryPath,
+                  );
+                },
+                ensureNodePty: () => ({
+                  ok: true,
+                  nodePath: "/usr/bin/node",
+                  resolvedPath: "/usr/bin:/bin",
+                }),
+                getDistroIp: () => Option.some("172.27.0.99"),
+              }),
+            ),
+            Layer.provideMerge(
+              makeEnvironmentLayer(baseDir, {
+                appPath: path.join(baseDir, "app.asar"),
+                isPackaged: true,
+                platform: "win32",
+                resourcesPath: baseDir,
+              }),
+            ),
+          ),
+        ),
+      );
+
+      // The Windows-side directory is translated before it reaches the Linux
+      // backend; an untranslated C:\ path is unopenable from inside WSL.
+      assert.include(translationRequests, pluginDir);
+      const envArg = `${DesktopBackendConfiguration.BUNDLED_CODEX_PLUGIN_ENV_NAME}=${translatedPluginDir}`;
+      assert.include(config.args, envArg);
+      // Must sit in the `env` prefix, before the node binary it configures.
+      assert.isBelow(config.args.indexOf(envArg), config.args.indexOf("/usr/bin/node"));
+      assert.isAbove(config.args.indexOf(envArg), config.args.indexOf("env"));
+      assert.notInclude(config.args.join(" "), pluginDir);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it("resolvePrimaryLabel is runSync-safe against the real WSL availability probe", async () => {
     // getLocalEnvironmentBootstraps is a sync IPC method: it resolves the
     // primary instance's lazy label through Effect.runSync. The label chains

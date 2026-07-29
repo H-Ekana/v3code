@@ -584,6 +584,45 @@ interface StagePackageJson {
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
 export const DESKTOP_ASAR_UNPACK = ["node_modules/@ff-labs/fff-bin-*/**/*"] as const;
 
+// The patched Codex companion plugin ships with the app so the fix can't be
+// silently reverted by a plugin update (see the "package the fixed plugin WITH
+// v3code" TODO in KNOWN-ISSUES.md). Its hook scripts are executed by the Claude
+// CLI as SEPARATE processes, which cannot read paths inside app.asar, so the
+// whole directory has to land on the real filesystem.
+//
+// This goes through extraResources rather than app-dir staging + asarUnpack for
+// two reasons. (1) asarUnpack only unpacks files that already passed the app
+// `files` filter, and electron-builder's non-overridable default exclusions
+// drop `**/*.{...,d.ts,...}` (excludedExts in app-builder-lib/out/fileMatcher)
+// — that would silently swallow scripts/lib/app-server-protocol.d.ts and give
+// us a subtly incomplete plugin. extraResources builds its own FileMatcher with
+// a bare `**/*` pattern and no default exclusions, so the tree is copied
+// verbatim. (2) extraResources lands outside app.asar by construction, so there
+// is no second copy inside the archive.
+//
+// The staging source deliberately sits NEXT TO the electron-builder project dir
+// rather than inside it, so the same tree can't also be swept into the asar by
+// the app `files` matcher. `from` is resolved against the project dir, hence the
+// leading "..".
+export const BUNDLED_CODEX_PLUGIN_RELATIVE_DIR = "vendor/claude-plugins/codex";
+export const BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME = "bundled-claude-plugins/codex";
+export const BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE = {
+  from: `../${BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME}`,
+  to: BUNDLED_CODEX_PLUGIN_RELATIVE_DIR,
+} as const;
+
+export class MissingBundledCodexPluginError extends Schema.TaggedErrorClass<MissingBundledCodexPluginError>()(
+  "MissingBundledCodexPluginError",
+  {
+    pluginDir: Schema.String,
+    manifestPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Missing vendored Codex companion plugin at ${this.pluginDir} (expected manifest ${this.manifestPath}). The desktop artifact ships this plugin; restore it before building.`;
+  }
+}
+
 export interface MacPasskeySigningConfiguration {
   readonly appId: string;
   readonly teamId: string;
@@ -1436,6 +1475,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // files through the asar (transparently redirected to the unpacked copy), so
     // there's no duplication.
     asarUnpack: [...DESKTOP_ASAR_UNPACK, "apps/server/dist/**", "**/node_modules/**"],
+    // Ships the patched Codex companion plugin on the real filesystem, at
+    // <resources>/vendor/claude-plugins/codex — the Claude CLI runs its hooks as
+    // external processes with no asar-aware fs. DesktopBackendConfiguration
+    // resolves this exact relative path off process.resourcesPath and hands it
+    // to the backend as T3CODE_BUNDLED_CODEX_PLUGIN_DIR.
+    extraResources: [BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = isV3Fork ? undefined : yield* resolveGitHubPublishConfig(updateChannel);
@@ -1673,6 +1718,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     desktopResources: path.join(repoRoot, "apps/desktop/resources"),
     serverDist: path.join(repoRoot, "apps/server/dist"),
   };
+  const bundledCodexPluginDir = path.join(repoRoot, BUNDLED_CODEX_PLUGIN_RELATIVE_DIR);
+  const bundledCodexPluginManifest = path.join(bundledCodexPluginDir, ".claude-plugin/plugin.json");
+  // Sibling of stageAppDir, matching BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE.from
+  // ("../bundled-claude-plugins/codex", resolved against the electron-builder
+  // project dir, which is stageAppDir).
+  const stagedCodexPluginDir = path.join(stageRoot, BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME);
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
   if (!options.skipBuild) {
@@ -1721,6 +1772,23 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+
+  // Ship the patched Codex companion plugin verbatim (whole tree, no filtering)
+  // so the app can side-load it per session without a separate install. It is a
+  // checked-in source asset, not a build output, so a missing manifest means the
+  // checkout is broken rather than un-built — fail loudly instead of quietly
+  // producing an artifact whose plugin path points at nothing.
+  if (!(yield* fs.exists(bundledCodexPluginManifest))) {
+    return yield* new MissingBundledCodexPluginError({
+      pluginDir: bundledCodexPluginDir,
+      manifestPath: bundledCodexPluginManifest,
+    });
+  }
+  yield* fs.makeDirectory(path.dirname(stagedCodexPluginDir), { recursive: true });
+  yield* fs.copy(bundledCodexPluginDir, stagedCodexPluginDir);
+  yield* Effect.log(
+    `[desktop-artifact] Staged bundled Codex plugin from ${bundledCodexPluginDir} for extraResources.`,
+  );
 
   yield* assertPlatformBuildResources(
     options.platform,

@@ -94,6 +94,49 @@ const WSL_FORWARDED_ENV_NAMES = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] as const
 
 const WSL_SERVER_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+// The desktop artifact ships a patched Codex companion plugin (see the
+// "package the fixed plugin WITH v3code" TODO in KNOWN-ISSUES.md). The backend
+// side-loads it per Claude session; it finds it through this env var, and falls
+// back to the repo's vendor/ copy when the var is unset (dev checkouts that
+// were never staged by build-desktop-artifact.ts).
+export const BUNDLED_CODEX_PLUGIN_ENV_NAME = "T3CODE_BUNDLED_CODEX_PLUGIN_DIR";
+const BUNDLED_CODEX_PLUGIN_RELATIVE_DIR = "vendor/claude-plugins/codex";
+const BUNDLED_CODEX_PLUGIN_MANIFEST_RELATIVE_PATH = ".claude-plugin/plugin.json";
+
+// Resolve the shipped plugin directory as a REAL filesystem path. In packaged
+// builds environment.appRoot is .../resources/app.asar — an archive FILE — and
+// the plugin's hooks are run by the Claude CLI as separate processes with no
+// asar-aware fs, so the build ships the tree through electron-builder
+// extraResources (see BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE in
+// scripts/build-desktop-artifact.ts) and it lands beside the archive under
+// resourcesPath, never inside it. In dev appRoot is already a real directory,
+// so the same relative suffix resolves to the repo's vendor/ tree.
+//
+// Gated on the manifest actually existing: a checkout (or an older artifact)
+// without the vendored plugin must leave the var unset rather than hand the
+// backend a path that does not resolve.
+const resolveBundledCodexPluginDir = Effect.fn(
+  "desktop.backendConfiguration.resolveBundledCodexPluginDir",
+)(function* (
+  environment: DesktopEnvironment.DesktopEnvironment["Service"],
+): Effect.fn.Return<Option.Option<string>, never, FileSystem.FileSystem> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const root = environment.isPackaged ? environment.resourcesPath : environment.appRoot;
+  const pluginDir = environment.path.join(root, BUNDLED_CODEX_PLUGIN_RELATIVE_DIR);
+  const manifestPath = environment.path.join(
+    pluginDir,
+    BUNDLED_CODEX_PLUGIN_MANIFEST_RELATIVE_PATH,
+  );
+  const exists = yield* fileSystem.exists(manifestPath).pipe(Effect.orElseSucceed(() => false));
+  if (!exists) {
+    yield* Effect.logWarning(
+      `Bundled Codex plugin not found at ${pluginDir}; the backend will fall back to its own lookup.`,
+    ).pipe(Effect.annotateLogs({ component: "desktop-backend-configuration" }));
+    return Option.none();
+  }
+  return Option.some(pluginDir);
+});
+
 const backendChildEnvPatch = (): Record<string, string | undefined> =>
   Object.fromEntries(DESKTOP_BACKEND_ENV_NAMES.map((name) => [name, undefined]));
 
@@ -330,11 +373,16 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
   ): Effect.fn.Return<
     DesktopBackendManager.DesktopBackendStartConfig,
     never,
-    DesktopEnvironment.DesktopEnvironment | DesktopServerExposure.DesktopServerExposure
+    | DesktopEnvironment.DesktopEnvironment
+    | DesktopServerExposure.DesktopServerExposure
+    | FileSystem.FileSystem
   > {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
     const backendExposure = yield* serverExposure.backendConfig;
+    // Native primary: the backend and the CLI processes it spawns share this
+    // filesystem, so the path needs no translation.
+    const bundledCodexPluginDir = yield* resolveBundledCodexPluginDir(environment);
 
     const bootstrap = {
       mode: "desktop" as const,
@@ -356,6 +404,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       env: {
         ...backendChildEnvPatch(),
         ELECTRON_RUN_AS_NODE: "1",
+        ...Option.match(bundledCodexPluginDir, {
+          onNone: () => ({}),
+          onSome: (pluginDir) => ({ [BUNDLED_CODEX_PLUGIN_ENV_NAME]: pluginDir }),
+        }),
       },
       // Primary wants process.env (PATH, dev-runner's T3CODE_HOME, etc.).
       extendEnv: true,
@@ -538,6 +590,24 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   const nodeBinDir = lastSlash > 0 ? preflight.nodePath.slice(0, lastSlash) : "/usr/bin";
   const launchPath = `${nodeBinDir}:${WSL_SERVER_SYSTEM_PATH}:${preflight.resolvedPath}`;
 
+  // The bundled plugin lives on the Windows filesystem, but the Linux backend
+  // and the CLI processes it spawns can only open it through /mnt/<drive>/...
+  // — same reason the server entry goes through wslpath above. Pass the
+  // translated value as an explicit `env NAME=VALUE` argv entry (like PATH)
+  // rather than through WSLENV: every dynamic value is its own argv entry under
+  // `wsl.exe --exec`, so Windows cannot mangle it, and WSLENV's own path
+  // translation is exactly the mechanism this file already distrusts for
+  // punctuation-heavy values. If translation fails we simply omit the var and
+  // let the backend fall back.
+  const bundledCodexPluginDir = yield* resolveBundledCodexPluginDir(environment);
+  const linuxCodexPluginDir = Option.isSome(bundledCodexPluginDir)
+    ? yield* wslEnvironment.windowsToWslPath(distroForConfig, bundledCodexPluginDir.value)
+    : Option.none<string>();
+  const bundledCodexPluginArgs = Option.match(linuxCodexPluginDir, {
+    onNone: () => [] as ReadonlyArray<string>,
+    onSome: (pluginDir) => [`${BUNDLED_CODEX_PLUGIN_ENV_NAME}=${pluginDir}`],
+  });
+
   return {
     ...baseConfig,
     args: [
@@ -545,6 +615,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       "--exec",
       "env",
       `PATH=${launchPath}`,
+      ...bundledCodexPluginArgs,
       preflight.nodePath,
       preflight.linuxEntryPath,
       "--bootstrap-fd",
@@ -624,6 +695,7 @@ export const make = Effect.gen(function* () {
     return yield* resolvePrimaryStartConfig(shared).pipe(
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
     );
   });
 
