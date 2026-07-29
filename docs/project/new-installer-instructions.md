@@ -81,11 +81,14 @@ Run through pnpm so `vp` (vite-plus) is on PATH. A bare
 The version is passed via the `T3CODE_DESKTOP_VERSION` env var:
 
 ```bash
-T3CODE_DESKTOP_VERSION="0.0.30-nightly.20260728.933.v3.0.0.5" pnpm run dist:desktop:win
+T3CODE_DESKTOP_VERSION="0.0.31-nightly.20260729.946.v3.0.0.5" pnpm run dist:desktop:win
 ```
 
-Substitute the upstream nightly base you resolved in step 1; the example above is the
-next concrete version after the last shipped `v3.0.0.4`.
+Substitute the upstream nightly base you resolved in step 1 — pick the nightly release
+whose commit hash matches the upstream commit the tree was last merged from
+(`gh release list -R pingdotgg/t3code --limit 5` shows the hash in each release title).
+The example above is the next concrete version after the last shipped `v3.0.0.4`,
+based on the 2026-07-29 merge of upstream commit `49c0d96ed`.
 
 Script variants (`package.json`):
 
