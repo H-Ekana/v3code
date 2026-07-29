@@ -601,17 +601,14 @@ const tracerLayer = Layer.unwrap(
       ...(delegate ? { delegate } : {}),
     });
 
-    // Packaged builds without an OTLP exporter trace at Warning without span
-    // timing: the Info-level span firehose over the pervasive Effect.fn
-    // instrumentation costs steady CPU and disk on end-user machines.
-    const quiet = !environment.isDevelopment && Option.isNone(otlpTracesUrl);
-
-    return Layer.mergeAll(
-      Layer.succeed(Tracer.Tracer, tracer),
-      Layer.succeed(Tracer.MinimumTraceLevel, quiet ? "Warn" : "Info"),
-      Layer.succeed(References.TracerTimingEnabled, !quiet),
-    );
+    return Layer.succeed(Tracer.Tracer, tracer);
   }),
 ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(OtlpSerialization.layerJson));
 
-export const layer = Layer.mergeAll(backendOutputLogFactoryLayer, desktopLoggerLayer, tracerLayer);
+export const layer = Layer.mergeAll(
+  backendOutputLogFactoryLayer,
+  desktopLoggerLayer,
+  tracerLayer,
+  Layer.succeed(Tracer.MinimumTraceLevel, "Info"),
+  Layer.succeed(References.TracerTimingEnabled, true),
+);
