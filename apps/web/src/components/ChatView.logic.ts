@@ -28,6 +28,44 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
+export function resolveThreadVisitBaseline(input: {
+  pendingEngagementKey: string | null;
+  routeThreadKey: string;
+  threadUpdatedAt: string | null;
+  lastVisitedAt: string | null | undefined;
+}): {
+  pendingEngagementKey: string | null;
+  visitedAt: string | null;
+} {
+  if (input.pendingEngagementKey !== input.routeThreadKey || input.threadUpdatedAt === null) {
+    return {
+      pendingEngagementKey: input.pendingEngagementKey,
+      visitedAt: null,
+    };
+  }
+
+  const threadUpdatedAt = Date.parse(input.threadUpdatedAt);
+  if (Number.isNaN(threadUpdatedAt)) {
+    return {
+      pendingEngagementKey: input.pendingEngagementKey,
+      visitedAt: null,
+    };
+  }
+
+  const lastVisitedAt =
+    input.lastVisitedAt === null || input.lastVisitedAt === undefined
+      ? NaN
+      : Date.parse(input.lastVisitedAt);
+
+  return {
+    pendingEngagementKey: null,
+    visitedAt:
+      !Number.isNaN(lastVisitedAt) && lastVisitedAt >= threadUpdatedAt
+        ? null
+        : input.threadUpdatedAt,
+  };
+}
+
 export function startNewThreadForProject(
   projectRef: ScopedProjectRef | null,
   handleNewThread: (projectRef: ScopedProjectRef) => Promise<void>,

@@ -89,12 +89,14 @@ import {
   hasActionableProposedPlan,
   isLatestTurnSettled,
 } from "../session-logic";
-import { deriveLatestAgentSnapshot } from "@t3tools/client-runtime/state/thread-agents";
+import {
+  deriveAgentPanelState,
+  deriveLatestAgentSnapshot,
+} from "@t3tools/client-runtime/state/thread-agents";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
-  getAnchoredTurnMetrics,
+  resolveTimelineEndSignal,
   resolveTimelineSendScroll,
-  shouldPositionTimelineAnchor,
   type TimelineScrollMode,
 } from "./chat/timelineScrollAnchoring";
 import {
@@ -245,6 +247,7 @@ import {
   useThreadProposedPlans,
   useThreadRefs,
   useThreadShell,
+  useThreadStatus,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
@@ -312,6 +315,7 @@ import {
   reconcileMountedTerminalThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  resolveThreadVisitBaseline,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
   startNewThreadForProject,
@@ -1295,6 +1299,7 @@ function ChatViewContent(props: ChatViewProps) {
         : null,
   );
   const serverThread = useThread(routeThreadRef, { waitForShell: draftThread !== null });
+  const serverThreadStatus = useThreadStatus(serverThread === null ? null : routeThreadRef);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const activeThreadLastVisitedAt = useUiStateStore(
     (store) => store.threadLastVisitedAtById[routeThreadKey],
@@ -1417,9 +1422,25 @@ function ChatViewContent(props: ChatViewProps) {
     LastInvokedScriptByProjectSchema,
   );
   const legendListRef = useRef<LegendListRef | null>(null);
+  /**
+   * The measured element is the composer CARD, not the full-bleed overlay
+   * wrapper. In draft-hero state that wrapper is `absolute inset-0` — the whole
+   * chat column — so measuring it fed a viewport-sized value straight into
+   * `contentInsetEndAdjustment`, which renders a real DOM spacer. The card is
+   * the composer's real height in both hero and docked states.
+   */
   const [composerOverlayElement, setComposerOverlayElement] = useState<HTMLDivElement | null>(null);
   const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
   const isAtEndRef = useRef(true);
+  /**
+   * The strict live-edge signal. `isAtEndRef` carries LegendList's `isNearEnd`
+   * (half a viewport of slack) and drives live-follow; the send decision needs
+   * "actually pinned to the bottom" instead.
+   */
+  const isStrictlyAtEndRef = useRef(true);
+  const [timelineRevealMessageId, setTimelineRevealMessageId] = useState<MessageId | null>(null);
+  const timelineRevealMessageIdRef = useRef<MessageId | null>(null);
+  timelineRevealMessageIdRef.current = timelineRevealMessageId;
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
@@ -1593,14 +1614,16 @@ function ChatViewContent(props: ChatViewProps) {
     [activeThreadEnvironmentId, activeThreadId],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
-  const [timelineAnchor, setTimelineAnchor] = useState<{
-    readonly threadKey: string | null;
-    readonly messageId: MessageId | null;
-  }>({ threadKey: activeThreadKey, messageId: null });
-  if (timelineAnchor.threadKey !== activeThreadKey) {
-    setTimelineAnchor({ threadKey: activeThreadKey, messageId: null });
-  }
-  const timelineAnchorMessageId = timelineAnchor.messageId;
+  const [hydratedTimelineThreadKey, setHydratedTimelineThreadKey] = useState<string | null>(null);
+  const timelineInitialHydration =
+    isServerThread &&
+    (serverThreadStatus !== "live" || hydratedTimelineThreadKey !== routeThreadKey);
+  useLayoutEffect(() => {
+    const nextHydratedKey = isServerThread && serverThreadStatus === "live" ? routeThreadKey : null;
+    setHydratedTimelineThreadKey((current) =>
+      current === nextHydratedKey ? current : nextHydratedKey,
+    );
+  }, [isServerThread, routeThreadKey, serverThreadStatus]);
   const activeRightPanelKind = useRightPanelStore((state) =>
     selectActiveRightPanel(state.byThreadKey, activeThreadRef),
   );
@@ -2052,20 +2075,31 @@ function ChatViewContent(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
+  const pendingThreadVisitKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!serverThread?.id) return;
-    const threadUpdatedAt = Date.parse(serverThread.updatedAt);
-    if (Number.isNaN(threadUpdatedAt)) return;
-    const lastVisitedAt = activeThreadLastVisitedAt ? Date.parse(activeThreadLastVisitedAt) : NaN;
-    if (!Number.isNaN(lastVisitedAt) && lastVisitedAt >= threadUpdatedAt) return;
+    pendingThreadVisitKeyRef.current = routeThreadKey;
+  }, [routeThreadKey]);
 
-    markThreadVisited(
-      scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
-      serverThread.updatedAt,
-    );
+  useEffect(() => {
+    const resolution = resolveThreadVisitBaseline({
+      pendingEngagementKey: pendingThreadVisitKeyRef.current,
+      routeThreadKey,
+      threadUpdatedAt:
+        serverThread &&
+        scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)) ===
+          routeThreadKey
+          ? serverThread.updatedAt
+          : null,
+      lastVisitedAt: activeThreadLastVisitedAt,
+    });
+    pendingThreadVisitKeyRef.current = resolution.pendingEngagementKey;
+    if (resolution.visitedAt === null) return;
+
+    markThreadVisited(routeThreadKey, resolution.visitedAt);
   }, [
     activeThreadLastVisitedAt,
     markThreadVisited,
+    routeThreadKey,
     serverThread?.environmentId,
     serverThread?.id,
     serverThread?.updatedAt,
@@ -2233,23 +2267,22 @@ function ChatViewContent(props: ChatViewProps) {
     [threadActivities],
   );
   // Mirrors AgentsLiveStrip's own visibility rule so the wrapper doesn't
-  // reserve space (mb-1.5) after all agents settle.
-  const hasLiveAgents = useMemo(
-    () =>
-      threadAgents.some(
-        (agent) =>
-          agent.status === "running" || agent.status === "pending" || agent.status === "waiting",
-      ),
-    [threadAgents],
-  );
+  // reserve space (mb-1.5) after all agents settle. Must use the same
+  // derivation as the strip: a raw status scan counts workflow containers
+  // (grouping chrome) and settled-vs-live differently, which left an empty
+  // wrapper reserving space while the strip rendered null.
+  const hasLiveAgents = useMemo(() => {
+    const state = deriveAgentPanelState(threadAgents);
+    return state.runningCount + state.waitingCount + state.backgroundRunningCount > 0;
+  }, [threadAgents]);
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
   );
-  const pendingUserInputs = useMemo(
-    () => derivePendingUserInputs(threadActivities),
-    [threadActivities],
-  );
+  // Pending input is a durable interaction, not an arrival-only effect. Derive
+  // it on every render so a selected thread's hydrated activity payload cannot
+  // be hidden behind stale collection identity.
+  const pendingUserInputs = derivePendingUserInputs(threadActivities);
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingDraftAnswers = useMemo(
     () =>
@@ -3778,26 +3811,15 @@ function ChatViewContent(props: ChatViewProps) {
     new Debouncer(() => setShowNewTextIndicator(true), { wait: 150 }),
   );
   const timelineScrollModeRef = useRef<TimelineScrollMode>("following-end");
-  const pendingTimelineAnchorRef = useRef<MessageId | null>(null);
-  const positionedTimelineAnchorRef = useRef<MessageId | null>(null);
-  const settledTimelineAnchorRef = useRef<MessageId | null>(null);
-  const activeTimelineAnchorIndexRef = useRef<number | null>(null);
   const anchorUserScrollGenerationRef = useRef(0);
   const liveFollowUserScrollGenerationRef = useRef<number | null>(0);
-  const pendingAnchorScrollRestoreRef = useRef<{
-    readonly messageId: MessageId;
-    readonly offset: number;
-    readonly userScrollGeneration: number;
-  } | null>(null);
-  const anchorScrollRestoreFrameRef = useRef<number | null>(null);
   const observedAssistantTextVersionRef = useRef<{
     readonly threadId: string | null;
     readonly version: string | null;
   }>({ threadId: null, version: null });
   const cancelTimelineLiveFollowForUserNavigation = useCallback(() => {
     const shouldStopProgrammaticPositioning =
-      liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current ||
-      positionedTimelineAnchorRef.current !== null;
+      liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current;
     if (shouldStopProgrammaticPositioning) {
       const list = legendListRef.current;
       const currentScrollOffset = list?.getState().scroll;
@@ -3808,22 +3830,9 @@ function ChatViewContent(props: ChatViewProps) {
     anchorUserScrollGenerationRef.current += 1;
     timelineScrollModeRef.current = "free-scrolling";
     liveFollowUserScrollGenerationRef.current = null;
-    pendingTimelineAnchorRef.current = null;
-    positionedTimelineAnchorRef.current = null;
-    settledTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
-    pendingAnchorScrollRestoreRef.current = null;
-    setTimelineAnchor((current) =>
-      current.threadKey === activeThreadKey && current.messageId === null
-        ? current
-        : { threadKey: activeThreadKey, messageId: null },
-    );
+    setTimelineRevealMessageId(null);
     setTimelineFollowOutput(false);
-    if (anchorScrollRestoreFrameRef.current !== null) {
-      cancelAnimationFrame(anchorScrollRestoreFrameRef.current);
-      anchorScrollRestoreFrameRef.current = null;
-    }
-  }, [activeThreadKey]);
+  }, []);
   useEffect(() => {
     const previous = observedAssistantTextVersionRef.current;
     observedAssistantTextVersionRef.current = {
@@ -3840,24 +3849,6 @@ function ChatViewContent(props: ChatViewProps) {
     }
     newTextIndicatorDebouncer.current.maybeExecute();
   }, [activeThreadId, latestAssistantTextVersion]);
-  const getActiveTimelineTurnMetrics = useCallback(
-    (list?: LegendListRef | null) => {
-      const resolvedList = list ?? legendListRef.current;
-      const anchorIndex = activeTimelineAnchorIndexRef.current;
-      const state = resolvedList?.getState();
-      if (!resolvedList || !state || anchorIndex === null) {
-        return null;
-      }
-
-      return getAnchoredTurnMetrics({
-        state,
-        anchorIndex,
-        composerOverlayHeight,
-        anchorOffset: CHAT_LIST_ANCHOR_OFFSET,
-      });
-    },
-    [composerOverlayHeight],
-  );
   const timelineRealContentOverflowsViewport = useCallback(
     (list?: LegendListRef | null) => {
       const resolvedList = list ?? legendListRef.current;
@@ -3892,137 +3883,76 @@ function ChatViewContent(props: ChatViewProps) {
   // gesture opts out.
   const scrollToEnd = useCallback((animated = false) => {
     isAtEndRef.current = true;
+    isStrictlyAtEndRef.current = true;
     timelineScrollModeRef.current = "following-end";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
     setTimelineFollowOutput(true);
     newTextIndicatorDebouncer.current.cancel();
     setShowNewTextIndicator(false);
     void legendListRef.current?.scrollToEnd?.({ animated });
   }, []);
 
-  const onTimelineAnchorReady = useCallback((messageId: MessageId, anchorIndex: number) => {
-    if (
-      !shouldPositionTimelineAnchor({
-        liveFollowUserScrollGeneration: liveFollowUserScrollGenerationRef.current,
-        userScrollGeneration: anchorUserScrollGenerationRef.current,
-      })
-    ) {
-      return;
-    }
-    if (pendingTimelineAnchorRef.current === messageId) {
-      pendingTimelineAnchorRef.current = null;
-    }
-    activeTimelineAnchorIndexRef.current = anchorIndex;
-    if (positionedTimelineAnchorRef.current === messageId) {
-      return;
-    }
-    positionedTimelineAnchorRef.current = messageId;
-    settledTimelineAnchorRef.current = null;
-    const positionAnchor = (remainingAttempts: number) => {
-      requestAnimationFrame(() => {
-        if (positionedTimelineAnchorRef.current !== messageId) {
-          return;
-        }
-        const list = legendListRef.current;
-        if (!list) {
-          if (remainingAttempts > 0) {
-            positionAnchor(remainingAttempts - 1);
-          }
-          return;
-        }
-        const scrollNode = list.getScrollableNode();
-        let finished = false;
-        const finishAnimatedPositioning = () => {
-          if (finished) {
-            return;
-          }
-          finished = true;
-          window.clearTimeout(fallbackTimer);
-          scrollNode.removeEventListener("scrollend", finishAnimatedPositioning);
-          if (positionedTimelineAnchorRef.current !== messageId) {
-            return;
-          }
-          const scrollOffset = list.getState().scroll;
-          void list.scrollToOffset({ offset: scrollOffset, animated: false });
-          settledTimelineAnchorRef.current = messageId;
-        };
-        const fallbackTimer = window.setTimeout(finishAnimatedPositioning, 750);
-        scrollNode.addEventListener("scrollend", finishAnimatedPositioning, { once: true });
-        void list.scrollToIndex({
-          index: anchorIndex,
-          animated: true,
-          viewPosition: 0,
-          viewOffset: CHAT_LIST_ANCHOR_OFFSET,
-        });
-      });
-    };
-    requestAnimationFrame(() => positionAnchor(12));
-  }, []);
-  const onTimelineAnchorSizeChanged = useCallback((messageId: MessageId) => {
-    if (settledTimelineAnchorRef.current !== messageId) {
-      return;
-    }
-    if (liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current) {
-      return;
-    }
-    const scrollOffset = legendListRef.current?.getState().scroll;
-    if (scrollOffset === undefined) {
-      return;
-    }
-    if (pendingAnchorScrollRestoreRef.current === null) {
-      pendingAnchorScrollRestoreRef.current = {
-        messageId,
-        offset: scrollOffset,
-        userScrollGeneration: anchorUserScrollGenerationRef.current,
-      };
-    }
-    if (anchorScrollRestoreFrameRef.current !== null) {
-      return;
-    }
-    anchorScrollRestoreFrameRef.current = requestAnimationFrame(() => {
-      anchorScrollRestoreFrameRef.current = null;
-      const pending = pendingAnchorScrollRestoreRef.current;
-      pendingAnchorScrollRestoreRef.current = null;
-      if (
-        pending &&
-        settledTimelineAnchorRef.current === pending.messageId &&
-        pending.userScrollGeneration === anchorUserScrollGenerationRef.current
-      ) {
-        const list = legendListRef.current;
-        const currentScrollOffset = list?.getState().scroll;
-        if (
-          typeof currentScrollOffset === "number" &&
-          Math.abs(currentScrollOffset - pending.offset) <= 2
-        ) {
-          void list?.scrollToOffset({ offset: pending.offset, animated: false });
-        }
-      }
-    });
+  const onTimelineRevealComplete = useCallback((messageId: MessageId) => {
+    setTimelineRevealMessageId((current) => (current === messageId ? null : current));
   }, []);
 
-  const onIsAtEndChange = useCallback((isAtEnd: boolean) => {
-    if (
-      !isAtEnd &&
-      liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current
-    ) {
-      newTextIndicatorDebouncer.current.cancel();
-      setShowNewTextIndicator(false);
+  /**
+   * A SHRINKING composer is the confirmed cause of the "send scrolls upward"
+   * jump. legend-list compensates scroll only when `contentInsetEndAdjustment`
+   * GROWS (`updateContentInsetEndAdjustment`: `if (insetDiff > 0) requestAdjust`).
+   * When it shrinks, the content shrinks with it and the browser clamps
+   * `scrollTop` up with no compensation. Re-pin the tail on the next frame.
+   * The reveal owns the offset while it is in flight, and free-scrolling means
+   * the reader chose their place — neither gets touched.
+   */
+  const previousComposerOverlayHeightRef = useRef(0);
+  useEffect(() => {
+    const previous = previousComposerOverlayHeightRef.current;
+    previousComposerOverlayHeightRef.current = composerOverlayHeight;
+    if (composerOverlayHeight >= previous) {
       return;
     }
-    if (isAtEndRef.current === isAtEnd) return;
-    isAtEndRef.current = isAtEnd;
-    if (isAtEnd) {
+    if (
+      timelineScrollModeRef.current !== "following-end" ||
+      timelineRevealMessageIdRef.current !== null
+    ) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      if (
+        timelineScrollModeRef.current !== "following-end" ||
+        timelineRevealMessageIdRef.current !== null
+      ) {
+        return;
+      }
+      void legendListRef.current?.scrollToEnd?.({ animated: false });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [composerOverlayHeight]);
+
+  const onIsAtEndChange = useCallback((isAtEnd: boolean, isStrictlyAtEnd: boolean) => {
+    isStrictlyAtEndRef.current = isStrictlyAtEnd;
+    const decision = resolveTimelineEndSignal({
+      isAtEnd,
+      previousIsAtEnd: isAtEndRef.current,
+      liveFollowArmed:
+        liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current,
+    });
+    isAtEndRef.current = decision.nextIsAtEnd;
+    if (decision.enterFollowingEnd) {
       timelineScrollModeRef.current = "following-end";
       liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
       setTimelineFollowOutput(true);
-      newTextIndicatorDebouncer.current.cancel();
-      setShowNewTextIndicator(false);
-    } else {
+    }
+    if (decision.enterFreeScrolling) {
       timelineScrollModeRef.current = "free-scrolling";
       liveFollowUserScrollGenerationRef.current = null;
       setTimelineFollowOutput(false);
+    }
+    if (decision.hideNewTextIndicator) {
+      newTextIndicatorDebouncer.current.cancel();
+      setShowNewTextIndicator(false);
     }
   }, []);
 
@@ -4040,31 +3970,13 @@ function ChatViewContent(props: ChatViewProps) {
         if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
           return;
         }
-        if (pendingTimelineAnchorRef.current !== null) {
-          return;
-        }
-        if (
-          positionedTimelineAnchorRef.current !== null &&
-          settledTimelineAnchorRef.current !== positionedTimelineAnchorRef.current
-        ) {
+        // The reveal owns the offset while it is in flight; a blind
+        // scroll-to-end here would fight it.
+        if (timelineRevealMessageIdRef.current !== null) {
           return;
         }
         const list = legendListRef.current;
         if (!list) {
-          return;
-        }
-
-        if (timelineScrollModeRef.current === "anchoring-new-turn") {
-          const metrics = getActiveTimelineTurnMetrics(list);
-          if (!metrics) {
-            return;
-          }
-          if (metrics.scrollDeltaToRevealEnd <= 1) {
-            return;
-          }
-
-          const nextOffset = list.getState().scroll + metrics.scrollDeltaToRevealEnd;
-          void list.scrollToOffset({ offset: nextOffset, animated: false });
           return;
         }
 
@@ -4085,22 +3997,15 @@ function ChatViewContent(props: ChatViewProps) {
         cancelAnimationFrame(secondFrame);
       }
     };
-  }, [
-    activeThread?.id,
-    timelineEntries,
-    getActiveTimelineTurnMetrics,
-    timelineRealContentOverflowsViewport,
-  ]);
+  }, [activeThread?.id, timelineEntries, timelineRealContentOverflowsViewport]);
 
   useEffect(() => {
     setPullRequestDialogState(null);
     isAtEndRef.current = true;
+    isStrictlyAtEndRef.current = true;
     timelineScrollModeRef.current = "following-end";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = null;
-    positionedTimelineAnchorRef.current = null;
-    settledTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
+    setTimelineRevealMessageId(null);
     setTimelineFollowOutput(true);
     newTextIndicatorDebouncer.current.cancel();
     setShowNewTextIndicator(false);
@@ -5100,26 +5005,20 @@ function ChatViewContent(props: ChatViewProps) {
       previewUrl: image.previewUrl,
     }));
     // Minimal-scroll on send: never anchor the new turn to the top. If the
-    // reader was at the live edge we keep following the end so the sent message
-    // rises just above the composer and the reply streams there; if they had
+    // reader was pinned to the live edge we follow the end AND run the measured
+    // reveal so the sent bubble lands exactly above the composer; if they had
     // scrolled up we leave them put. See resolveTimelineSendScroll.
-    const sendScroll = resolveTimelineSendScroll({ userWasAtEnd: isAtEndRef.current });
+    const sendScroll = resolveTimelineSendScroll({ userWasAtEnd: isStrictlyAtEndRef.current });
     isAtEndRef.current = sendScroll.isAtEnd;
+    isStrictlyAtEndRef.current = sendScroll.isAtEnd;
     timelineScrollModeRef.current = sendScroll.mode;
     liveFollowUserScrollGenerationRef.current = sendScroll.followOutput
       ? anchorUserScrollGenerationRef.current
       : null;
-    pendingTimelineAnchorRef.current = null;
-    positionedTimelineAnchorRef.current = null;
-    settledTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
     setTimelineFollowOutput(sendScroll.followOutput);
+    setTimelineRevealMessageId(sendScroll.followOutput ? messageIdForSend : null);
     newTextIndicatorDebouncer.current.cancel();
     setShowNewTextIndicator(false);
-    setTimelineAnchor({
-      threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-      messageId: null,
-    });
     setThreadError(threadIdForSend, null);
     if (expiredTerminalContextCount > 0) {
       const toastCopy = buildExpiredTerminalContextToastCopy(
@@ -5142,24 +5041,29 @@ function ChatViewContent(props: ChatViewProps) {
     // no surface) the commit runs directly and the CSS arrival is the handoff.
     // No scroll here.
     const sendMorphSurface = composerRef.current?.getSendMorphSurface() ?? null;
-    runSendMorphTransition(sendMorphSurface, outgoingMessageText, () => {
-      setOptimisticUserMessages((existing) => [
-        ...existing,
-        {
-          id: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-          turnId: null,
-          createdAt: messageCreatedAt,
-          updatedAt: messageCreatedAt,
-          streaming: false,
-        },
-      ]);
-      promptRef.current = "";
-      clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
-    });
+    runSendMorphTransition(
+      sendMorphSurface,
+      outgoingMessageText,
+      () => {
+        setOptimisticUserMessages((existing) => [
+          ...existing,
+          {
+            id: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+            turnId: null,
+            createdAt: messageCreatedAt,
+            updatedAt: messageCreatedAt,
+            streaming: false,
+          },
+        ]);
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      },
+      messageIdForSend,
+    );
 
     let firstComposerImageName: string | null = null;
     if (composerImagesSnapshot.length > 0) {
@@ -5613,45 +5517,45 @@ function ChatViewContent(props: ChatViewProps) {
       setThreadError(threadIdForSend, null);
 
       // Minimal-scroll on send: never anchor the new turn to the top. Follow
-      // the live edge when the reader was already there so the sent message
-      // rises just above the composer; otherwise leave their place untouched.
-      const sendScroll = resolveTimelineSendScroll({ userWasAtEnd: isAtEndRef.current });
+      // the live edge when the reader was pinned there so the measured reveal
+      // can land the sent message just above the composer; otherwise leave
+      // their place untouched.
+      const sendScroll = resolveTimelineSendScroll({ userWasAtEnd: isStrictlyAtEndRef.current });
       isAtEndRef.current = sendScroll.isAtEnd;
+      isStrictlyAtEndRef.current = sendScroll.isAtEnd;
       timelineScrollModeRef.current = sendScroll.mode;
       liveFollowUserScrollGenerationRef.current = sendScroll.followOutput
         ? anchorUserScrollGenerationRef.current
         : null;
-      pendingTimelineAnchorRef.current = null;
-      positionedTimelineAnchorRef.current = null;
-      settledTimelineAnchorRef.current = null;
-      activeTimelineAnchorIndexRef.current = null;
       setTimelineFollowOutput(sendScroll.followOutput);
+      setTimelineRevealMessageId(sendScroll.followOutput ? messageIdForSend : null);
       newTextIndicatorDebouncer.current.cancel();
       setShowNewTextIndicator(false);
-      setTimelineAnchor({
-        threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-        messageId: null,
-      });
 
       // Same send-morph as the main composer path: the flyer lifts the just-sent
       // text out of the composer into the optimistic follow-up bubble. The text
       // is passed in explicitly, so clearing the composer inside the commit is
       // safe.
-      runSendMorphTransition(sendMorphSurface, outgoingMessageText, () => {
-        setOptimisticUserMessages((existing) => [
-          ...existing,
-          {
-            id: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            turnId: null,
-            createdAt: messageCreatedAt,
-            updatedAt: messageCreatedAt,
-            streaming: false,
-          },
-        ]);
-        clearComposer?.();
-      });
+      runSendMorphTransition(
+        sendMorphSurface,
+        outgoingMessageText,
+        () => {
+          setOptimisticUserMessages((existing) => [
+            ...existing,
+            {
+              id: messageIdForSend,
+              role: "user",
+              text: outgoingMessageText,
+              turnId: null,
+              createdAt: messageCreatedAt,
+              updatedAt: messageCreatedAt,
+              streaming: false,
+            },
+          ]);
+          clearComposer?.();
+        },
+        messageIdForSend,
+      );
 
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
@@ -6287,11 +6191,11 @@ function ChatViewContent(props: ChatViewProps) {
                 timestampFormat={timestampFormat}
                 workspaceRoot={activeWorkspaceRoot}
                 skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
-                anchorMessageId={timelineAnchorMessageId}
-                onAnchorReady={onTimelineAnchorReady}
-                onAnchorSizeChanged={onTimelineAnchorSizeChanged}
                 contentInsetEndAdjustment={composerOverlayHeight}
                 followOutput={timelineFollowOutput}
+                initialHydration={timelineInitialHydration}
+                revealMessageId={timelineRevealMessageId}
+                onRevealComplete={onTimelineRevealComplete}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
                 onAddConversationReference={addConversationReferenceToDraft}
@@ -6332,7 +6236,6 @@ function ChatViewContent(props: ChatViewProps) {
 
             {/* Input bar — centered hero while a draft has no messages, docked at the bottom otherwise */}
             <div
-              ref={setComposerOverlayElement}
               data-chat-composer-overlay="true"
               className={
                 isDraftHeroState
@@ -6344,7 +6247,12 @@ function ChatViewContent(props: ChatViewProps) {
                 ref={attachDraftHeroTransitionGroupRef}
                 className="chat-composer-horizontal-inset w-full"
               >
-                <div className="pointer-events-auto relative z-10">
+                {/* Measured for `contentInsetEndAdjustment`: this card is the
+                    composer's real height in BOTH hero and docked states. The
+                    overlay wrapper above is `absolute inset-0` while the draft
+                    hero is showing, so measuring it would feed a
+                    viewport-height inset into the list. */}
+                <div ref={setComposerOverlayElement} className="pointer-events-auto relative z-10">
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full z-0">
                       <div
@@ -6369,7 +6277,11 @@ function ChatViewContent(props: ChatViewProps) {
                   )}
                   {hasLiveAgents ? (
                     <div className="mb-1.5">
-                      <AgentsLiveStrip agents={threadAgents} onOpen={addAgentsSurface} />
+                      <AgentsLiveStrip
+                        agents={threadAgents}
+                        onOpen={addAgentsSurface}
+                        initialHydration={timelineInitialHydration}
+                      />
                     </div>
                   ) : null}
                   <div
@@ -6417,7 +6329,10 @@ function ChatViewContent(props: ChatViewProps) {
                             activePendingIsResponding={activePendingIsResponding}
                             activePendingDraftAnswers={activePendingDraftAnswers}
                             activePendingQuestionIndex={activePendingQuestionIndex}
-                            respondingRequestIds={respondingRequestIds}
+                            respondingRequestIds={[
+                              ...respondingRequestIds,
+                              ...respondingUserInputRequestIds,
+                            ]}
                             showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                             activeProposedPlan={activeProposedPlan}
                             activePlan={activePlan as { turnId?: TurnId } | null}

@@ -489,6 +489,81 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   );
 });
 
+/**
+ * Send-button celebration lifecycle (launch animation + release ripple).
+ *
+ * The visuals are CSS keyframes gated on a class, which makes a *second* send
+ * inside the first one's window the only interesting case: re-setting `true` on
+ * already-`true` state is a React bail-out, so the class never leaves the DOM
+ * and the browser never replays the keyframes — the beat would silently drop on
+ * exactly the rapid-fire sends where it matters most. Dropping the class for a
+ * single frame forces the replay without remounting anything, so the DOM stays
+ * a fixed size no matter how many messages go out.
+ *
+ * Exported for tests: ChatComposer itself is far too large to mount in one.
+ */
+export function useSendCelebration(): {
+  isSendCelebrating: boolean;
+  finishSendCelebration: () => void;
+  triggerSendCelebration: () => void;
+} {
+  const [isSendCelebrating, setIsSendCelebrating] = useState(false);
+  // Mirrored into a ref so `triggerSendCelebration` can stay identity-stable
+  // (it is handed to ChatView through the imperative handle).
+  const isCelebratingRef = useRef(false);
+  const timeoutRef = useRef<number | null>(null);
+  const restartFrameRef = useRef<number | null>(null);
+
+  const setCelebrating = useCallback((next: boolean) => {
+    isCelebratingRef.current = next;
+    setIsSendCelebrating(next);
+  }, []);
+
+  const clearPendingWork = useCallback(() => {
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+    if (restartFrameRef.current !== null) {
+      window.cancelAnimationFrame(restartFrameRef.current);
+      restartFrameRef.current = null;
+    }
+  }, []);
+
+  /** The arrow's `animationend` — the celebration ended on its own terms. */
+  const finishSendCelebration = useCallback(() => {
+    clearPendingWork();
+    setCelebrating(false);
+  }, [clearPendingWork, setCelebrating]);
+
+  const triggerSendCelebration = useCallback(() => {
+    clearPendingWork();
+    const start = () => {
+      setCelebrating(true);
+      // Safety net only: `animationend` normally clears first. This catches the
+      // button being swapped for the spinner (or the tab backgrounded) midway,
+      // which would otherwise strand the class and wedge the next send.
+      timeoutRef.current = window.setTimeout(() => {
+        timeoutRef.current = null;
+        setCelebrating(false);
+      }, COMPOSER_SEND_CELEBRATION_DURATION_MS + 50);
+    };
+    if (!isCelebratingRef.current) {
+      start();
+      return;
+    }
+    setCelebrating(false);
+    restartFrameRef.current = window.requestAnimationFrame(() => {
+      restartFrameRef.current = null;
+      start();
+    });
+  }, [clearPendingWork, setCelebrating]);
+
+  useEffect(() => clearPendingWork, [clearPendingWork]);
+
+  return { isSendCelebrating, finishSendCelebration, triggerSendCelebration };
+}
+
 // --------------------------------------------------------------------------
 // Handle exposed to ChatView
 // --------------------------------------------------------------------------
@@ -1035,7 +1110,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
-  const [isSendCelebrating, setIsSendCelebrating] = useState(false);
+  const { isSendCelebrating, finishSendCelebration, triggerSendCelebration } = useSendCelebration();
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
@@ -1072,7 +1147,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerBlurFrameRef = useRef<number | null>(null);
   const mobileComposerExpandFrameRef = useRef<number | null>(null);
   const mobileComposerExpandReleaseFrameRef = useRef<number | null>(null);
-  const sendCelebrationTimeoutRef = useRef<number | null>(null);
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
   const stashPulseKeyRef = useRef(0);
@@ -2732,25 +2806,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     });
   }, [isMobileViewport]);
 
-  const finishSendCelebration = useCallback(() => {
-    if (sendCelebrationTimeoutRef.current !== null) {
-      window.clearTimeout(sendCelebrationTimeoutRef.current);
-      sendCelebrationTimeoutRef.current = null;
-    }
-    setIsSendCelebrating(false);
-  }, []);
-
-  const triggerSendCelebration = useCallback(() => {
-    if (sendCelebrationTimeoutRef.current !== null) {
-      window.clearTimeout(sendCelebrationTimeoutRef.current);
-    }
-    setIsSendCelebrating(true);
-    sendCelebrationTimeoutRef.current = window.setTimeout(() => {
-      sendCelebrationTimeoutRef.current = null;
-      setIsSendCelebrating(false);
-    }, COMPOSER_SEND_CELEBRATION_DURATION_MS + 50);
-  }, []);
-
   useEffect(() => {
     return () => {
       if (composerBlurFrameRef.current !== null) {
@@ -2761,9 +2816,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       if (mobileComposerExpandReleaseFrameRef.current !== null) {
         window.cancelAnimationFrame(mobileComposerExpandReleaseFrameRef.current);
-      }
-      if (sendCelebrationTimeoutRef.current !== null) {
-        window.clearTimeout(sendCelebrationTimeoutRef.current);
       }
     };
   }, []);

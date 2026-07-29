@@ -6,7 +6,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
+import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import {
   createContext,
   Fragment,
@@ -70,6 +70,7 @@ import {
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
+  resolveTimelineIsStrictlyAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapHeightStyle,
   resolveTimelineMinimapHitStripWidth,
@@ -86,6 +87,7 @@ import {
   type TimelineLifecycleLedger,
   timelineLifecycleHasOneShots,
 } from "./MessagesTimeline.logic";
+import { resolveSentMessageRevealOffset } from "./timelineScrollAnchoring";
 import { type ComposerInterruptState } from "./ComposerPrimaryActions";
 import { getStatusPresentation, type StatusAxes } from "~/lib/statusPresentation";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
@@ -177,6 +179,17 @@ const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+/**
+ * How long the send reveal keeps correcting its own target. It deliberately
+ * runs the whole window rather than stopping as soon as the row's measured size
+ * holds still for a frame or two: the case this exists for — a late-loading
+ * image attachment — settles *after* a stretch of stable frames, so an
+ * early exit on "size stable" would hand off exactly before the growth that
+ * pushes the bubble back behind the composer. Re-application is idempotent
+ * (the target has to actually move to re-arm the scroll), so the extra frames
+ * cost nothing.
+ */
+const SEND_REVEAL_WINDOW_MS = 1200;
 const minimapPreviewCache = new WeakMap<object, string | null>();
 const TIMELINE_SCROLL_NAVIGATION_KEYS = new Set([
   " ",
@@ -213,12 +226,22 @@ interface MessagesTimelineProps {
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
-  anchorMessageId: MessageId | null;
-  onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
-  onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
   contentInsetEndAdjustment: number;
   followOutput: boolean;
-  onIsAtEndChange: (isAtEnd: boolean) => void;
+  /** Persisted state is still collapsing; render it without one-shot motion. */
+  initialHydration?: boolean;
+  /**
+   * The just-sent user message to reveal above the composer, or `null`. Owned
+   * by the send handlers; cleared through {@link MessagesTimelineProps.onRevealComplete}.
+   */
+  revealMessageId?: MessageId | null;
+  onRevealComplete?: (messageId: MessageId) => void;
+  /**
+   * `isNearEnd` (half-viewport slack) first, then the strict `isAtEnd`. The
+   * first drives live-follow and the new-text indicator; the second is the only
+   * safe input to the send decision.
+   */
+  onIsAtEndChange: (isNearEnd: boolean, isStrictlyAtEnd: boolean) => void;
   onManualNavigation: () => void;
   onAddConversationReference: (selection: ConversationReferenceSelection) => boolean;
   hideEmptyPlaceholder?: boolean;
@@ -253,11 +276,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timestampFormat,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
-  anchorMessageId,
-  onAnchorReady,
-  onAnchorSizeChanged,
   contentInsetEndAdjustment,
   followOutput,
+  initialHydration = false,
+  revealMessageId = null,
+  onRevealComplete,
   onIsAtEndChange,
   onManualNavigation,
   onAddConversationReference,
@@ -375,43 +398,135 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const interruptedTurnId =
     latestTurn?.state === "interrupted" ? (latestTurn.turnId ?? null) : null;
-  const lifecycle = useTimelineLifecycle(rows, routeThreadKey, unsettledTurnId, interruptedTurnId);
+  const lifecycle = useTimelineLifecycle(
+    rows,
+    routeThreadKey,
+    initialHydration,
+    unsettledTurnId,
+    interruptedTurnId,
+  );
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
-  const handleAnchorReady = useCallback(
-    (info: { anchorIndex: number | undefined }) => {
-      if (anchorMessageId !== null && info.anchorIndex !== undefined) {
-        onAnchorReady(anchorMessageId, info.anchorIndex);
+
+  // ---------------------------------------------------------------------
+  // Send reveal — deterministic, measured, and abortable.
+  //
+  // The list, not ChatView, owns the post-send offset: it is the only place
+  // that can read row geometry on the same frame the row is measured. The
+  // routine re-applies while the row is still growing (a late-loading image
+  // attachment is the case that used to push the bubble back behind the
+  // composer) and yields the instant the reader touches the scroller.
+  // ---------------------------------------------------------------------
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const contentInsetEndAdjustmentRef = useRef(contentInsetEndAdjustment);
+  contentInsetEndAdjustmentRef.current = contentInsetEndAdjustment;
+  const abortRevealRef = useRef<(() => void) | null>(null);
+
+  const handleManualNavigation = useCallback(() => {
+    // Never fight the user: a manual scroll ends the reveal immediately.
+    abortRevealRef.current?.();
+    onManualNavigation();
+  }, [onManualNavigation]);
+
+  useEffect(() => {
+    const messageId = revealMessageId;
+    if (messageId === null) {
+      return;
+    }
+
+    let frame: number | null = null;
+    let finished = false;
+    let lastIssuedOffset: number | null = null;
+    const startedAt = Date.now();
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+        frame = null;
       }
-    },
-    [anchorMessageId, onAnchorReady],
-  );
-  const handleAnchorSizeChanged = useCallback(
-    (size: number) => {
-      if (anchorMessageId !== null) {
-        onAnchorSizeChanged(anchorMessageId, size);
+      abortRevealRef.current = null;
+      onRevealComplete?.(messageId);
+    };
+    abortRevealRef.current = finish;
+
+    const step = () => {
+      frame = null;
+      if (finished) return;
+
+      const list = listRef.current;
+      const state = list?.getState?.();
+      const currentRows = rowsRef.current;
+      const index = currentRows.findIndex(
+        (row) => row.kind === "message" && row.message.id === messageId,
+      );
+      const lastIndex = currentRows.length - 1;
+
+      if (list && state && index >= 0 && lastIndex >= 0) {
+        const messageTop = state.positionAtIndex?.(index);
+        const lastTop = state.positionAtIndex?.(lastIndex);
+        const lastSize = state.sizeAtIndex?.(lastIndex);
+        if (
+          typeof messageTop === "number" &&
+          typeof lastTop === "number" &&
+          typeof lastSize === "number" &&
+          Number.isFinite(messageTop) &&
+          Number.isFinite(lastTop) &&
+          Number.isFinite(lastSize)
+        ) {
+          const offset = resolveSentMessageRevealOffset({
+            currentScroll: state.scroll ?? 0,
+            scrollLength: state.scrollLength ?? 0,
+            composerInset: contentInsetEndAdjustmentRef.current,
+            messageTop,
+            contentBottom: lastTop + Math.max(1, lastSize),
+            anchorOffset: CHAT_LIST_ANCHOR_OFFSET,
+          });
+          // Re-issuing the same target every frame would restart the smooth
+          // scroll forever; only a genuinely moved target re-arms it.
+          if (
+            offset !== null &&
+            (lastIssuedOffset === null || Math.abs(offset - lastIssuedOffset) > 1)
+          ) {
+            lastIssuedOffset = offset;
+            void list.scrollToOffset({ offset, animated: true });
+          }
+        }
       }
-    },
-    [anchorMessageId, onAnchorSizeChanged],
-  );
-  const anchoredEndSpace = useMemo(() => {
-    const config = resolveChatListAnchoredEndSpace(rows, anchorMessageId, (row) =>
-      row.kind === "message" ? row.message.id : null,
-    );
-    return config
-      ? { ...config, onReady: handleAnchorReady, onSizeChanged: handleAnchorSizeChanged }
-      : undefined;
-  }, [anchorMessageId, handleAnchorReady, handleAnchorSizeChanged, rows]);
+
+      if (Date.now() - startedAt >= SEND_REVEAL_WINDOW_MS) {
+        finish();
+        return;
+      }
+      frame = requestAnimationFrame(step);
+    };
+
+    frame = requestAnimationFrame(step);
+
+    return () => {
+      finished = true;
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+        frame = null;
+      }
+      if (abortRevealRef.current === finish) {
+        abortRevealRef.current = null;
+      }
+    };
+  }, [revealMessageId, listRef, onRevealComplete]);
 
   const handleScroll = useCallback(() => {
     const state = listRef.current?.getState?.();
-    const isAtEnd = resolveTimelineIsAtEnd(state);
-    if (isAtEnd !== undefined) {
-      onIsAtEndChange(isAtEnd);
+    const isNearEnd = resolveTimelineIsAtEnd(state);
+    const isStrictlyAtEnd = resolveTimelineIsStrictlyAtEnd(state);
+    if (isNearEnd !== undefined) {
+      onIsAtEndChange(isNearEnd, isStrictlyAtEnd ?? isNearEnd);
     }
     if (!state || minimapItems.length === 0) {
       return;
@@ -439,10 +554,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const handleTimelineKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
       if (TIMELINE_SCROLL_NAVIGATION_KEYS.has(event.key)) {
-        onManualNavigation();
+        handleManualNavigation();
       }
     },
-    [onManualNavigation],
+    [handleManualNavigation],
   );
 
   useEffect(() => {
@@ -566,9 +681,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           ref={setTimelineViewportElement}
           className="relative h-full min-h-0"
           onKeyDownCapture={handleTimelineKeyDown}
-          onPointerDownCapture={onManualNavigation}
-          onTouchMoveCapture={onManualNavigation}
-          onWheelCapture={onManualNavigation}
+          onPointerDownCapture={handleManualNavigation}
+          onTouchMoveCapture={handleManualNavigation}
+          onWheelCapture={handleManualNavigation}
         >
           <ConversationSelectionAction
             rootElement={timelineViewportElement}
@@ -582,10 +697,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             renderItem={renderItem}
             estimatedItemSize={90}
             initialScrollAtEnd
-            {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={contentInsetEndAdjustment}
             maintainScrollAtEnd={
-              anchoredEndSpace || !followOutput
+              !followOutput
                 ? false
                 : {
                     animated: false,
@@ -616,7 +730,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             hitStripWidth={minimapHitStripWidth}
             stripMap={minimapStripMap}
             onSelect={(item) => {
-              onManualNavigation();
+              handleManualNavigation();
               void listRef.current?.scrollToIndex({
                 index: item.rowIndex,
                 animated: true,
@@ -982,9 +1096,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   // `advanceTimelineLifecycle`.
   const isArriving = activity.arrivingUserMessageIds.has(row.message.id);
   // The send-morph itself lives in the send handler (`runSendMorphTransition`):
-  // it flies a `position: fixed` flyer — a single div BUILT from the sent text,
-  // not a clone of the composer subtree — into this bubble, live-retargeting on
-  // `data-user-turn-arrival` (set below) as the deterministic landing hook.
+  // a `position: fixed` container morphs from the composer's box to this
+  // bubble's box (clip-path + translate, never scale). Its outgoing layer is
+  // BUILT from the sent text — not a clone of the composer subtree — and its
+  // incoming layer is a one-time clone of this bubble (so attachments fly too),
+  // live-retargeting on `data-user-turn-arrival` (set below) as the
+  // deterministic landing hook.
   // `isArriving` guarantees that hook only ever lands on the genuinely-just-sent
   // turn — never on history, a virtualized remount, or a scroll restoration.
   // When the flight cannot run (headless / tests, reduced motion, no composer
@@ -1026,6 +1143,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         // history or a virtualized remount) and left to the flight to hide +
         // crossfade in; the flight owns all inline styles it applies here.
         data-user-turn-arrival={isArriving ? "true" : undefined}
+        // Binds the hook to this exact turn: rapid consecutive sends can leave
+        // two rows flagged as arriving inside the ledger TTL, and the flight
+        // must land on the one it sent, never the first hook in the DOM.
+        data-user-turn-arrival-id={isArriving ? row.message.id : undefined}
       >
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
@@ -1965,6 +2086,7 @@ function useStableRows(rows: MessagesTimelineRow[]): MessagesTimelineRow[] {
 function useTimelineLifecycle(
   rows: MessagesTimelineRow[],
   threadKey: string,
+  initialHydration: boolean,
   unsettledTurnId: TurnId | null,
   interruptedTurnId: TurnId | null,
 ): TimelineLifecycleLedger {
@@ -1974,12 +2096,19 @@ function useTimelineLifecycle(
   const ledger = useMemo(() => {
     void expiryEpoch;
     const next = advanceTimelineLifecycle(
-      { rows, threadKey, unsettledTurnId, interruptedTurnId, now: Date.now() },
+      {
+        rows,
+        threadKey,
+        initialHydration,
+        unsettledTurnId,
+        interruptedTurnId,
+        now: Date.now(),
+      },
       ledgerRef.current,
     );
     ledgerRef.current = next;
     return next;
-  }, [rows, threadKey, unsettledTurnId, interruptedTurnId, expiryEpoch]);
+  }, [rows, threadKey, initialHydration, unsettledTurnId, interruptedTurnId, expiryEpoch]);
 
   useEffect(() => {
     if (!timelineLifecycleHasOneShots(ledger)) {
@@ -2245,7 +2374,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     "conversation-tool-icon flex size-5 shrink-0 items-center justify-center",
     // The running trace is a contained ring on the icon box itself, so the row
     // never changes height or reflows as a tool starts and finishes.
-    isRunning && "conversation-tool-running text-primary",
+    // Colour comes from `.conversation-tool-running` (--tool-running), not a
+    // `text-primary` utility: the running icon and its orbit share one hue.
+    isRunning && "conversation-tool-running",
     showWarningIndicator
       ? "text-destructive"
       : showDestructiveRowStyle

@@ -86,9 +86,6 @@ function baseProps() {
     resolvedTheme: "light" as const,
     timestampFormat: "locale" as const,
     workspaceRoot: undefined,
-    anchorMessageId: null,
-    onAnchorReady: () => {},
-    onAnchorSizeChanged: () => {},
     contentInsetEndAdjustment: 0,
     followOutput: true,
     onIsAtEndChange: () => {},
@@ -231,6 +228,71 @@ function workEntry(opts: {
 function caretHooks(container: HTMLElement): Element[] {
   return [...container.querySelectorAll(".conversation-live-caret")];
 }
+
+describe("MessagesTimeline persisted hydration (live DOM)", () => {
+  it("renders a long incrementally supplied history without taking the arrival path", () => {
+    const props = baseProps();
+    let history: ReturnType<typeof userEntry | typeof assistantEntry>[] = [];
+    const { container, root } = mount(
+      <MessagesTimeline {...props} initialHydration timelineEntries={history} />,
+    );
+
+    // Model a pathological reducer replay: many persisted rows arrive in
+    // separate React commits. The explicit guard must keep every commit static.
+    for (let index = 0; index < 40; index += 1) {
+      history = [
+        ...history,
+        userEntry(`history-user-${index}`, `Historical question ${index}`),
+        assistantEntry(`history-assistant-${index}`, `Historical answer ${index}`, false, null),
+      ];
+      act(() => {
+        root.render(<MessagesTimeline {...props} initialHydration timelineEntries={history} />);
+      });
+      expect(arrivalBubbles(container)).toHaveLength(0);
+      expect(container.querySelector(".conversation-tool-flash")).toBeNull();
+      expect(container.querySelector('[data-live-response-edge="resolved"]')).toBeNull();
+    }
+
+    // Committing the collapsed snapshot must remain inert too.
+    act(() => {
+      root.render(<MessagesTimeline {...props} timelineEntries={history} />);
+    });
+    expect(arrivalBubbles(container)).toHaveLength(0);
+
+    act(() => root.unmount());
+  });
+
+  it("animates a genuinely new user message after hydration commits", () => {
+    const props = baseProps();
+    const history = [
+      userEntry("history-user", "Historical question"),
+      assistantEntry("history-assistant", "Historical answer", false, null),
+    ];
+    const { container, root } = mount(
+      <MessagesTimeline {...props} initialHydration timelineEntries={history} />,
+    );
+
+    act(() => {
+      root.render(<MessagesTimeline {...props} timelineEntries={history} />);
+    });
+    expect(arrivalBubbles(container)).toHaveLength(0);
+
+    act(() => {
+      root.render(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[...history, userEntry("live-user", "Actually new")]}
+        />,
+      );
+    });
+
+    const arrivals = arrivalBubbles(container);
+    expect(arrivals).toHaveLength(1);
+    expect(arrivals[0]?.textContent).toContain("Actually new");
+
+    act(() => root.unmount());
+  });
+});
 
 describe("MessagesTimeline live-response caret (live DOM)", () => {
   it("mounts the caret hook at the end of the newest streaming message's content", () => {

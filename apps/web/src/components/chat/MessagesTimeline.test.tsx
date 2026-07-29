@@ -14,13 +14,6 @@ vi.mock("@legendapp/list/react", async () => {
     renderItem: (args: { item: { id: string } }) => ReactNode;
     ListHeaderComponent?: ReactNode;
     ListFooterComponent?: ReactNode;
-    anchoredEndSpace?: {
-      anchorIndex: number;
-      anchorMaxSize?: number;
-      anchorOffset?: number;
-      onReady?: (info: { anchorIndex: number }) => void;
-      onSizeChanged?: (size: number) => void;
-    };
     contentInsetEndAdjustment?: number;
     className?: string;
     maintainScrollAtEnd?:
@@ -43,17 +36,9 @@ vi.mock("@legendapp/list/react", async () => {
         };
     ref?: Ref<LegendListRef>;
   }) => {
-    if (props.anchoredEndSpace) {
-      props.anchoredEndSpace.onSizeChanged?.(240);
-      props.anchoredEndSpace.onReady?.({ anchorIndex: props.anchoredEndSpace.anchorIndex });
-    }
     return (
       <div
         data-testid={legendListTestId}
-        data-anchor-index={props.anchoredEndSpace?.anchorIndex}
-        data-anchor-max-size={props.anchoredEndSpace?.anchorMaxSize}
-        data-anchor-offset={props.anchoredEndSpace?.anchorOffset}
-        data-anchor-on-ready={Boolean(props.anchoredEndSpace?.onReady)}
         data-content-inset-end={props.contentInsetEndAdjustment}
         data-class-name={props.className}
         data-maintain-scroll-at-end={props.maintainScrollAtEnd ? "enabled" : undefined}
@@ -193,9 +178,6 @@ function buildProps() {
     resolvedTheme: "light" as const,
     timestampFormat: "locale" as const,
     workspaceRoot: undefined,
-    anchorMessageId: null,
-    onAnchorReady: () => {},
-    onAnchorSizeChanged: () => {},
     contentInsetEndAdjustment: 0,
     followOutput: true,
     onIsAtEndChange: () => {},
@@ -331,9 +313,10 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("1 changed file");
   });
 
-  it("uses LegendList isNearEnd when deciding whether the live edge is visible", async () => {
+  it("reports the near-end and strict live-edge signals separately", async () => {
     const {
       resolveTimelineIsAtEnd,
+      resolveTimelineIsStrictlyAtEnd,
       resolveTimelineMinimapHasPersistentGutter,
       resolveTimelineMinimapHeightStyle,
       resolveTimelineMinimapHitStripWidth,
@@ -342,10 +325,19 @@ describe("MessagesTimeline", () => {
       resolveTimelineMinimapTopPercent,
     } = await import("./MessagesTimeline.logic");
 
+    // Near-end keeps its generous half-viewport meaning: it drives live-follow
+    // and the new-text indicator.
     expect(resolveTimelineIsAtEnd({ isNearEnd: true, isAtEnd: false })).toBe(true);
     expect(resolveTimelineIsAtEnd({ isNearEnd: false, isAtEnd: true })).toBe(false);
     expect(resolveTimelineIsAtEnd({ isAtEnd: true })).toBe(true);
     expect(resolveTimelineIsAtEnd(undefined)).toBeUndefined();
+
+    // The strict signal is the one the send decision uses: half a viewport of
+    // slack must not count as "the reader was at the live edge".
+    expect(resolveTimelineIsStrictlyAtEnd({ isNearEnd: true, isAtEnd: false })).toBe(false);
+    expect(resolveTimelineIsStrictlyAtEnd({ isNearEnd: false, isAtEnd: true })).toBe(true);
+    expect(resolveTimelineIsStrictlyAtEnd({ isNearEnd: true })).toBeUndefined();
+    expect(resolveTimelineIsStrictlyAtEnd(undefined)).toBeUndefined();
 
     expect(resolveTimelineMinimapHeightStyle(5)).toBe("min(32px, calc(100vh - 18rem))");
     expect(resolveTimelineMinimapTopPercent(2, 5)).toBe(50);
@@ -392,9 +384,7 @@ describe("MessagesTimeline", () => {
     expect(resolveTimelineMinimapInteractiveWidth(40, true)).toBe("22rem");
   });
 
-  it("anchors a sent attachment message using its measured height", () => {
-    const onAnchorReady = vi.fn();
-    const onAnchorSizeChanged = vi.fn();
+  it("keeps end-follow armed for a sent attachment message and reserves the composer inset", () => {
     const firstEntry = buildUserTimelineEntry("First prompt.");
     const secondEntry = {
       ...buildUserTimelineEntry("Newest prompt."),
@@ -417,27 +407,22 @@ describe("MessagesTimeline", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
-        anchorMessageId={secondEntry.message.id}
-        onAnchorReady={onAnchorReady}
-        onAnchorSizeChanged={onAnchorSizeChanged}
+        revealMessageId={secondEntry.message.id}
         contentInsetEndAdjustment={144}
         timelineEntries={[firstEntry, secondEntry]}
       />,
     );
 
-    expect(markup).toContain('data-anchor-index="1"');
-    expect(markup).toContain('data-anchor-offset="16"');
-    expect(markup).toContain('data-anchor-on-ready="true"');
-    expect(markup).not.toContain("data-anchor-max-size=");
+    // The anchored-end-space machinery is gone: the sent message is revealed by
+    // the measured reveal routine, so end-follow stays armed and the composer
+    // inset is the only end-space the list reserves.
+    expect(markup).not.toContain("data-anchor-");
     expect(markup).toContain('data-content-inset-end="144"');
     expect(markup).toContain("[overflow-anchor:none]");
-    expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
+    expect(markup).toContain('data-maintain-scroll-at-end="enabled"');
     expect(markup).toContain('data-maintain-visible-content-position="object"');
     expect(markup).toContain('data-maintain-visible-content-position-data="true"');
     expect(markup).toContain('data-maintain-visible-content-position-size="true"');
-    expect(onAnchorReady).toHaveBeenCalledOnce();
-    expect(onAnchorReady).toHaveBeenCalledWith(secondEntry.message.id, 1);
-    expect(onAnchorSizeChanged).toHaveBeenCalledWith(secondEntry.message.id, 240);
   });
 
   it("renders collapse controls for long user messages", () => {

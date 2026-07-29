@@ -25,10 +25,12 @@ import {
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  resolveThreadVisitBaseline,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
+import { hasUnseenCompletion } from "./Sidebar.logic";
 
 const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
@@ -110,6 +112,70 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
         nextBranch: "feature/current",
       }),
     ).toBeNull();
+  });
+});
+
+describe("resolveThreadVisitBaseline", () => {
+  it("keeps a passive completion unread until the thread is explicitly activated", () => {
+    const routeThreadKey = "environment-local:thread-1";
+    let lastVisitedAt: string | undefined;
+
+    const initialEngagement = resolveThreadVisitBaseline({
+      pendingEngagementKey: routeThreadKey,
+      routeThreadKey,
+      threadUpdatedAt: now,
+      lastVisitedAt,
+    });
+    expect(initialEngagement).toEqual({
+      pendingEngagementKey: null,
+      visitedAt: now,
+    });
+    lastVisitedAt = initialEngagement.visitedAt ?? lastVisitedAt;
+
+    const passiveCompletion = resolveThreadVisitBaseline({
+      pendingEngagementKey: initialEngagement.pendingEngagementKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt,
+    });
+    expect(passiveCompletion).toEqual({
+      pendingEngagementKey: null,
+      visitedAt: null,
+    });
+    expect(
+      hasUnseenCompletion({
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: completedTurn,
+        lastVisitedAt,
+        session: readySession,
+      }),
+    ).toBe(true);
+
+    const explicitActivation = resolveThreadVisitBaseline({
+      pendingEngagementKey: routeThreadKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt,
+    });
+    expect(explicitActivation).toEqual({
+      pendingEngagementKey: null,
+      visitedAt: completedTurn.completedAt,
+    });
+    lastVisitedAt = explicitActivation.visitedAt ?? lastVisitedAt;
+    expect(
+      hasUnseenCompletion({
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: completedTurn,
+        lastVisitedAt,
+        session: readySession,
+      }),
+    ).toBe(false);
   });
 });
 

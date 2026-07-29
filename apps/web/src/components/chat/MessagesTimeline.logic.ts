@@ -23,8 +23,25 @@ export interface TimelineEndState {
   readonly isNearEnd?: boolean;
 }
 
+/**
+ * The generous signal: `isNearEnd` is a half-viewport threshold. It drives
+ * live-follow and the new-text indicator, where "close enough to the bottom"
+ * is the right question.
+ */
 export function resolveTimelineIsAtEnd(state: TimelineEndState | undefined): boolean | undefined {
   return state?.isNearEnd ?? state?.isAtEnd;
+}
+
+/**
+ * The strict signal: was the reader actually pinned to the live edge? This is
+ * the one the send decision must use. Half a viewport of slack is far too much
+ * latitude for "sending is allowed to move the viewport" — it makes a send from
+ * a third of the way up the last screen behave like a send from the bottom.
+ */
+export function resolveTimelineIsStrictlyAtEnd(
+  state: TimelineEndState | undefined,
+): boolean | undefined {
+  return state?.isAtEnd;
 }
 
 export function resolveTimelineMinimapHeightStyle(itemCount: number): string {
@@ -647,6 +664,8 @@ function observeTimelineLifecycle(
 export interface TimelineLifecycleInput {
   readonly rows: ReadonlyArray<MessagesTimelineRow>;
   readonly threadKey: string;
+  /** Suppress one-shots while persisted catch-up is becoming one snapshot. */
+  readonly initialHydration?: boolean;
   readonly unsettledTurnId: TurnId | null;
   /** Latest turn when it settled as interrupted, so a stop never reads as a win. */
   readonly interruptedTurnId: TurnId | null;
@@ -657,10 +676,16 @@ export function advanceTimelineLifecycle(
   input: TimelineLifecycleInput,
   previous: TimelineLifecycleLedger,
 ): TimelineLifecycleLedger {
+  const initialHydration = input.initialHydration === true;
   // Re-advancing over the identical snapshot must be inert. This is what makes
   // a virtualized remount, a scroll restoration, or a React double-render
-  // incapable of re-triggering anything.
-  if (previous.source === input.rows && previous.threadKey === input.threadKey) {
+  // incapable of re-triggering anything. Hydration intentionally bypasses this
+  // fast path so an in-flight one-shot is cleared if a reconnect begins.
+  if (
+    !initialHydration &&
+    previous.source === input.rows &&
+    previous.threadKey === input.threadKey
+  ) {
     return input.now - previous.issuedAt >= TIMELINE_ONE_SHOT_TTL_MS
       ? expireTimelineLifecycleOneShots(previous)
       : previous;
@@ -669,9 +694,10 @@ export function advanceTimelineLifecycle(
   const seen = observeTimelineLifecycle(input.rows, input.unsettledTurnId, input.interruptedTurnId);
 
   // First snapshot of a thread is history by definition: record it, animate none
-  // of it. A thread switch takes this branch again, so navigating back to an
-  // already-read conversation never replays its arrivals or completions.
-  if (!previous.hydrated || previous.threadKey !== input.threadKey) {
+  // of it. The explicit hydration guard keeps taking this branch while cached
+  // state and persisted catch-up collapse, so even multiple reducer publications
+  // cannot masquerade as live arrivals. A thread switch takes it again too.
+  if (initialHydration || !previous.hydrated || previous.threadKey !== input.threadKey) {
     return {
       source: input.rows,
       threadKey: input.threadKey,

@@ -1,12 +1,11 @@
-export type TimelineScrollMode = "following-end" | "anchoring-new-turn" | "free-scrolling";
+export type TimelineScrollMode = "following-end" | "free-scrolling";
 
 export interface TimelineSendScrollDecision {
   /**
-   * Scroll mode to enter the moment the user sends. Note the absence of
-   * `anchoring-new-turn`: sending never jumps the just-sent turn to the top of
-   * the viewport. See {@link resolveTimelineSendScroll}.
+   * Scroll mode to enter the moment the user sends. Sending never jumps the
+   * just-sent turn to the top of the viewport. See {@link resolveTimelineSendScroll}.
    */
-  readonly mode: "following-end" | "free-scrolling";
+  readonly mode: TimelineScrollMode;
   /** Whether the list should keep pinning to the live edge after the send. */
   readonly followOutput: boolean;
   /** Whether the reader is treated as sitting at the live edge post-send. */
@@ -23,10 +22,10 @@ export interface TimelineSendScrollDecision {
  * viewport height.
  *
  * The replacement is minimal-scroll:
- * - If the reader was at/near the live edge (the normal case — they were
- *   composing at the bottom), keep following the end. The list stays put and
- *   only scrolls by the height of the freshly-appended message, so the bubble
- *   rises just above the composer and the reply streams right there.
+ * - If the reader was at the live edge (the normal case — they were composing
+ *   at the bottom), follow the end and run the deterministic reveal
+ *   ({@link resolveSentMessageRevealOffset}) so the sent bubble lands just
+ *   above the composer.
  * - If the reader had scrolled up into history, do not yank them; leave the
  *   viewport where it is (free-scrolling) so their place is preserved.
  *
@@ -41,11 +40,65 @@ export function resolveTimelineSendScroll(input: {
   return { mode: "free-scrolling", followOutput: false, isAtEnd: false };
 }
 
-export function shouldPositionTimelineAnchor(input: {
-  readonly liveFollowUserScrollGeneration: number | null;
-  readonly userScrollGeneration: number;
-}): boolean {
-  return input.liveFollowUserScrollGeneration === input.userScrollGeneration;
+export interface TimelineEndSignalDecision {
+  /** The value `isAtEndRef` should carry after this signal. */
+  readonly nextIsAtEnd: boolean;
+  /** Re-arm live-follow: mode `following-end`, follow output on. */
+  readonly enterFollowingEnd: boolean;
+  /** Stand down to `free-scrolling` and stop following output. */
+  readonly enterFreeScrolling: boolean;
+  /** Clear the pending + visible "a new text" signal. */
+  readonly hideNewTextIndicator: boolean;
+}
+
+/**
+ * Decides what reaching (or leaving) the live edge means for follow state and
+ * the "a new text" indicator.
+ *
+ * The subtlety this exists to encode: **arriving at the live edge must always
+ * re-arm follow and clear the indicator, even when the caller already believed
+ * it was at the end.** Scrolling is not a single event — a wheel gesture routes
+ * through `cancelTimelineLiveFollowForUserNavigation` on every tick, which
+ * drops the mode to `free-scrolling` without moving the at-end flag. A
+ * `previousIsAtEnd === isAtEnd` early-return therefore stranded the mode at
+ * `free-scrolling` while the reader sat at the bottom, so every subsequent
+ * streamed chunk re-showed the indicator and nothing could ever hide it.
+ * Clicking the indicator worked only because that path sets the mode directly.
+ *
+ * Leaving the edge while live-follow is armed is deliberately NOT treated as
+ * the reader opting out — that is programmatic drift (content growing under a
+ * pinned viewport), so follow state is left alone and only the indicator is
+ * cleared.
+ */
+export function resolveTimelineEndSignal(input: {
+  readonly isAtEnd: boolean;
+  readonly previousIsAtEnd: boolean;
+  readonly liveFollowArmed: boolean;
+}): TimelineEndSignalDecision {
+  if (!input.isAtEnd && input.liveFollowArmed) {
+    return {
+      nextIsAtEnd: input.previousIsAtEnd,
+      enterFollowingEnd: false,
+      enterFreeScrolling: false,
+      hideNewTextIndicator: true,
+    };
+  }
+
+  if (input.isAtEnd) {
+    return {
+      nextIsAtEnd: true,
+      enterFollowingEnd: true,
+      enterFreeScrolling: false,
+      hideNewTextIndicator: true,
+    };
+  }
+
+  return {
+    nextIsAtEnd: false,
+    enterFollowingEnd: false,
+    enterFreeScrolling: input.previousIsAtEnd,
+    hideNewTextIndicator: false,
+  };
 }
 
 export interface TimelineListMeasurementState {
@@ -54,17 +107,6 @@ export interface TimelineListMeasurementState {
   readonly scrollLength: number;
   readonly positionAtIndex: (index: number) => number | undefined;
   readonly sizeAtIndex: (index: number) => number | undefined;
-}
-
-export interface AnchoredTurnMetrics {
-  readonly anchorTop: number;
-  readonly lastBottom: number;
-  readonly turnHeight: number;
-  readonly usableViewportHeight: number;
-  readonly visibleUsableBottom: number;
-  readonly overflowsUsableViewport: boolean;
-  readonly targetScrollToRevealEnd: number;
-  readonly scrollDeltaToRevealEnd: number;
 }
 
 export function getRowBottom(state: TimelineListMeasurementState, index: number): number | null {
@@ -82,45 +124,47 @@ export function getRowBottom(state: TimelineListMeasurementState, index: number)
   return top + Math.max(1, height);
 }
 
-export function getAnchoredTurnMetrics({
-  state,
-  anchorIndex,
-  composerOverlayHeight,
-  anchorOffset,
-}: {
-  readonly state: TimelineListMeasurementState;
-  readonly anchorIndex: number;
-  readonly composerOverlayHeight: number;
+/**
+ * The exact scroll offset that reveals a just-sent user message directly above
+ * the composer — never more, never less, and never backward.
+ *
+ * This replaces the `maintainScrollAtEnd` + `scrollToEnd` race. `scrollToEnd`
+ * targets `contentSize`, which includes `contentInsetEndAdjustment` (the real
+ * DOM spacer legend-list renders for the composer), so it is only ever right by
+ * accident. Here the target is computed from the *real* content bottom and the
+ * usable viewport (viewport minus composer), so:
+ *
+ * - G1: the message's bottom lands `anchorOffset` above the composer's top edge;
+ * - G2: if the message is taller than the usable viewport, its TOP is aligned
+ *   near the viewport top instead (revealing its end would hide its start);
+ * - G4: the result is clamped to `>= currentScroll` in the normal branch, so a
+ *   send can never scroll the viewport backward toward the start of the thread.
+ *
+ * Returns `null` when there is nothing to do (already in place, degenerate
+ * viewport, sub-pixel delta) — callers must not scroll on `null`.
+ */
+export function resolveSentMessageRevealOffset(input: {
+  readonly currentScroll: number;
+  readonly scrollLength: number;
+  readonly composerInset: number;
+  readonly messageTop: number;
+  readonly contentBottom: number;
   readonly anchorOffset: number;
-}): AnchoredTurnMetrics | null {
-  if (state.data.length === 0) {
+}): number | null {
+  const usableViewport = Math.max(0, input.scrollLength - input.composerInset);
+  if (usableViewport <= 0) {
     return null;
   }
 
-  const boundedAnchorIndex = Math.max(0, Math.min(anchorIndex, state.data.length - 1));
-  const anchorTop = state.positionAtIndex(boundedAnchorIndex);
-  const lastBottom = getRowBottom(state, state.data.length - 1);
-  if (typeof anchorTop !== "number" || !Number.isFinite(anchorTop) || lastBottom === null) {
+  const messageHeight = input.contentBottom - input.messageTop;
+  const target =
+    messageHeight > usableViewport - input.anchorOffset
+      ? input.messageTop - input.anchorOffset
+      : Math.max(input.currentScroll, input.contentBottom - usableViewport + input.anchorOffset);
+
+  const clamped = Math.max(0, target);
+  if (Math.abs(clamped - input.currentScroll) <= 1) {
     return null;
   }
-
-  const usableViewportHeight = Math.max(
-    0,
-    state.scrollLength - composerOverlayHeight - anchorOffset,
-  );
-  const turnHeight = Math.max(0, lastBottom - anchorTop);
-  const visibleUsableBottom = state.scroll + usableViewportHeight;
-  const targetScrollToRevealEnd = Math.max(0, lastBottom - usableViewportHeight);
-  const scrollDeltaToRevealEnd = Math.max(0, targetScrollToRevealEnd - state.scroll);
-
-  return {
-    anchorTop,
-    lastBottom,
-    turnHeight,
-    usableViewportHeight,
-    visibleUsableBottom,
-    overflowsUsableViewport: turnHeight > usableViewportHeight,
-    targetScrollToRevealEnd,
-    scrollDeltaToRevealEnd,
-  };
+  return clamped;
 }

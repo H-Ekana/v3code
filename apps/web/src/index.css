@@ -396,6 +396,41 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   opacity: 1;
 }
 
+/* Release ripple: the fingertip beat that says the message actually left.
+ * Violet core into a magenta halo, both mixed off the brand tokens so a theme
+ * swap carries instead of stranding a literal. Painted as `::after` on the
+ * button rather than a mounted node, so N sends replay one keyframe instead of
+ * growing the DOM; the button is `isolate` + `overflow-visible`, so a negative
+ * inset paints outside the disc without escaping into a neighbour's stacking
+ * context. Opacity/scale only — nothing here can move the button or the row. */
+@keyframes composer-send-release-ripple {
+  0% {
+    opacity: 0.6;
+    transform: scale(0.58);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+
+.composer-send-button--sending::after {
+  position: absolute;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--primary) 84%, var(--astro-highlight)) 0 32%,
+    color-mix(in oklch, var(--astro-highlight) 76%, var(--primary)) 60%,
+    transparent 78%
+  );
+  content: "";
+  inset: -7px;
+  opacity: 0;
+  pointer-events: none;
+  animation: composer-send-release-ripple 250ms var(--ease-out-quint) both;
+}
+
 .composer-send-button--nightly.composer-send-button--sending {
   filter: brightness(1.16) saturate(1.12);
   box-shadow:
@@ -522,6 +557,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 
   .draft-hero-project-name-streak {
+    display: none;
+    animation: none;
+  }
+
+  /* The ripple is pure decoration, so reduced motion drops it entirely rather
+   * than flashing it for a frame the way the duration clamp below would. */
+  .composer-send-button--sending::after {
     display: none;
     animation: none;
   }
@@ -1357,6 +1399,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      label — but it is the one that reads first when scanning many rows. */
   --status-working: color-mix(in oklch, var(--primary) 72%, var(--astro-highlight));
   --status-agents: color-mix(in oklch, var(--primary) 30%, var(--astro-highlight));
+  /* In-flight tool rows sit at the same family but land near hue 314 —
+     pinkish-violet rather than raw --primary, which reads as a heavy dark
+     purple at 14px against the timeline's muted text. */
+  --tool-running: color-mix(in oklch, var(--primary) 42%, var(--astro-highlight));
   --secondary: var(--color-zinc-50);
   --secondary-foreground: var(--color-zinc-800);
   --muted: var(--color-zinc-50);

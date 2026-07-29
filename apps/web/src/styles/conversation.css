@@ -24,6 +24,12 @@
   /* Disclosure sits in the plan's 160–180ms band, which has no ladder token
    * (--motion-hover is 140ms, --motion-state is 200ms). */
   --conversation-disclosure: 170ms;
+  /* The send-morph landing glint. Longer than --conversation-glint (140ms) on
+   * purpose: it fires at the END of a 700ms flight, once the eye has already
+   * settled on the landed bubble, so a 140ms edge tick reads as a flicker
+   * rather than as the message arriving. Still an acknowledgment, not a
+   * celebration — it is a border pulse that returns to transparent. */
+  --conversation-landing-glint: 300ms;
   /* Continuous orbit rate for a running tool. Deliberately outside the ladder,
    * which covers one-shot transitions rather than duty-cycle spin. */
   --conversation-tool-orbit: 900ms;
@@ -89,28 +95,110 @@
 
 /* --------------------------------------------------------------------------
  * Send-morph — the just-sent message lifts out of the composer into the bubble.
- * The motion is a hand-built flyer driven entirely from
- * `components/chat/sendMorphTransition.ts`: a single `position: fixed` div
- * carrying only the sent text is flown (rAF-driven, live-retargeted) into the
- * arriving bubble and crossfaded with it. Geometry, font, and the transform +
- * opacity motion are inline; only the static "glass" look lives here. Timing is
- * owned by JS constants, so this class carries no duration or easing token. The
- * `.conversation-user-arrival` rise above remains the fallback whenever the
+ * The motion is a hand-built container transform driven entirely from
+ * `components/chat/sendMorphTransition.ts`: a `position: fixed` container whose
+ * visible box morphs from the composer's rect to the arriving bubble's rect via
+ * `clip-path: inset(… round r)` while it translates (rAF-driven,
+ * live-retargeted) — never scaled, never re-laid-out, so text stays sharp and
+ * images keep their aspect. Inside it, the composer-wrapped outgoing text fades
+ * through to a clone of the landing bubble (text + attachment thumbnails), and
+ * the whole container crossfades with the real bubble over the final leg.
+ * Geometry and all motion are inline; only the static surface look lives here.
+ * No border or shadow: the clip-path would slice them mid-flight, and the
+ * bubble clone carries the real bubble border once it fades in. No
+ * backdrop-filter either — a moving backdrop blur re-filters what's underneath
+ * every frame, the single most expensive thing a 60fps overlay can carry; a
+ * near-opaque fill reads the same for the ~130ms before the bubble clone's own
+ * solid surface fades in over it. Text wrapping (`white-space`/`overflow-wrap`)
+ * lives inline on the OUTGOING layer only, so the bubble clone never inherits
+ * composer text behavior and stays pixel-identical to the real bubble. Timing
+ * is owned by JS constants, so this class carries no duration or easing token.
+ * The `.conversation-user-arrival` rise above remains the fallback whenever the
  * flight cannot run (headless, reduced motion, no `requestAnimationFrame`).
+ *
+ * Two brand touches ride the flight, both static looks here and both free at
+ * 60fps — the JS never gains a per-frame style write for either, and neither
+ * animates a shadow, filter, or backdrop-filter:
+ *   • `.conversation-send-flyer-charge` — the charged-send wash, carried by the
+ *     outgoing text layer so it rides that layer's existing fade.
+ *   • `.conversation-user-landing-glint` — the one-shot pulse the real bubble
+ *     gets when (and only when) the flight completes naturally.
+ * The violet→pink ramp in both is mixed from --primary and --astro-highlight,
+ * never spelled out, so it follows the theme the way --status-working and
+ * friends do. (A third touch — a comet trail behind the flyer — shipped and was
+ * removed: it read as janky in real use.)
  * ------------------------------------------------------------------------ */
 
 .conversation-send-flyer {
   box-sizing: border-box;
   overflow: hidden;
   border-radius: 1rem;
-  border: 1px solid color-mix(in srgb, var(--primary) 12%, transparent);
-  background: color-mix(in srgb, var(--accent) 82%, transparent);
-  backdrop-filter: blur(6px);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  box-shadow: 0 4px 6px color-mix(in srgb, var(--primary) 6%, transparent);
+  background: color-mix(in srgb, var(--accent) 94%, var(--background));
   contain: layout paint style;
-  will-change: transform, opacity;
+  will-change: transform, opacity, clip-path;
+}
+
+/* Charged-send wash: the message reads as *charged* as it lifts, then the charge
+ * is spent. Kept to single digits of the brand colors over the flyer's own fill
+ * — any stronger and it stops being a tint and starts being a second surface
+ * competing with the bubble the flyer is turning into. This sits on the OUTGOING
+ * layer, whose opacity already ramps 1→0 across the first 18% (~125ms) of the
+ * flight, so the wash needs no animation of its own and can never reach the
+ * bubble clone that fades in behind it or the bubble that finally lands. */
+.conversation-send-flyer-charge {
+  background: linear-gradient(
+    142deg,
+    color-mix(in srgb, var(--primary) 10%, transparent) 0%,
+    color-mix(
+        in srgb,
+        color-mix(in oklch, var(--primary) 46%, var(--astro-highlight)) 8%,
+        transparent
+      )
+      54%,
+    color-mix(in srgb, var(--astro-highlight) 6%, transparent) 100%
+  );
+}
+
+/* Landing glint: the flight's full stop. Same motion vocabulary as
+ * `conversation-user-arrival-edge` above — a transparent 1px ::after ring that
+ * brightens once and returns to transparent — but in the violet→pink ramp and
+ * over the longer landing window, because it marks the end of a 700ms flight
+ * rather than the 200ms CSS rise.
+ *
+ * It is deliberately a pseudo-element: the row itself may still carry
+ * `.conversation-user-arrival` history, and animating the element's own
+ * `animation` property would either restart that rise or be clobbered by it.
+ * The pseudo also survives the flight's inline-style cleanup, which clears
+ * `animation` on the element and nothing else. Declared after the arrival rules
+ * so that, at equal specificity, this is the ::after animation that wins when
+ * both classes are somehow present. */
+.conversation-user-landing-glint::after {
+  position: absolute;
+  inset: -1px;
+  border: 1px solid transparent;
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+  animation: conversation-user-landing-glint var(--conversation-landing-glint) var(--ease-out-expo)
+    both;
+}
+
+@keyframes conversation-user-landing-glint {
+  from {
+    border-color: color-mix(in srgb, var(--primary) 10%, transparent);
+  }
+
+  38% {
+    border-color: color-mix(
+      in srgb,
+      color-mix(in oklch, var(--primary) 55%, var(--astro-highlight)) 72%,
+      transparent
+    );
+  }
+
+  to {
+    border-color: transparent;
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -243,20 +331,25 @@
 .conversation-tool-running {
   position: relative;
   isolation: isolate;
+  color: var(--tool-running);
 }
 
+/* The orbit sits on a wider radius than the icon box so it clears the glyph's
+ * corners — an 18px ring around a 14px icon grazes it, which read as the ring
+ * and the icon colliding. The pseudo-element is absolutely positioned, so
+ * growing past the 20px box still costs the row no height and no reflow. */
 .conversation-tool-running::after {
   position: absolute;
-  inset: 1px;
+  inset: -2px;
   border-radius: 50%;
   content: "";
   pointer-events: none;
   background: conic-gradient(
     from 0deg,
     color-mix(in srgb, var(--astro-highlight) 82%, transparent) 0deg,
-    color-mix(in srgb, var(--primary) 72%, transparent) 64deg,
-    color-mix(in srgb, var(--primary) 0%, transparent) 148deg,
-    color-mix(in srgb, var(--primary) 0%, transparent) 360deg
+    color-mix(in srgb, var(--tool-running) 76%, transparent) 64deg,
+    color-mix(in srgb, var(--tool-running) 0%, transparent) 148deg,
+    color-mix(in srgb, var(--tool-running) 0%, transparent) 360deg
   );
   -webkit-mask: radial-gradient(
     closest-side,
@@ -337,6 +430,15 @@
     border-color: color-mix(in srgb, var(--primary) 42%, transparent);
   }
 
+  /* Belt and braces: the send-morph flight is already gated off under reduced
+   * motion (`canRunSendMorph`), so the glint class is never applied here — but
+   * if it ever were, the pulse must not run. The edge simply does not appear;
+   * the landing itself is still carried by the arrival rule above. */
+  .conversation-user-landing-glint::after {
+    animation: none;
+    border-color: transparent;
+  }
+
   .conversation-live-edge {
     animation: none;
     opacity: 0.92;
@@ -349,7 +451,7 @@
 
   .conversation-tool-running::after {
     animation: none;
-    background: color-mix(in srgb, var(--primary) 52%, transparent);
+    background: color-mix(in srgb, var(--tool-running) 58%, transparent);
   }
 
   .conversation-tool-flash {
