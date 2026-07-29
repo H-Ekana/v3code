@@ -37,3 +37,6 @@ node_modules/
 !.env.example
 # Local CLI state (gh device id, etc.) — machine-specific, never shared.
 .local/
+
+# Machine-local Claude Code settings
+.claude/settings.local.json
