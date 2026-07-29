@@ -75,6 +75,23 @@ describe("desktop local topology reads", () => {
     expect(reader.readResult()).toEqual({ _tag: "Success", bootstraps: [secondary] });
   });
 
+  it("keeps snapshot identity stable across unchanged reads", () => {
+    const secondary = {
+      id: "wsl:Ubuntu",
+      label: "WSL: Ubuntu",
+      httpBaseUrl: "http://127.0.0.1:4000",
+      wsBaseUrl: "ws://127.0.0.1:4000",
+    };
+    const reader = createDesktopSecondaryBootstrapsReader(() => ({
+      // Fresh entry objects on every read, as the IPC bridge produces.
+      getLocalEnvironmentBootstraps: () => [{ ...secondary }],
+    }));
+
+    const first = reader.readSnapshot();
+    expect(first).toEqual([secondary]);
+    expect(reader.readSnapshot()).toBe(first);
+  });
+
   it("retains the last successful snapshot only until another read succeeds", () => {
     const secondary = {
       id: "wsl:Ubuntu",

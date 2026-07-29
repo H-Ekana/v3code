@@ -67,13 +67,19 @@ export function createDesktopSecondaryBootstrapsReader(
   const readResult = (): DesktopSecondaryBootstrapsRead => {
     const bridge = resolveBridge();
     if (bridge === undefined) {
-      snapshot = [];
+      if (snapshot.length !== 0) snapshot = [];
       return { _tag: "Success", bootstraps: snapshot };
     }
     try {
-      snapshot = bridge
+      const next = bridge
         .getLocalEnvironmentBootstraps()
         .filter((entry) => entry.id !== PRIMARY_LOCAL_ENVIRONMENT_ID);
+      // Keep the previous array identity when nothing changed, so polling
+      // consumers (and React bail-outs keyed on reference equality) don't
+      // see a fresh topology object on every tick.
+      if (JSON.stringify(next) !== JSON.stringify(snapshot)) {
+        snapshot = next;
+      }
       return { _tag: "Success", bootstraps: snapshot };
     } catch (cause) {
       return { _tag: "Failure", cause };
