@@ -226,6 +226,154 @@ describe("resolveThreadVisitBaseline", () => {
       }),
     ).toBe(false);
   });
+
+  it("never flags a completion the reader watched land in the open thread", () => {
+    const routeThreadKey = "environment-local:thread-1";
+    const opened = resolveThreadVisitBaseline({
+      pendingEngagementKey: routeThreadKey,
+      routeThreadKey,
+      threadUpdatedAt: now,
+      lastVisitedAt: undefined,
+      isReaderCaughtUp: true,
+    });
+    expect(opened.visitedAt).toBe(now);
+
+    // Same thread, still on screen: the turn finishing in front of them is read.
+    const watchedCompletion = resolveThreadVisitBaseline({
+      pendingEngagementKey: opened.pendingEngagementKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt: opened.visitedAt,
+      isReaderCaughtUp: true,
+    });
+    expect(watchedCompletion).toEqual({
+      pendingEngagementKey: null,
+      visitedAt: completedTurn.completedAt,
+    });
+    expect(
+      hasUnseenCompletion({
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: completedTurn,
+        lastVisitedAt: watchedCompletion.visitedAt ?? undefined,
+        session: readySession,
+      }),
+    ).toBe(false);
+  });
+
+  it("flags a completion that lands while the window is away, then clears it on return", () => {
+    const routeThreadKey = "environment-local:thread-1";
+    const opened = resolveThreadVisitBaseline({
+      pendingEngagementKey: routeThreadKey,
+      routeThreadKey,
+      threadUpdatedAt: now,
+      lastVisitedAt: undefined,
+      isReaderCaughtUp: true,
+    });
+
+    const awayCompletion = resolveThreadVisitBaseline({
+      pendingEngagementKey: opened.pendingEngagementKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt: opened.visitedAt,
+      isReaderCaughtUp: false,
+    });
+    expect(awayCompletion.visitedAt).toBeNull();
+    expect(
+      hasUnseenCompletion({
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: completedTurn,
+        lastVisitedAt: opened.visitedAt ?? undefined,
+        session: readySession,
+      }),
+    ).toBe(true);
+
+    // Focusing the window (or scrolling back to the live edge) re-runs the same
+    // resolution — no navigating away and back required to clear the badge.
+    const returned = resolveThreadVisitBaseline({
+      pendingEngagementKey: awayCompletion.pendingEngagementKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt: opened.visitedAt,
+      isReaderCaughtUp: true,
+    });
+    expect(returned.visitedAt).toBe(completedTurn.completedAt);
+    expect(
+      hasUnseenCompletion({
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: completedTurn,
+        lastVisitedAt: returned.visitedAt ?? undefined,
+        session: readySession,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps a completion unread while the reader sits in scrolled-up history", () => {
+    const routeThreadKey = "environment-local:thread-1";
+    const opened = resolveThreadVisitBaseline({
+      pendingEngagementKey: routeThreadKey,
+      routeThreadKey,
+      threadUpdatedAt: now,
+      lastVisitedAt: undefined,
+      isReaderCaughtUp: true,
+    });
+
+    // Window focused, thread open, but scrolled away from the live edge: this is
+    // the state where the timeline shows its "new text" indicator, so `Done`
+    // must agree with it rather than quietly clearing.
+    const scrolledUp = resolveThreadVisitBaseline({
+      pendingEngagementKey: opened.pendingEngagementKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt: opened.visitedAt,
+      isReaderCaughtUp: false,
+    });
+    expect(scrolledUp.visitedAt).toBeNull();
+
+    // Scrolling back down reaches the live edge and clears it.
+    const backAtLiveEdge = resolveThreadVisitBaseline({
+      pendingEngagementKey: scrolledUp.pendingEngagementKey,
+      routeThreadKey,
+      threadUpdatedAt: completedTurn.completedAt,
+      lastVisitedAt: opened.visitedAt,
+      isReaderCaughtUp: true,
+    });
+    expect(backAtLiveEdge.visitedAt).toBe(completedTurn.completedAt);
+    expect(
+      hasUnseenCompletion({
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default",
+        latestTurn: completedTurn,
+        lastVisitedAt: backAtLiveEdge.visitedAt ?? undefined,
+        session: readySession,
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores presence for a thread the reader is not routed to", () => {
+    expect(
+      resolveThreadVisitBaseline({
+        pendingEngagementKey: "environment-local:thread-other",
+        routeThreadKey: "environment-local:thread-1",
+        threadUpdatedAt: completedTurn.completedAt,
+        lastVisitedAt: now,
+        isReaderCaughtUp: true,
+      }),
+    ).toEqual({
+      pendingEngagementKey: "environment-local:thread-other",
+      visitedAt: null,
+    });
+  });
 });
 
 describe("buildThreadTurnInterruptInput", () => {

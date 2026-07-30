@@ -33,11 +33,26 @@ export function resolveThreadVisitBaseline(input: {
   routeThreadKey: string;
   threadUpdatedAt: string | null;
   lastVisitedAt: string | null | undefined;
+  /**
+   * Whether the reader is actually reading the newest content of this thread:
+   * the window is visible and focused AND the timeline is at its live edge.
+   * While that holds, the baseline keeps advancing, so a turn that finishes in
+   * front of them is already seen and never flags `Done`. Absent or false, only
+   * the initial engagement counts — a completion that lands while the window is
+   * buried, or while they are reading scrolled-up history, stays unread until
+   * they come back to the bottom.
+   */
+  isReaderCaughtUp?: boolean;
 }): {
   pendingEngagementKey: string | null;
   visitedAt: string | null;
 } {
-  if (input.pendingEngagementKey !== input.routeThreadKey || input.threadUpdatedAt === null) {
+  const isNewEngagement = input.pendingEngagementKey === input.routeThreadKey;
+  // `null` means this route's opening visit is already recorded, so the reader
+  // is still sitting in the thread they opened.
+  const isReadingOpenThread =
+    input.pendingEngagementKey === null && input.isReaderCaughtUp === true;
+  if ((!isNewEngagement && !isReadingOpenThread) || input.threadUpdatedAt === null) {
     return {
       pendingEngagementKey: input.pendingEngagementKey,
       visitedAt: null,

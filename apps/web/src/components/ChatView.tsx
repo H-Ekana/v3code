@@ -353,6 +353,7 @@ import {
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
 import { IMAGE_ONLY_BOOTSTRAP_PROMPT, stripImageOnlyBootstrapPrompt } from "../lib/imageOnlyPrompt";
+import { isViewerPresent, subscribeViewerPresence } from "../lib/viewerPresence";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -2096,7 +2097,7 @@ function ChatViewContent(props: ChatViewProps) {
     pendingThreadVisitKeyRef.current = routeThreadKey;
   }, [routeThreadKey]);
 
-  useEffect(() => {
+  const syncThreadVisitBaseline = useCallback(() => {
     const resolution = resolveThreadVisitBaseline({
       pendingEngagementKey: pendingThreadVisitKeyRef.current,
       routeThreadKey,
@@ -2107,6 +2108,12 @@ function ChatViewContent(props: ChatViewProps) {
           ? serverThread.updatedAt
           : null,
       lastVisitedAt: activeThreadLastVisitedAt,
+      // Read live, not from render: this also runs from the presence and
+      // live-edge listeners. Being in the thread is not enough — a completion
+      // that lands while they read scrolled-up history is announced by the "new
+      // text" indicator, and the sidebar should agree with it until they return
+      // to the bottom. `isAtEndRef` is the same signal that indicator follows.
+      isReaderCaughtUp: isViewerPresent() && isAtEndRef.current,
     });
     pendingThreadVisitKeyRef.current = resolution.pendingEngagementKey;
     if (resolution.visitedAt === null) return;
@@ -2120,6 +2127,22 @@ function ChatViewContent(props: ChatViewProps) {
     serverThread?.id,
     serverThread?.updatedAt,
   ]);
+
+  useEffect(() => {
+    syncThreadVisitBaseline();
+  }, [syncThreadVisitBaseline]);
+
+  // `onIsAtEndChange` is identity-stable by design, so it reaches the current
+  // sync through a ref rather than taking it as a dependency.
+  const syncThreadVisitBaselineRef = useRef(syncThreadVisitBaseline);
+  useEffect(() => {
+    syncThreadVisitBaselineRef.current = syncThreadVisitBaseline;
+  }, [syncThreadVisitBaseline]);
+
+  // Coming back to the window re-runs it: a turn that finished while the window
+  // was buried is read the moment they look at the thread it finished in, rather
+  // than staying flagged until they navigate away and back.
+  useEffect(() => subscribeViewerPresence(syncThreadVisitBaseline), [syncThreadVisitBaseline]);
 
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
@@ -3970,6 +3993,12 @@ function ChatViewContent(props: ChatViewProps) {
     if (decision.hideNewTextIndicator) {
       newTextIndicatorDebouncer.current.cancel();
       setShowNewTextIndicator(false);
+    }
+    // Back at the live edge, so whatever arrived while they were scrolled up has
+    // now been reached: clear the sidebar's `Done` the same moment the "new text"
+    // indicator goes away. A no-op when the baseline is already current.
+    if (decision.nextIsAtEnd) {
+      syncThreadVisitBaselineRef.current();
     }
   }, []);
 
