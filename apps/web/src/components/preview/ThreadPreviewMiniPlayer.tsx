@@ -217,7 +217,7 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
       ref={rootRef}
       aria-label="Floating browser preview"
       data-preview-mini-player={tabId}
-      className="pointer-events-none absolute select-none"
+      className="group/mini-player pointer-events-none absolute select-none"
       style={
         position
           ? { left: position.x, top: position.y, width: size.width, height: size.height }
@@ -232,10 +232,12 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
       <div className="group pointer-events-auto absolute right-2 top-2 z-[34] size-3">
         <div
           aria-hidden="true"
-          className="absolute right-0 top-0 size-2 rounded-full bg-foreground/25 shadow-sm ring-1 ring-background/70 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0"
+          className="absolute right-0 top-0 size-2 rounded-full bg-foreground/25 shadow-sm ring-1 ring-background/70 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 group-hover/mini-player:opacity-0"
         />
+        {/* Hovering anywhere on the tile reveals the toolbar: the dot alone read
+            as the only grabbable spot, which it no longer is. */}
         <div
-          className="pointer-events-none absolute right-0 top-0 flex h-8 cursor-grab items-center gap-0.5 rounded-lg border border-border/80 bg-popover/92 p-0.5 opacity-0 shadow-lg/20 backdrop-blur-xl transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 active:cursor-grabbing"
+          className="pointer-events-none absolute right-0 top-0 flex h-8 cursor-grab items-center gap-0.5 rounded-lg border border-border/80 bg-popover/92 p-0.5 opacity-0 shadow-lg/20 backdrop-blur-xl transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover/mini-player:pointer-events-auto group-hover/mini-player:opacity-100 active:cursor-grabbing"
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={endDrag}
@@ -299,6 +301,19 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
             Reconnecting preview…
           </div>
         ) : null}
+        {/* The guest webview paints itself at z-30 across this frame, so grabbing
+            the tile anywhere needs a layer above it. That makes the mini player a
+            glanceable tile you move, not a page you click into — "Open in right
+            panel" is the interactive surface. Sits under the resize corner
+            (z-33) and the toolbar (z-34) so those keep their own gestures. */}
+        <div
+          data-preview-mini-player-drag-surface="true"
+          className="pointer-events-auto absolute inset-0 z-[32] cursor-grab rounded-xl active:cursor-grabbing"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        />
         <button
           type="button"
           aria-label="Resize floating preview"
