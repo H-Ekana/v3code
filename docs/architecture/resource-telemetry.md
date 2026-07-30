@@ -136,13 +136,19 @@ Periodic snapshot streaming is disabled by default. The server enables it only
 while at least one diagnostics subscription is retained. `sampleNow` remains
 available for explicit refreshes and identity validation.
 
-The server adjusts native sampling without restarting the sidecar:
+The server adjusts native sampling without restarting the sidecar. Host power
+selects a base cadence:
 
 - suspended, locked, low-power, or serious/critical thermal state: 15 seconds;
 - battery: 5 seconds;
 - normal AC: 1 second;
-- unknown or stale power: 5 seconds in the background and 1 second while live
-  diagnostics is open.
+- unknown or stale power: 1 second, as a recovery cadence.
+
+That base applies while at least one live diagnostics subscriber is attached.
+With no subscriber the cadence is floored at 10 seconds, so every state except
+the constrained 15-second one settles at 10 seconds. Those background samples
+only feed the sidecar's in-memory history, and enumerating the whole process
+table every second to fill a ring buffer nobody is reading is wasted work.
 
 ### Sampling limits
 
