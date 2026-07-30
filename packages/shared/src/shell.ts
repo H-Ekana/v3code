@@ -491,7 +491,7 @@ function resolveCommandCandidates(
   return Array.from(new Set(candidates));
 }
 
-const isExecutableFile = Effect.fn("shell.isExecutableFile")(function* (
+const isExecutableFile = Effect.fnUntraced(function* (
   filePath: string,
   platform: NodeJS.Platform,
   windowsPathExtensions: ReadonlyArray<string>,
