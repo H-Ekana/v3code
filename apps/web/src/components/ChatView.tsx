@@ -6259,25 +6259,29 @@ function ChatViewContent(props: ChatViewProps) {
                   className="pointer-events-none absolute left-1/2 z-30 flex -translate-x-1/2 justify-center py-2"
                   style={{ bottom: composerOverlayHeight + 6 }}
                 >
+                  {/* Chrome deliberately identical to ThreadSyncStatusPill — the
+                      other pill that floats in this timeline — so it reads as
+                      system chrome. The drifting arrow keeps its violet-magenta
+                      status hue and is the only color in the component. */}
                   <button
                     type="button"
-                    aria-label="Jump to new text"
-                    title="Jump to new text"
+                    aria-label="Jump to new messages"
+                    title="Jump to new messages"
                     onClick={() => scrollToEnd(true)}
-                    className="group pointer-events-auto relative isolate flex items-center gap-2 overflow-hidden rounded-xl bg-card/95 px-3 py-2 text-xs font-medium text-foreground ring-1 ring-primary/30 shadow-[0_3px_8px_color-mix(in_srgb,var(--primary)_18%,transparent)] transition-[background-color,box-shadow,transform] duration-200 ease-out hover:-translate-y-0.5 hover:bg-card hover:shadow-[0_4px_8px_color-mix(in_srgb,var(--astro-highlight)_22%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 active:translate-y-0 motion-reduce:transform-none motion-reduce:transition-none"
+                    className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-border/60 bg-card/95 px-3 py-1.5 text-xs font-medium text-foreground shadow-sm backdrop-blur transition-colors duration-200 ease-out hover:border-border hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 motion-reduce:transition-none"
                   >
-                    <span
+                    <ChevronDownIcon
                       aria-hidden="true"
-                      className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_18%_10%,color-mix(in_srgb,var(--astro-highlight)_16%,transparent),transparent_38%),linear-gradient(115deg,color-mix(in_srgb,var(--primary)_10%,transparent),transparent_62%)]"
+                      className="chat-new-text-arrow size-3.5 shrink-0 text-status-working"
                     />
-                    <span className="flex size-5 items-center justify-center rounded-md bg-primary/12 text-astro-highlight ring-1 ring-primary/20">
-                      <ChevronDownIcon className="chat-new-text-arrow size-3.5" />
-                    </span>
-                    <span>A new text</span>
-                    <span
-                      aria-hidden="true"
-                      className="size-1 rounded-full bg-astro-highlight/75 shadow-[0_0_5px_color-mix(in_srgb,var(--astro-highlight)_65%,transparent)]"
-                    />
+                    {/* Optical, not geometric: flex centres the label's 16px line
+                        box, but DM Sans hangs 3px of dead space above the cap at
+                        12px and only 1px below the descender, so the ink lands 1px
+                        low inside a box that is itself dead centre. Nudged up by
+                        that 1px so the gap above the "N" matches the gap under the
+                        "g". The icon needs no nudge — its glyph is centred in its
+                        own viewBox. */}
+                    <span className="relative -top-px">New messages</span>
                   </button>
                 </div>
               )}

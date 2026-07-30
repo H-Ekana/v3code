@@ -97,13 +97,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/* Symmetric on purpose: the old -1px/+2px travel put the arrow's average
+   position half a pixel below the pill's centre line, which read as an
+   alignment bug rather than as motion. Same 3px of travel, centred. */
 @keyframes chat-new-text-arrow-drift {
   0%,
   100% {
-    transform: translateY(-1px);
+    transform: translateY(-1.5px);
   }
   50% {
-    transform: translateY(2px);
+    transform: translateY(1.5px);
   }
 }
 
