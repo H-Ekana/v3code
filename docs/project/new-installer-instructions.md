@@ -20,25 +20,30 @@ where `<version>` is the upstream nightly base with a fork suffix appended:
 <upstream-version>-nightly.<YYYYMMDD>.<build>.v3.<fork-semver>
 ```
 
-Last shipped installer:
+Example artifact (the examples in this file go stale — the release ledger is the
+authority; see step 3):
 
 ```
-V3-Code-V3-0.0.30-nightly.20260728.933.v3.0.0.4-x64.exe
+V3-Code-V3-0.0.31-nightly.20260729.946.v3.0.0.5-x64.exe
          └────────── upstream base ──────────┘ └ fork ┘
 ```
 
-- upstream base: `0.0.30-nightly.20260728.933`
-- fork suffix: `v3.0.0.4`
+- upstream base: `0.0.31-nightly.20260729.946`
+- fork suffix: `v3.0.0.5`
 
 Rules for the next build:
 
-1. **Increment the last numeral of the fork suffix.** After `v3.0.0.4` comes `v3.0.0.5`.
+1. **Increment the last numeral of the fork suffix of the ledger's top row**
+   (`docs/project/installer-releases.md`) — after `v3.0.0.5` comes `v3.0.0.6`. Never
+   derive the last shipped version from the examples in this file, an installed app, or
+   `package.json` alone; only the ledger is authoritative.
 2. **Use the upstream nightly version the currently merged tree corresponds to.** Check:
    - `gh release list -R pingdotgg/t3code --limit 5`, or
    - the latest `-nightly.*` tag reachable from the merged `upstream/main`.
    - Plain fallback base if you truly cannot determine a nightly: the `version` field in
-     `apps/server/package.json` (currently `0.0.30`) — this is also what the build script
-     uses when no version is supplied.
+     `apps/server/package.json` (kept in sync with the last stamped version by step 4) —
+     this is also what the build script uses when no version is supplied. Strip the old
+     fork suffix before appending the new one.
 3. The suffix must match `/\.v3\.\d+\.\d+\.\d+$/` exactly (four dot-separated numbers after
    `.v3` — i.e. `.v3.0.0.5`). Anything else is not recognized as a fork version.
 
@@ -68,6 +73,8 @@ whose version lacks the `.v3.X.Y.Z` suffix.**
   authoritative record of the last shipped version — run `git pull` and take the top
   row's fork suffix plus one. Do not derive the last version from the local machine's
   installed app; other machines build installers too.
+- The four releasable `package.json` versions match the version you are about to build
+  (step 4) — otherwise Settings → About lies about which build the user is running.
 - Working tree is committed (the commit hash is baked into the artifact).
 - `vendor/claude-plugins/codex` exists with `.claude-plugin/plugin.json` — the build
   hard-fails with `MissingBundledCodexPluginError` without it.
@@ -87,7 +94,36 @@ whose version lacks the `.v3.X.Y.Z` suffix.**
   `7z e app-64.7z resources/resource-monitor/t3-resource-monitor.exe`.
   Never reuse a binary from a different upstream version than the one merged.
 
-## 4. Build command
+## 4. Stamp the version into the app (Settings → About)
+
+**Do this every build. It is the step that is most often forgotten.**
+
+`T3CODE_DESKTOP_VERSION` only names the artifact — it never reaches the web bundle. The
+version the user sees in **Settings → About → Version** comes from
+`apps/web/package.json` at build time: `apps/web/vite.config.ts` bakes
+`import.meta.env.APP_VERSION` from `process.env.APP_VERSION?.trim() || pkg.version`, and
+`scripts/build-desktop-artifact.ts` spawns `vp run build:desktop` without setting
+`APP_VERSION`. Skip this step and the installer says `0.0.31-…` while the About row still
+says whatever the last bump left behind.
+
+The server's reported version comes from `apps/server/package.json` the same way
+(`ServerEnvironment.ts` → `serverVersion: packageJson.version`), and the client compares
+the two strings **exactly** (`apps/web/src/versionSkew.ts`). So they must be bumped
+together, or the app shows a spurious "Version mismatch" banner.
+
+Set all four releasable manifests to the exact version you are about to build — the same
+string you pass to `T3CODE_DESKTOP_VERSION`, fork suffix included:
+
+```bash
+node scripts/update-release-package-versions.ts "0.0.31-nightly.20260729.946.v3.0.0.6"
+```
+
+That script (the one CI uses) writes `version` into `apps/server/package.json`,
+`apps/desktop/package.json`, `apps/web/package.json`, and
+`packages/contracts/package.json`. Commit the result **before** building, so the commit
+hash baked into the artifact belongs to the tree that carries the version.
+
+## 5. Build command
 
 **Windows-only.** All V3 Code machines run Windows: build ONLY the Windows NSIS `.exe`
 (`dist:desktop:win`). Do not build the mac DMG, the Linux AppImage, or any other target
@@ -100,13 +136,13 @@ Run through pnpm so `vp` (vite-plus) is on PATH. A bare
 The version is passed via the `T3CODE_DESKTOP_VERSION` env var:
 
 ```bash
-T3CODE_DESKTOP_VERSION="0.0.31-nightly.20260729.946.v3.0.0.5" pnpm run dist:desktop:win
+T3CODE_DESKTOP_VERSION="0.0.31-nightly.20260729.946.v3.0.0.6" pnpm run dist:desktop:win
 ```
 
 Substitute the upstream nightly base you resolved in step 1 — pick the nightly release
 whose commit hash matches the upstream commit the tree was last merged from
 (`gh release list -R pingdotgg/t3code --limit 5` shows the hash in each release title).
-The example above is the next concrete version after the last shipped `v3.0.0.4`,
+The example above is the next concrete version after the last shipped `v3.0.0.5`,
 based on the 2026-07-29 merge of upstream commit `49c0d96ed`.
 
 Script variants (`package.json`):
@@ -121,17 +157,20 @@ Useful env vars, all read by `BuildEnvConfig`: `T3CODE_DESKTOP_VERBOSE=true` to 
 build output, `T3CODE_DESKTOP_KEEP_STAGE=true` to keep the staging dir for inspection,
 `T3CODE_DESKTOP_OUTPUT_DIR` to redirect output.
 
-## 5. Verify before handing it over
+## 6. Verify before handing it over
 
 - The produced file is named `V3-Code-V3-<version>-<arch>.exe` — if the `-V3-` segment is
   missing, the suffix was wrong and the build is wired to upstream's update channel. Discard it.
 - The version string in the filename is strictly higher than the previous installer.
+- **Settings → About → Version reads the same string as the filename** (launch the
+  installed build, or check that `apps/web/package.json` matches). A mismatch here means
+  step 4 was skipped and the app will misreport its own version for the whole release.
 - **Record the release**: append a row (newest first) to
   `docs/project/installer-releases.md` with the full version, upstream base + commit,
   and date, then commit and push it to `origin` right away. Skipping this strands the
   next agent (possibly on another machine) with a stale version number.
 
-## 6. Updating users
+## 7. Updating users
 
 Users update by running the newer installer over the existing install. There is no
 auto-updater for fork builds and there should not be one — the publish config is
