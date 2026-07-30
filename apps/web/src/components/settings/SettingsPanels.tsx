@@ -47,7 +47,12 @@ import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
-import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import {
+  APP_UPSTREAM_VERSION,
+  APP_V3_FORK_VERSION,
+  HOSTED_APP_CHANNEL,
+  HOSTED_APP_CHANNEL_LABEL,
+} from "../../branding";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -340,7 +345,12 @@ function AboutVersionTitle() {
   return (
     <span className="inline-flex items-center gap-2">
       <span>Version</span>
-      <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
+      <code className="text-[11px] font-medium text-muted-foreground">{APP_UPSTREAM_VERSION}</code>
+      {APP_V3_FORK_VERSION !== null ? (
+        <code className="rounded border border-primary/30 bg-primary/10 px-1 text-[11px] font-semibold text-primary">
+          {APP_V3_FORK_VERSION}
+        </code>
+      ) : null}
     </span>
   );
 }

@@ -5,6 +5,31 @@ import {
   resolveSidebarV2Default,
   resolveSidebarV2Enabled,
 } from "./branding.logic";
+import { splitV3ForkVersion } from "./branding";
+
+describe("splitV3ForkVersion", () => {
+  it("splits a fork-suffixed desktop version into nightly base and v3 suffix", () => {
+    expect(splitV3ForkVersion("0.0.31-nightly.20260729.946.v3.0.0.6")).toEqual({
+      base: "0.0.31-nightly.20260729.946",
+      fork: "v3.0.0.6",
+    });
+  });
+
+  it("passes through versions without a fork suffix", () => {
+    expect(splitV3ForkVersion("0.0.31-nightly.20260729.946")).toEqual({
+      base: "0.0.31-nightly.20260729.946",
+      fork: null,
+    });
+    expect(splitV3ForkVersion("0.0.0")).toEqual({ base: "0.0.0", fork: null });
+  });
+
+  it("rejects malformed fork suffixes", () => {
+    expect(splitV3ForkVersion("0.0.31-nightly.1.v3.0.0")).toEqual({
+      base: "0.0.31-nightly.1.v3.0.0",
+      fork: null,
+    });
+  });
+});
 
 const originalWindow = globalThis.window;
 
