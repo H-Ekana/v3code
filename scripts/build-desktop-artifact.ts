@@ -638,8 +638,39 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   // Nothing in the packaged app enables source-map translation (no
   // --enable-source-maps, no source-map-support), so the ~49MB of .map files
   // across web/server/desktop bundles is pure installer and disk weight.
+  // Local build output keeps its maps — this only shapes the installer.
   "!**/*.map",
+  // Runtime package exports resolve to dist/. These declaration-only files and
+  // Effect's TypeScript source trees are not reachable by packaged Node.
+  "!**/*.d.{mts,cts}",
+  "!**/node_modules/effect/src/**/*",
+  "!**/node_modules/@effect/*/src/**/*",
 ] as const;
+const WINDOWS_NODE_PTY_FILE_EXCLUSIONS = [
+  "!**/node_modules/node-pty/build/**/*",
+  "!**/node_modules/node-pty/deps/**/*",
+  "!**/node_modules/node-pty/src/**/*",
+  "!**/node_modules/node-pty/scripts/**/*",
+  "!**/node_modules/node-pty/third_party/**/*",
+  "!**/node_modules/node-pty/binding.gyp",
+  "!**/node_modules/node-pty/prebuilds/darwin-*/**/*",
+] as const;
+
+export function resolveDesktopFileExclusions(
+  platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type,
+): ReadonlyArray<string> {
+  if (platform !== "win" || arch === "universal") {
+    return DESKTOP_FILE_EXCLUSIONS;
+  }
+
+  const unusedWindowsArch = arch === "x64" ? "arm64" : "x64";
+  return [
+    ...DESKTOP_FILE_EXCLUSIONS,
+    ...WINDOWS_NODE_PTY_FILE_EXCLUSIONS,
+    `!**/node_modules/node-pty/prebuilds/win32-${unusedWindowsArch}/**/*`,
+  ];
+}
 // The WSL backend launches the server with plain `wsl.exe -- node`, which
 // cannot read inside an asar archive — and the server bundle externalizes its
 // runtime deps, so the whole node_modules tree must be unpacked, not just the
@@ -651,6 +682,10 @@ export const DESKTOP_EXTRA_RESOURCES = [
   {
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
+  },
+  {
+    from: "apps/desktop/resources/THIRD-PARTY-NOTICES.md",
+    to: "THIRD-PARTY-NOTICES.md",
   },
 ] as const;
 
@@ -1609,6 +1644,7 @@ export function resolveDesktopArtifactName(version: string): string {
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
+  arch: typeof BuildArch.Type,
   version: string,
   signed: boolean,
   mockUpdates: boolean,
@@ -1626,7 +1662,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     productName: resolveDesktopProductName(version),
     artifactName: resolveDesktopArtifactName(version),
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
-    files: [...DESKTOP_FILE_EXCLUSIONS],
+    files: [...resolveDesktopFileExclusions(platform, arch)],
     directories: {
       buildResources: "apps/desktop/resources",
     },
@@ -2035,6 +2071,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     build: yield* createBuildConfig(
       options.platform,
       options.target,
+      options.arch,
       appVersion,
       options.signed,
       options.mockUpdates,

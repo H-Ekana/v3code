@@ -17,6 +17,8 @@ const PLAYWRIGHT_SOURCE_EVALUATION_TIMEOUT_MS = 1_000;
 const PLAYWRIGHT_SDK_LANGUAGE = "javascript";
 const PLAYWRIGHT_BROWSER_NAME = "chromium";
 
+declare const __T3CODE_PLAYWRIGHT_INJECTED_SOURCE__: string | undefined;
+
 export class PlaywrightPackageResolveError extends Schema.TaggedErrorClass<PlaywrightPackageResolveError>()(
   "PlaywrightPackageResolveError",
   {
@@ -164,6 +166,14 @@ export const extractPlaywrightInjectedRuntimeSource = Effect.fn(
 
 export const playwrightInjectedRuntimeSource = Effect.fn("PlaywrightInjectedRuntime.source")(
   function* () {
+    const bundledSource =
+      typeof __T3CODE_PLAYWRIGHT_INJECTED_SOURCE__ === "undefined"
+        ? undefined
+        : __T3CODE_PLAYWRIGHT_INJECTED_SOURCE__;
+    if (bundledSource !== undefined) {
+      return bundledSource;
+    }
+
     const packageJsonPath = yield* Effect.try({
       try: () => require.resolve(PLAYWRIGHT_PACKAGE_SPECIFIER),
       catch: (cause) =>

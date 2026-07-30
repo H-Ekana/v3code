@@ -337,11 +337,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     );
   });
 
-  it("limits Electron locales and excludes the unused Claude SDK executable", () => {
+  it("limits Electron locales and excludes runtime-unreachable payloads", () => {
     assert.deepStrictEqual(DESKTOP_ELECTRON_LANGUAGES, ["en-US"]);
     assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
       "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
       "!**/*.map",
+      "!**/*.d.{mts,cts}",
+      "!**/node_modules/effect/src/**/*",
+      "!**/node_modules/@effect/*/src/**/*",
     ]);
   });
 
@@ -350,6 +353,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const config = yield* createBuildConfig(
         "win",
         "nsis",
+        "x64",
         "1.2.3",
         false,
         false,
@@ -366,6 +370,16 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(config.extraResources, [
         ...DESKTOP_EXTRA_RESOURCES,
         { from: "../bundled-claude-plugins/codex", to: "vendor/claude-plugins/codex" },
+      ]);
+      assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
+        {
+          from: "apps/desktop/prod-resources/resource-monitor",
+          to: "resource-monitor",
+        },
+        {
+          from: "apps/desktop/resources/THIRD-PARTY-NOTICES.md",
+          to: "THIRD-PARTY-NOTICES.md",
+        },
       ]);
       assert.deepStrictEqual(BUNDLED_CODEX_PLUGIN_EXTRA_RESOURCE, {
         from: `../${BUNDLED_CODEX_PLUGIN_STAGE_DIR_NAME}`,
@@ -418,6 +432,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const mac = yield* createBuildConfig(
         "mac",
         "dmg",
+        "arm64",
         "1.2.3",
         false,
         false,
@@ -427,6 +442,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const linux = yield* createBuildConfig(
         "linux",
         "AppImage",
+        "x64",
         "1.2.3",
         false,
         false,
@@ -436,6 +452,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const win = yield* createBuildConfig(
         "win",
         "nsis",
+        "x64",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const winArm64 = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "arm64",
         "1.2.3",
         false,
         false,
@@ -446,9 +473,37 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.notProperty(mac, "asarUnpack");
       assert.notProperty(linux, "asarUnpack");
       assert.deepStrictEqual(win.asarUnpack, WINDOWS_ASAR_UNPACK);
+      assert.include(
+        winArm64.files as ReadonlyArray<string>,
+        "!**/node_modules/node-pty/prebuilds/win32-x64/**/*",
+      );
+      assert.notInclude(
+        winArm64.files as ReadonlyArray<string>,
+        "!**/node_modules/node-pty/prebuilds/win32-arm64/**/*",
+      );
+      assert.isFalse(
+        (win.files as ReadonlyArray<string>).some((pattern) =>
+          pattern.includes("node-pty/prebuilds/linux-"),
+        ),
+      );
       for (const config of [mac, linux, win]) {
         assert.deepStrictEqual(config.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);
-        assert.deepStrictEqual(config.files, DESKTOP_FILE_EXCLUSIONS);
+        assert.deepStrictEqual(
+          config.files,
+          config === win
+            ? [
+                ...DESKTOP_FILE_EXCLUSIONS,
+                "!**/node_modules/node-pty/build/**/*",
+                "!**/node_modules/node-pty/deps/**/*",
+                "!**/node_modules/node-pty/src/**/*",
+                "!**/node_modules/node-pty/scripts/**/*",
+                "!**/node_modules/node-pty/third_party/**/*",
+                "!**/node_modules/node-pty/binding.gyp",
+                "!**/node_modules/node-pty/prebuilds/darwin-*/**/*",
+                "!**/node_modules/node-pty/prebuilds/win32-arm64/**/*",
+              ]
+            : DESKTOP_FILE_EXCLUSIONS,
+        );
       }
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
@@ -610,10 +665,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
     Effect.gen(function* () {
-      const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
-        entitlementsPath: "/tmp/entitlements.mac.plist",
-        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-      });
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "arm64",
+        "1.2.3",
+        true,
+        false,
+        undefined,
+        {
+          entitlementsPath: "/tmp/entitlements.mac.plist",
+          provisioningProfilePath: "/tmp/t3code.provisionprofile",
+        },
+      );
 
       const mac = config.mac as Record<string, unknown>;
       assert.equal(config.appId, "com.v3code.desktop");
@@ -630,6 +694,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const config = yield* createBuildConfig(
         "win",
         "nsis",
+        "x64",
         "1.2.3",
         false,
         false,
@@ -653,6 +718,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
       },
+      {
+        from: "apps/desktop/resources/THIRD-PARTY-NOTICES.md",
+        to: "THIRD-PARTY-NOTICES.md",
+      },
     ]);
     assert.deepStrictEqual(resolveResourceMonitorRustTargets("mac", "universal"), [
       "aarch64-apple-darwin",
@@ -673,6 +742,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const config = yield* createBuildConfig(
         "win",
         "nsis",
+        "x64",
         "0.0.29-nightly.20260725.899.v3.0.0.1",
         false,
         false,

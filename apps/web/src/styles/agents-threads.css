@@ -42,7 +42,6 @@
   --agents-running-ring-rate: 2s;
   /* Rotation RATE for the thread running trace. Outside the ladder for the
      same reason as the ring above. */
-  --threads-running-trace-rate: 1.8s;
   /* Plan item 11 asks for a 240-300ms Level 3 settle acknowledgment. Mirrored
      in Sidebar.logic.ts as THREAD_SETTLE_ACK_DURATION_MS — keep them in step. */
   --threads-settle-ack: 280ms;
@@ -178,18 +177,10 @@
 
 /* ── Thread running treatment (plan item 3) ─────────────────────────── */
 
-/* Level 2. The violet running trace that replaces the old cyan/blue `Working`
-   colour. Colour never carries this alone: the consumer always renders the
-   status label plus a dashed-ring icon beside it. */
-.thread-status-trace {
-  animation: thread-status-trace var(--threads-running-trace-rate) linear infinite;
-}
-
-@keyframes thread-status-trace {
-  to {
-    rotate: 360deg;
-  }
-}
+/* Level 2. The violet dashed-ring glyph replaces the old cyan/blue `Working`
+   colour. Keep it static: the adjacent `Working` label already pulses and its
+   duration ticks every second, while rotating this inline SVG continuously
+   repaints the Electron renderer and GPU processes. */
 
 /* ── Thread settlement acknowledgment (plan item 11) ────────────────── */
 
@@ -322,7 +313,6 @@
   .agent-completion-mark,
   .agent-activity-reveal,
   .agent-phase-count,
-  .thread-status-trace,
   .thread-settle-row-edge,
   .sidebar-project-identity {
     animation: none;
