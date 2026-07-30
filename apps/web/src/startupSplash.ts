@@ -1,5 +1,17 @@
 export const STARTUP_SPLASH_HOLD_MS = 1_600;
 /**
+ * The deadline after which the splash leaves whether or not the app ever said it was ready.
+ *
+ * Exit normally requires `markAppReady()`, which the root route calls once it commits. Any
+ * boot path that never reaches that call — an error boundary, an unexpected route, a mount
+ * that throws — would otherwise leave every boot layer alive forever, and those layers are
+ * full-screen blurred/masked surfaces on infinite loops: invisible as a bug, permanent as a
+ * cost. Twelve seconds is far past any legitimate cold start (the hold alone is 1.6s), so
+ * reaching this timer always means something went wrong, and a splash that overstays is
+ * strictly worse than one that leaves a beat early.
+ */
+export const STARTUP_SPLASH_FAILSAFE_MS = 12_000;
+/**
  * The strike. Runs at the head of the parting rather than during the hold, so the impact is
  * locked to the moment the choreography actually begins — the gate can fire late if the app
  * is slow to commit, and a meteor scheduled against the hold would land on nothing.
@@ -76,6 +88,14 @@ export function createStartupSplashGate({
     holdElapsed = true;
     tryExit();
   }, STARTUP_SPLASH_HOLD_MS);
+
+  // Forces the exit if readiness never arrives. `exitStarted` already makes this a no-op on
+  // the normal path, so the happy path's timing is untouched.
+  schedule(() => {
+    appReady = true;
+    holdElapsed = true;
+    tryExit();
+  }, STARTUP_SPLASH_FAILSAFE_MS);
 
   return {
     markAppReady: () => {

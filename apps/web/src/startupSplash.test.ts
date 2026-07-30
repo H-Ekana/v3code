@@ -18,6 +18,7 @@ import {
   STARTUP_METEOR_MS,
   STARTUP_PARTING_DELAY_MS,
   STARTUP_SPLASH_EXIT_MS,
+  STARTUP_SPLASH_FAILSAFE_MS,
   STARTUP_SPLASH_HOLD_MS,
   STARTUP_SPLASH_REDUCED_EXIT_MS,
 } from "./startupSplash";
@@ -173,45 +174,84 @@ describe("startup splash", () => {
   });
 
   it("waits for both the compulsory hold and a committed app screen", () => {
-    const scheduled: Array<() => void> = [];
+    const timers = new Map<number, () => void>();
     let exits = 0;
     const gate = createStartupSplashGate({
       onExit: () => {
         exits += 1;
       },
       schedule: (callback, delayMs) => {
-        expect(delayMs).toBe(STARTUP_SPLASH_HOLD_MS);
-        scheduled.push(callback);
-        return scheduled.length;
+        timers.set(delayMs, callback);
+        return timers.size;
       },
     });
 
     gate.markAppReady();
     expect(exits).toBe(0);
-    scheduled[0]?.();
+    timers.get(STARTUP_SPLASH_HOLD_MS)?.();
     expect(exits).toBe(1);
     gate.markAppReady();
-    scheduled[0]?.();
+    timers.get(STARTUP_SPLASH_HOLD_MS)?.();
+    expect(exits).toBe(1);
+
+    // The failsafe must be inert once the normal path has run.
+    timers.get(STARTUP_SPLASH_FAILSAFE_MS)?.();
     expect(exits).toBe(1);
   });
 
   it("keeps holding when time elapses before the app commits", () => {
-    let releaseHold: (() => void) | undefined;
+    const timers = new Map<number, () => void>();
     let exits = 0;
     const gate = createStartupSplashGate({
       onExit: () => {
         exits += 1;
       },
-      schedule: (callback) => {
-        releaseHold = callback;
-        return 1;
+      schedule: (callback, delayMs) => {
+        timers.set(delayMs, callback);
+        return timers.size;
       },
     });
 
-    releaseHold?.();
+    timers.get(STARTUP_SPLASH_HOLD_MS)?.();
     expect(exits).toBe(0);
     gate.markAppReady();
     expect(exits).toBe(1);
+  });
+
+  it("tears the splash down even if the app never reports itself ready", () => {
+    // Without this, a boot path that never calls markAppReady() leaves every boot layer
+    // mounted and animating for the life of the window.
+    const timers = new Map<number, () => void>();
+    let exits = 0;
+    createStartupSplashGate({
+      onExit: () => {
+        exits += 1;
+      },
+      schedule: (callback, delayMs) => {
+        timers.set(delayMs, callback);
+        return timers.size;
+      },
+    });
+
+    expect(timers.has(STARTUP_SPLASH_FAILSAFE_MS)).toBe(true);
+    // The hold alone must still not be enough — that is the whole point of the gate.
+    timers.get(STARTUP_SPLASH_HOLD_MS)?.();
+    expect(exits).toBe(0);
+
+    timers.get(STARTUP_SPLASH_FAILSAFE_MS)?.();
+    expect(exits).toBe(1);
+
+    // And it cannot fire twice, however the remaining timers land.
+    timers.get(STARTUP_SPLASH_FAILSAFE_MS)?.();
+    timers.get(STARTUP_SPLASH_HOLD_MS)?.();
+    expect(exits).toBe(1);
+  });
+
+  it("sets the failsafe well beyond any legitimate slow boot", () => {
+    expect(STARTUP_SPLASH_FAILSAFE_MS).toBeGreaterThan(
+      STARTUP_SPLASH_HOLD_MS + STARTUP_SPLASH_EXIT_MS,
+    );
+    expect(STARTUP_SPLASH_FAILSAFE_MS).toBe(12_000);
   });
 
   it("recoils downward, sweeps left, then climbs into the sidebar", () => {
