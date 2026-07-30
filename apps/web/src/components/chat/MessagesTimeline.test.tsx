@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 import { appendConversationReferencesToPrompt } from "../../conversationReference";
+import { IMAGE_ONLY_BOOTSTRAP_PROMPT } from "../../lib/imageOnlyPrompt";
 
 vi.mock("@legendapp/list/react", async () => {
   const legendListTestId = "legend-list";
@@ -423,6 +424,39 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-maintain-visible-content-position="object"');
     expect(markup).toContain('data-maintain-visible-content-position-data="true"');
     expect(markup).toContain('data-maintain-visible-content-position-size="true"');
+  });
+
+  it("shows an image-only turn as the attachment alone, without the bootstrap prompt", () => {
+    const entry = buildUserTimelineEntry(IMAGE_ONLY_BOOTSTRAP_PROMPT);
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            ...entry,
+            message: {
+              ...entry.message,
+              attachments: [
+                {
+                  type: "image" as const,
+                  id: "attachment-1",
+                  name: "screenshot.png",
+                  mimeType: "image/png",
+                  sizeBytes: 1,
+                  previewUrl: "data:image/png;base64,iVBORw0KGgo=",
+                },
+              ],
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('alt="screenshot.png"');
+    expect(markup).not.toContain("without additional text");
+    // No body and no copy affordance for text the user never wrote.
+    expect(markup).not.toContain('data-user-message-body="true"');
+    expect(markup).not.toContain("Copy to clipboard");
   });
 
   it("renders collapse controls for long user messages", () => {

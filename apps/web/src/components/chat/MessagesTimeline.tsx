@@ -104,6 +104,7 @@ import {
   extractTrailingPreviewAnnotation,
   type ParsedPreviewAnnotation,
 } from "~/lib/previewAnnotation";
+import { stripImageOnlyBootstrapPrompt } from "~/lib/imageOnlyPrompt";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
@@ -783,7 +784,8 @@ function deriveTimelineMinimapItems(
       rowIndex: index,
       userText: compactMinimapPreview(
         row,
-        extractTrailingConversationReferences(row.message.text).promptText,
+        extractTrailingConversationReferences(stripImageOnlyBootstrapPrompt(row.message.text))
+          .promptText,
       ),
       assistantText: finalAssistantRow
         ? compactMinimapPreview(finalAssistantRow, finalAssistantRow.message.text)
@@ -1110,7 +1112,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   // the flyer flight replaced that mechanism.
 
   const userImages = row.message.attachments ?? [];
-  const conversationReferenceState = extractTrailingConversationReferences(row.message.text);
+  // An image-only send carries a bootstrap line for the agent; it is not
+  // something the user wrote, so the bubble (and its copy button) never show it.
+  const conversationReferenceState = extractTrailingConversationReferences(
+    stripImageOnlyBootstrapPrompt(row.message.text),
+  );
   const displayedUserMessage = deriveDisplayedUserMessageState(
     conversationReferenceState.promptText,
   );
@@ -1131,6 +1137,14 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
+  // An image-only turn has nothing under the grid, so it must not reserve the
+  // gap that separates attachments from the message body.
+  const hasContentBelowImages =
+    conversationReferenceState.references.length > 0 ||
+    previewAnnotations.length > 0 ||
+    elementContexts.length > 0 ||
+    terminalContexts.length > 0 ||
+    elementContextState.promptText.trim().length > 0;
 
   return (
     <div className="group flex flex-col items-end gap-1">
@@ -1149,7 +1163,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         data-user-turn-arrival-id={isArriving ? row.message.id : undefined}
       >
         {regularImages.length > 0 && (
-          <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
+          <div
+            className={cn("grid max-w-[420px] grid-cols-2 gap-2", hasContentBelowImages && "mb-2")}
+          >
             {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
               <div
                 key={image.id}
