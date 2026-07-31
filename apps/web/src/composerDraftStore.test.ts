@@ -722,6 +722,30 @@ describe("composerDraftStore conversation references", () => {
     ).toEqual(["reference-1", "reference-2"]);
   });
 
+  it("allows the same excerpt from different source messages", () => {
+    const store = useComposerDraftStore.getState();
+    const sharedText = "The same quoted claim.";
+
+    expect(
+      store.addConversationReference(threadRef, {
+        ...firstReference,
+        text: sharedText,
+      }),
+    ).toBe(true);
+    expect(
+      store.addConversationReference(threadRef, {
+        ...secondReference,
+        text: sharedText,
+      }),
+    ).toBe(true);
+
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.conversationReferences.map(
+        (reference) => reference.sourceMessageId,
+      ),
+    ).toEqual([firstReference.sourceMessageId, secondReference.sourceMessageId]);
+  });
+
   it("persists, removes, and clears references with composer content", () => {
     const store = useComposerDraftStore.getState();
     store.addConversationReference(threadRef, firstReference);
