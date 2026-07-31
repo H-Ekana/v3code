@@ -49,6 +49,9 @@ import Migration0033 from "./Migrations/033_ProjectionThreadsSettled.ts";
 import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
 import Migration0035 from "./Migrations/035_ProjectionThreadsActiveAgents.ts";
 import Migration0036 from "./Migrations/036_ProjectionThreadsActiveBackgroundTasks.ts";
+// Upstream shipped this as migration 035; this fork already owns 035 and 036, so it is
+// renumbered to 037 to keep already-migrated fork databases moving forward.
+import Migration0037 from "./Migrations/037_ProjectionThreadTitleRegeneration.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -97,6 +100,7 @@ export const migrationEntries = [
   [34, "ProjectionThreadsSnoozed", Migration0034],
   [35, "ProjectionThreadsActiveAgents", Migration0035],
   [36, "ProjectionThreadsActiveBackgroundTasks", Migration0036],
+  [37, "ProjectionThreadTitleRegeneration", Migration0037],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

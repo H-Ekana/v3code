@@ -1716,6 +1716,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       executableName: "v3code",
       icon: "icons",
       category: "Development",
+      // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
+      // in the .desktop entry (Exec already gets %U), so browsers can hand
+      // t3code:// OAuth callbacks to the app.
+      protocols: [
+        {
+          name: "T3 Code",
+          schemes: ["t3code", "t3code-dev"],
+        },
+      ],
       desktop: {
         entry: {
           StartupWMClass: "v3code",
