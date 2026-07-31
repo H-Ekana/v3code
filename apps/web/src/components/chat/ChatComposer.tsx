@@ -76,6 +76,7 @@ import {
   insertInlineTerminalContextPlaceholder,
   removeInlineTerminalContextPlaceholder,
 } from "../../lib/terminalContext";
+import { type LargePasteDraft, expandInlineLargePastes } from "../../lib/largePaste";
 import { useComposerPathSearch } from "../../lib/composerPathSearchState";
 import { type ElementContextDraft } from "../../lib/elementContext";
 import { ComposerPendingElementContexts } from "./ComposerPendingElementContexts";
@@ -257,6 +258,23 @@ const terminalContextIdListsEqual = (
   ids: ReadonlyArray<string>,
 ): boolean =>
   contexts.length === ids.length && contexts.every((context, index) => context.id === ids[index]);
+
+const syncLargePastesByIds = (
+  pastes: ReadonlyArray<LargePasteDraft>,
+  ids: ReadonlyArray<string>,
+): LargePasteDraft[] => {
+  const pastesById = new Map(pastes.map((paste) => [paste.id, paste]));
+  return ids.flatMap((id) => {
+    const paste = pastesById.get(id);
+    return paste ? [paste] : [];
+  });
+};
+
+const largePasteIdListsEqual = (
+  pastes: ReadonlyArray<LargePasteDraft>,
+  ids: ReadonlyArray<string>,
+): boolean =>
+  pastes.length === ids.length && pastes.every((paste, index) => paste.id === ids[index]);
 
 function isInsideComposerFloatingLayer(element: Element): boolean {
   return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
@@ -580,6 +598,7 @@ export interface ChatComposerHandle {
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    largePasteIds: string[];
   };
   /** Reset composer cursor/trigger/highlight after external prompt mutations (e.g. onSend). */
   resetCursorState: (options?: {
@@ -599,6 +618,7 @@ export interface ChatComposerHandle {
     prompt: string;
     images: ComposerImageAttachment[];
     terminalContexts: TerminalContextDraft[];
+    largePastes: LargePasteDraft[];
     elementContexts: ElementContextDraft[];
     previewAnnotations: PreviewAnnotationPayload[];
     reviewComments: ReviewCommentContext[];
@@ -818,6 +838,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
   const composerTerminalContexts = composerDraft.terminalContexts;
+  const composerLargePastes = composerDraft.largePastes;
   const composerElementContexts = composerDraft.elementContexts;
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
@@ -825,6 +846,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const addComposerDraftLargePaste = useComposerDraftStore((store) => store.addLargePaste);
+  const setComposerDraftLargePastes = useComposerDraftStore((store) => store.setLargePastes);
+  const removeComposerDraftLargePaste = useComposerDraftStore((store) => store.removeLargePaste);
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
@@ -1851,6 +1875,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       expandedCursor: number,
       cursorAdjacentToMention: boolean,
       terminalContextIds: string[],
+      largePasteIds: string[],
     ) => {
       if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
         setComposerCursor(nextCursor);
@@ -1874,6 +1899,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           syncTerminalContextsByIds(composerTerminalContexts, terminalContextIds),
         );
       }
+      const latestLargePastes =
+        getComposerDraft(composerDraftTarget)?.largePastes ?? composerLargePastes;
+      if (!largePasteIdListsEqual(latestLargePastes, largePasteIds)) {
+        setComposerDraftLargePastes(
+          composerDraftTarget,
+          syncLargePastesByIds(latestLargePastes, largePasteIds),
+        );
+      }
       setComposerCursor(nextCursor);
       setComposerTrigger(
         cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
@@ -1887,7 +1920,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setPrompt,
       composerDraftTarget,
       composerTerminalContexts,
+      composerLargePastes,
+      getComposerDraft,
       setComposerDraftTerminalContexts,
+      setComposerDraftLargePastes,
     ],
   );
 
@@ -1949,6 +1985,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    largePasteIds: string[];
   } => {
     const editorSnapshot = composerEditorRef.current?.readSnapshot();
     if (editorSnapshot) {
@@ -1959,8 +1996,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       cursor: composerCursor,
       expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
       terminalContextIds: composerTerminalContexts.map((context) => context.id),
+      largePasteIds: composerLargePastes.map((paste) => paste.id),
     };
-  }, [composerCursor, composerTerminalContexts, promptRef]);
+  }, [composerCursor, composerLargePastes, composerTerminalContexts, promptRef]);
 
   const resolveActiveComposerTrigger = useCallback((): {
     snapshot: { value: string; cursor: number; expandedCursor: number };
@@ -2394,7 +2432,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const stashCurrentPrompt = useCallback(async () => {
     // Terminal-context placeholders reference live sessions the stash can't
     // round-trip, so they are stripped from the stashed prompt.
-    const prompt = promptRef.current.split(INLINE_TERMINAL_CONTEXT_PLACEHOLDER).join("").trim();
+    const prompt = expandInlineLargePastes(promptRef.current, composerLargePastes)
+      .split(INLINE_TERMINAL_CONTEXT_PLACEHOLDER)
+      .join("")
+      .trim();
     const images = [...composerImagesRef.current];
     if (prompt.length === 0 && images.length === 0) {
       setIsStashMenuOpen((open) => !open);
@@ -2541,6 +2582,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [
     clearComposerDraftPromptAndImages,
     composerDraftTarget,
+    composerLargePastes,
     composerImagesRef,
     finalizeStashEntryImages,
     promptRef,
@@ -2861,6 +2903,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           cursor: composerCursor,
           expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
           terminalContextIds: composerTerminalContexts.map((context) => context.id),
+          largePasteIds: composerLargePastes.map((paste) => paste.id),
         };
         const insertion = insertInlineTerminalContextPlaceholder(
           snapshot.value,
@@ -2893,6 +2936,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         prompt: promptRef.current,
         images: composerImagesRef.current,
         terminalContexts: composerTerminalContextsRef.current,
+        largePastes: composerLargePastes,
         elementContexts: composerElementContextsRef.current,
         previewAnnotations: composerPreviewAnnotations,
         reviewComments: composerReviewComments,
@@ -2911,6 +2955,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerDraftTarget,
       composerCursor,
       composerTerminalContexts,
+      composerLargePastes,
       insertComposerDraftTerminalContext,
       promptRef,
       composerImagesRef,
@@ -3400,9 +3445,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ? composerTerminalContexts
                     : []
                 }
+                largePastes={
+                  !isComposerApprovalState && pendingUserInputs.length === 0
+                    ? composerLargePastes
+                    : []
+                }
+                largePasteEnabled={!isComposerApprovalState && pendingUserInputs.length === 0}
                 skills={selectedProviderStatus?.skills ?? []}
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                 onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
+                onAddLargePaste={(paste) => addComposerDraftLargePaste(composerDraftTarget, paste)}
+                onRemoveLargePaste={(pasteId) =>
+                  removeComposerDraftLargePaste(composerDraftTarget, pasteId)
+                }
                 onChange={onPromptChange}
                 onCommandKeyDown={onComposerCommandKey}
                 onPaste={onComposerPaste}

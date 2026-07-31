@@ -71,6 +71,7 @@ import {
   DraftId,
 } from "./composerDraftStore";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import { INLINE_LARGE_PASTE_PLACEHOLDER, type LargePasteDraft } from "./lib/largePaste";
 import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   insertInlineTerminalContextPlaceholder,
@@ -287,6 +288,34 @@ describe("composerDraftStore clearComposerContent", () => {
     const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
     expect(draft).toBeUndefined();
     expect(revokeSpy).not.toHaveBeenCalledWith("blob:optimistic");
+  });
+
+  it("persists large pasted text and clears it with composer content", () => {
+    const paste: LargePasteDraft = {
+      id: "paste-1",
+      text: "a".repeat(2_001),
+      createdAt: "2023-11-14T22:13:20.000Z",
+    };
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, INLINE_LARGE_PASTE_PLACEHOLDER);
+    store.addLargePaste(threadRef, paste);
+
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+      };
+    };
+    const persistedState = persistApi.getOptions().partialize(useComposerDraftStore.getState()) as {
+      draftsByThreadKey?: Record<string, { largePastes?: LargePasteDraft[] }>;
+    };
+
+    expect(
+      persistedState.draftsByThreadKey?.[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)]?.largePastes,
+    ).toEqual([paste]);
+
+    store.clearComposerContent(threadRef);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 });
 

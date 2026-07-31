@@ -11,6 +11,7 @@ import {
   $applyNodeReplacement,
   $createRangeSelectionFromDom,
   $createRangeSelection,
+  $getNodeByKey,
   $getSelection,
   $setSelection,
   $isElementNode,
@@ -68,6 +69,7 @@ import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
 } from "~/lib/terminalContext";
+import { INLINE_LARGE_PASTE_PLACEHOLDER, type LargePasteDraft } from "~/lib/largePaste";
 import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath } from "~/pierre-icons";
 import {
@@ -78,9 +80,11 @@ import {
 } from "./composerInlineChip";
 import { FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
+import { ComposerLargePasteChip } from "./chat/ComposerLargePasteChip";
 import { formatProviderSkillDisplayName } from "~/providerSkillPresentation";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { registerComposerInlineTokenPaste } from "./composerInlineTokenPaste";
+import { registerComposerLargePaste } from "./composerLargePaste";
 
 const COMPOSER_EDITOR_HMR_KEY = `composer-editor-${Math.random().toString(36).slice(2)}`;
 const SURROUND_SYMBOLS: [string, string][] = [
@@ -128,10 +132,21 @@ type SerializedComposerTerminalContextNode = Spread<
   SerializedLexicalNode
 >;
 
+type SerializedComposerLargePasteNode = Spread<
+  {
+    paste: LargePasteDraft;
+    type: "composer-large-paste";
+    version: 1;
+  },
+  SerializedLexicalNode
+>;
+
 const ComposerTerminalContextActionsContext = createContext<{
   onRemoveTerminalContext: (contextId: string) => void;
+  onRemoveLargePaste: (pasteId: string) => void;
 }>({
   onRemoveTerminalContext: () => {},
+  onRemoveLargePaste: () => {},
 });
 
 function ComposerMentionDecorator(props: { path: string }) {
@@ -424,16 +439,115 @@ function $createComposerTerminalContextNode(
   return $applyNodeReplacement(new ComposerTerminalContextNode(context));
 }
 
+function ComposerLargePasteDecorator(props: { paste: LargePasteDraft; nodeKey: NodeKey }) {
+  const [editor] = useLexicalComposerContext();
+  const { onRemoveLargePaste } = use(ComposerTerminalContextActionsContext);
+
+  const remove = useCallback(() => {
+    editor.update(() => {
+      const node = $getNodeByKey(props.nodeKey);
+      if (node instanceof ComposerLargePasteNode) {
+        node.remove();
+      }
+    });
+    onRemoveLargePaste(props.paste.id);
+  }, [editor, onRemoveLargePaste, props.nodeKey, props.paste.id]);
+
+  const restore = useCallback(() => {
+    editor.update(() => {
+      const node = $getNodeByKey(props.nodeKey);
+      if (!(node instanceof ComposerLargePasteNode)) return;
+      const parent = node.getParent();
+      if (!$isElementNode(parent)) return;
+      const replacement: LexicalNode[] = [];
+      const lines = props.paste.text.split("\n");
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index] ?? "";
+        if (line.length > 0) {
+          replacement.push($createTextNode(line));
+        }
+        if (index < lines.length - 1) {
+          replacement.push($createLineBreakNode());
+        }
+      }
+      parent.splice(node.getIndexWithinParent(), 1, replacement);
+    });
+    onRemoveLargePaste(props.paste.id);
+  }, [editor, onRemoveLargePaste, props.nodeKey, props.paste.id, props.paste.text]);
+
+  return <ComposerLargePasteChip paste={props.paste} onRestore={restore} onRemove={remove} />;
+}
+
+class ComposerLargePasteNode extends DecoratorNode<React.ReactElement> {
+  __paste: LargePasteDraft;
+
+  static override getType(): string {
+    return "composer-large-paste";
+  }
+
+  static override clone(node: ComposerLargePasteNode): ComposerLargePasteNode {
+    return new ComposerLargePasteNode(node.__paste, node.__key);
+  }
+
+  static override importJSON(
+    serializedNode: SerializedComposerLargePasteNode,
+  ): ComposerLargePasteNode {
+    return $createComposerLargePasteNode(serializedNode.paste);
+  }
+
+  constructor(paste: LargePasteDraft, key?: NodeKey) {
+    super(key);
+    this.__paste = paste;
+  }
+
+  override exportJSON(): SerializedComposerLargePasteNode {
+    return {
+      ...super.exportJSON(),
+      paste: this.__paste,
+      type: "composer-large-paste",
+      version: 1,
+    };
+  }
+
+  override createDOM(): HTMLElement {
+    const dom = document.createElement("span");
+    dom.className = "composer-inline-chip relative inline-flex align-middle leading-none";
+    return dom;
+  }
+
+  override updateDOM(): false {
+    return false;
+  }
+
+  override getTextContent(): string {
+    return INLINE_LARGE_PASTE_PLACEHOLDER;
+  }
+
+  override isInline(): true {
+    return true;
+  }
+
+  override decorate(): React.ReactElement {
+    return <ComposerLargePasteDecorator paste={this.__paste} nodeKey={this.__key} />;
+  }
+}
+
+function $createComposerLargePasteNode(paste: LargePasteDraft): ComposerLargePasteNode {
+  return $applyNodeReplacement(new ComposerLargePasteNode(paste));
+}
+
 type ComposerInlineTokenNode =
   | ComposerMentionNode
   | ComposerSkillNode
-  | ComposerTerminalContextNode;
+  | ComposerTerminalContextNode
+  | ComposerLargePasteNode;
 
 function isComposerInlineTokenNode(candidate: unknown): candidate is ComposerInlineTokenNode {
   return (
     candidate instanceof ComposerMentionNode ||
     candidate instanceof ComposerSkillNode ||
-    candidate instanceof ComposerTerminalContextNode
+    candidate instanceof ComposerTerminalContextNode ||
+    candidate instanceof ComposerLargePasteNode
   );
 }
 
@@ -455,6 +569,12 @@ function terminalContextSignature(contexts: ReadonlyArray<TerminalContextDraft>)
         context.text,
       ].join("\u001f"),
     )
+    .join("\u001e");
+}
+
+function largePasteSignature(pastes: ReadonlyArray<LargePasteDraft>): string {
+  return pastes
+    .map((paste) => `${paste.id}\u001f${paste.createdAt}\u001f${paste.text}`)
     .join("\u001e");
 }
 
@@ -820,6 +940,7 @@ function $appendTextWithLineBreaks(parent: ElementNode, text: string): void {
 function $setComposerEditorPrompt(
   prompt: string,
   terminalContexts: ReadonlyArray<TerminalContextDraft>,
+  largePastes: ReadonlyArray<LargePasteDraft>,
   skillMetadata: ReadonlyMap<string, ComposerSkillMetadata>,
 ): void {
   const root = $getRoot();
@@ -827,7 +948,7 @@ function $setComposerEditorPrompt(
   const paragraph = $createParagraphNode();
   root.append(paragraph);
 
-  const segments = splitPromptIntoComposerSegments(prompt, terminalContexts);
+  const segments = splitPromptIntoComposerSegments(prompt, terminalContexts, largePastes);
   for (const segment of segments) {
     if (segment.type === "mention") {
       paragraph.append($createComposerMentionNode(segment.path));
@@ -850,6 +971,12 @@ function $setComposerEditorPrompt(
       }
       continue;
     }
+    if (segment.type === "large-paste") {
+      if (segment.paste) {
+        paragraph.append($createComposerLargePasteNode(segment.paste));
+      }
+      continue;
+    }
     $appendTextWithLineBreaks(paragraph, segment.text);
   }
 }
@@ -864,6 +991,16 @@ function collectTerminalContextIds(node: LexicalNode): string[] {
   return [];
 }
 
+function collectLargePasteIds(node: LexicalNode): string[] {
+  if (node instanceof ComposerLargePasteNode) {
+    return [node.__paste.id];
+  }
+  if ($isElementNode(node)) {
+    return node.getChildren().flatMap((child) => collectLargePasteIds(child));
+  }
+  return [];
+}
+
 export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
@@ -873,6 +1010,7 @@ export interface ComposerPromptEditorHandle {
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    largePasteIds: string[];
   };
 }
 
@@ -880,17 +1018,22 @@ interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  largePastes: ReadonlyArray<LargePasteDraft>;
+  largePasteEnabled: boolean;
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
   className?: string;
   onRemoveTerminalContext: (contextId: string) => void;
+  onAddLargePaste: (paste: LargePasteDraft) => void;
+  onRemoveLargePaste: (pasteId: string) => void;
   onChange: (
     nextValue: string,
     nextCursor: number,
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
     terminalContextIds: string[],
+    largePasteIds: string[],
   ) => void;
   onCommandKeyDown?: (
     key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
@@ -1105,7 +1248,9 @@ function ComposerInlineTokenSelectionNormalizePlugin() {
 
 function ComposerInlineTokenBackspacePlugin() {
   const [editor] = useLexicalComposerContext();
-  const { onRemoveTerminalContext } = use(ComposerTerminalContextActionsContext);
+  const { onRemoveTerminalContext, onRemoveLargePaste } = use(
+    ComposerTerminalContextActionsContext,
+  );
 
   useEffect(() => {
     return editor.registerCommand(
@@ -1126,6 +1271,9 @@ function ComposerInlineTokenBackspacePlugin() {
           candidate.remove();
           if (candidate instanceof ComposerTerminalContextNode) {
             onRemoveTerminalContext(candidate.__context.id);
+            $setSelectionAtComposerOffset(selectionOffset);
+          } else if (candidate instanceof ComposerLargePasteNode) {
+            onRemoveLargePaste(candidate.__paste.id);
             $setSelectionAtComposerOffset(selectionOffset);
           } else {
             $setSelectionAtComposerOffset(tokenStart);
@@ -1165,7 +1313,7 @@ function ComposerInlineTokenBackspacePlugin() {
       },
       COMMAND_PRIORITY_HIGH,
     );
-  }, [editor, onRemoveTerminalContext]);
+  }, [editor, onRemoveLargePaste, onRemoveTerminalContext]);
 
   return null;
 }
@@ -1259,12 +1407,36 @@ function ComposerInlineTokenPastePlugin() {
   return null;
 }
 
+function ComposerLargePastePlugin(props: {
+  enabled: boolean;
+  onCreateLargePaste: (paste: LargePasteDraft) => void;
+}) {
+  const [editor] = useLexicalComposerContext();
+  const onCreateLargePasteRef = useRef(props.onCreateLargePaste);
+
+  useEffect(() => {
+    onCreateLargePasteRef.current = props.onCreateLargePaste;
+  }, [props.onCreateLargePaste]);
+
+  useEffect(() => {
+    if (!props.enabled) return;
+    return registerComposerLargePaste(editor, {
+      createLargePasteNode: $createComposerLargePasteNode,
+      onCreateLargePaste: (paste) => onCreateLargePasteRef.current(paste),
+    });
+  }, [editor, props.enabled]);
+
+  return null;
+}
+
 function ComposerSurroundSelectionPlugin(props: {
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  largePastes: ReadonlyArray<LargePasteDraft>;
   skills: ReadonlyArray<ServerProviderSkill>;
 }) {
   const [editor] = useLexicalComposerContext();
   const terminalContextsRef = useRef(props.terminalContexts);
+  const largePastesRef = useRef(props.largePastes);
   const skillMetadataRef = useRef(skillMetadataByName(props.skills));
   const pendingSurroundSelectionRef = useRef<{
     value: string;
@@ -1280,6 +1452,10 @@ function ComposerSurroundSelectionPlugin(props: {
   useEffect(() => {
     terminalContextsRef.current = props.terminalContexts;
   }, [props.terminalContexts]);
+
+  useEffect(() => {
+    largePastesRef.current = props.largePastes;
+  }, [props.largePastes]);
 
   useEffect(() => {
     skillMetadataRef.current = skillMetadataByName(props.skills);
@@ -1329,7 +1505,12 @@ function ComposerSurroundSelectionPlugin(props: {
         selectionSnapshot.expandedEnd,
       );
       const nextValue = `${selectionSnapshot.value.slice(0, selectionSnapshot.expandedStart)}${inputData}${selectedText}${surroundCloseSymbol}${selectionSnapshot.value.slice(selectionSnapshot.expandedEnd)}`;
-      $setComposerEditorPrompt(nextValue, terminalContextsRef.current, skillMetadataRef.current);
+      $setComposerEditorPrompt(
+        nextValue,
+        terminalContextsRef.current,
+        largePastesRef.current,
+        skillMetadataRef.current,
+      );
       const selectionStart = collapseExpandedComposerCursor(
         nextValue,
         selectionSnapshot.expandedStart,
@@ -1529,11 +1710,15 @@ function ComposerPromptEditorInner({
   value,
   cursor,
   terminalContexts,
+  largePastes,
+  largePasteEnabled,
   skills,
   disabled,
   placeholder,
   className,
   onRemoveTerminalContext,
+  onAddLargePaste,
+  onRemoveLargePaste,
   onChange,
   onCommandKeyDown,
   onPaste,
@@ -1544,6 +1729,8 @@ function ComposerPromptEditorInner({
   const initialCursor = clampCollapsedComposerCursor(value, cursor);
   const terminalContextsSignature = terminalContextSignature(terminalContexts);
   const terminalContextsSignatureRef = useRef(terminalContextsSignature);
+  const largePastesSignature = largePasteSignature(largePastes);
+  const largePastesSignatureRef = useRef(largePastesSignature);
   const skillsSignature = skillSignature(skills);
   const skillsSignatureRef = useRef(skillsSignature);
   const skillMetadataRef = useRef(skillMetadataByName(skills));
@@ -1552,11 +1739,12 @@ function ComposerPromptEditorInner({
     cursor: initialCursor,
     expandedCursor: expandCollapsedComposerCursor(value, initialCursor),
     terminalContextIds: terminalContexts.map((context) => context.id),
+    largePasteIds: largePastes.map((paste) => paste.id),
   });
   const isApplyingControlledUpdateRef = useRef(false);
   const terminalContextActions = useMemo(
-    () => ({ onRemoveTerminalContext }),
-    [onRemoveTerminalContext],
+    () => ({ onRemoveTerminalContext, onRemoveLargePaste }),
+    [onRemoveLargePaste, onRemoveTerminalContext],
   );
 
   useEffect(() => {
@@ -1575,11 +1763,13 @@ function ComposerPromptEditorInner({
     const normalizedCursor = clampCollapsedComposerCursor(value, cursor);
     const previousSnapshot = snapshotRef.current;
     const contextsChanged = terminalContextsSignatureRef.current !== terminalContextsSignature;
+    const largePastesChanged = largePastesSignatureRef.current !== largePastesSignature;
     const skillsChanged = skillsSignatureRef.current !== skillsSignature;
     if (
       previousSnapshot.value === value &&
       previousSnapshot.cursor === normalizedCursor &&
       !contextsChanged &&
+      !largePastesChanged &&
       !skillsChanged
     ) {
       return;
@@ -1590,22 +1780,30 @@ function ComposerPromptEditorInner({
       cursor: normalizedCursor,
       expandedCursor: expandCollapsedComposerCursor(value, normalizedCursor),
       terminalContextIds: terminalContexts.map((context) => context.id),
+      largePasteIds: largePastes.map((paste) => paste.id),
     };
     terminalContextsSignatureRef.current = terminalContextsSignature;
+    largePastesSignatureRef.current = largePastesSignature;
     skillsSignatureRef.current = skillsSignature;
 
     const rootElement = editor.getRootElement();
     const isFocused = Boolean(rootElement && document.activeElement === rootElement);
-    if (previousSnapshot.value === value && !contextsChanged && !skillsChanged && !isFocused) {
+    if (
+      previousSnapshot.value === value &&
+      !contextsChanged &&
+      !largePastesChanged &&
+      !skillsChanged &&
+      !isFocused
+    ) {
       return;
     }
 
     isApplyingControlledUpdateRef.current = true;
     editor.update(() => {
       const shouldRewriteEditorState =
-        previousSnapshot.value !== value || contextsChanged || skillsChanged;
+        previousSnapshot.value !== value || contextsChanged || largePastesChanged || skillsChanged;
       if (shouldRewriteEditorState) {
-        $setComposerEditorPrompt(value, terminalContexts, skillMetadataRef.current);
+        $setComposerEditorPrompt(value, terminalContexts, largePastes, skillMetadataRef.current);
       }
       if (shouldRewriteEditorState || isFocused) {
         $setSelectionAtComposerOffset(normalizedCursor);
@@ -1614,7 +1812,16 @@ function ComposerPromptEditorInner({
     queueMicrotask(() => {
       isApplyingControlledUpdateRef.current = false;
     });
-  }, [cursor, editor, skillsSignature, terminalContexts, terminalContextsSignature, value]);
+  }, [
+    cursor,
+    editor,
+    largePastes,
+    largePastesSignature,
+    skillsSignature,
+    terminalContexts,
+    terminalContextsSignature,
+    value,
+  ]);
 
   const focusAt = useCallback(
     (nextCursor: number) => {
@@ -1630,6 +1837,7 @@ function ComposerPromptEditorInner({
         cursor: boundedCursor,
         expandedCursor: expandCollapsedComposerCursor(snapshotRef.current.value, boundedCursor),
         terminalContextIds: snapshotRef.current.terminalContextIds,
+        largePasteIds: snapshotRef.current.largePasteIds,
       };
       onChangeRef.current(
         snapshotRef.current.value,
@@ -1637,6 +1845,7 @@ function ComposerPromptEditorInner({
         snapshotRef.current.expandedCursor,
         false,
         snapshotRef.current.terminalContextIds,
+        snapshotRef.current.largePasteIds,
       );
     },
     [editor],
@@ -1647,6 +1856,7 @@ function ComposerPromptEditorInner({
     cursor: number;
     expandedCursor: number;
     terminalContextIds: string[];
+    largePasteIds: string[];
   } => {
     let snapshot = snapshotRef.current;
     editor.getEditorState().read(() => {
@@ -1665,11 +1875,13 @@ function ComposerPromptEditorInner({
         $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
       );
       const terminalContextIds = collectTerminalContextIds($getRoot());
+      const largePasteIds = collectLargePasteIds($getRoot());
       snapshot = {
         value: nextValue,
         cursor: nextCursor,
         expandedCursor: nextExpandedCursor,
         terminalContextIds,
+        largePasteIds,
       };
     });
     snapshotRef.current = snapshot;
@@ -1713,13 +1925,18 @@ function ComposerPromptEditorInner({
         $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
       );
       const terminalContextIds = collectTerminalContextIds($getRoot());
+      const largePasteIds = collectLargePasteIds($getRoot());
       const previousSnapshot = snapshotRef.current;
       if (
         previousSnapshot.value === nextValue &&
         previousSnapshot.cursor === nextCursor &&
         previousSnapshot.expandedCursor === nextExpandedCursor &&
         previousSnapshot.terminalContextIds.length === terminalContextIds.length &&
-        previousSnapshot.terminalContextIds.every((id, index) => id === terminalContextIds[index])
+        previousSnapshot.terminalContextIds.every(
+          (id, index) => id === terminalContextIds[index],
+        ) &&
+        previousSnapshot.largePasteIds.length === largePasteIds.length &&
+        previousSnapshot.largePasteIds.every((id, index) => id === largePasteIds[index])
       ) {
         return;
       }
@@ -1731,6 +1948,7 @@ function ComposerPromptEditorInner({
         cursor: nextCursor,
         expandedCursor: nextExpandedCursor,
         terminalContextIds,
+        largePasteIds,
       };
       const cursorAdjacentToMention =
         isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "left") ||
@@ -1741,6 +1959,7 @@ function ComposerPromptEditorInner({
         nextExpandedCursor,
         cursorAdjacentToMention,
         terminalContextIds,
+        largePasteIds,
       );
     });
   }, []);
@@ -1762,7 +1981,7 @@ function ComposerPromptEditorInner({
             />
           }
           placeholder={
-            terminalContexts.length > 0 ? null : (
+            terminalContexts.length > 0 || largePastes.length > 0 ? null : (
               <div
                 data-composer-placeholder="true"
                 className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/55 sm:text-[14px]"
@@ -1775,11 +1994,19 @@ function ComposerPromptEditorInner({
         />
         <OnChangePlugin onChange={handleEditorChange} />
         <ComposerCommandKeyPlugin {...(onCommandKeyDown ? { onCommandKeyDown } : {})} />
-        <ComposerSurroundSelectionPlugin terminalContexts={terminalContexts} skills={skills} />
+        <ComposerSurroundSelectionPlugin
+          terminalContexts={terminalContexts}
+          largePastes={largePastes}
+          skills={skills}
+        />
         <ComposerHomeEndKeyPlugin />
         <ComposerInlineTokenArrowPlugin />
         <ComposerInlineTokenSelectionNormalizePlugin />
         <ComposerInlineTokenBackspacePlugin />
+        <ComposerLargePastePlugin
+          enabled={largePasteEnabled}
+          onCreateLargePaste={onAddLargePaste}
+        />
         <ComposerInlineTokenPastePlugin />
         <ComposerChipSelectionPlugin />
         <HistoryPlugin />
@@ -1792,11 +2019,15 @@ export function ComposerPromptEditor({
   value,
   cursor,
   terminalContexts,
+  largePastes,
+  largePasteEnabled,
   skills,
   disabled,
   placeholder,
   className,
   onRemoveTerminalContext,
+  onAddLargePaste,
+  onRemoveLargePaste,
   onChange,
   onCommandKeyDown,
   onPaste,
@@ -1804,16 +2035,23 @@ export function ComposerPromptEditor({
 }: ComposerPromptEditorProps) {
   const initialValueRef = useRef(value);
   const initialTerminalContextsRef = useRef(terminalContexts);
+  const initialLargePastesRef = useRef(largePastes);
   const initialSkillMetadataRef = useRef(skillMetadataByName(skills));
   const initialConfig = useMemo<InitialConfigType>(
     () => ({
       namespace: "t3tools-composer-editor",
       editable: true,
-      nodes: [ComposerMentionNode, ComposerSkillNode, ComposerTerminalContextNode],
+      nodes: [
+        ComposerMentionNode,
+        ComposerSkillNode,
+        ComposerTerminalContextNode,
+        ComposerLargePasteNode,
+      ],
       editorState: () => {
         $setComposerEditorPrompt(
           initialValueRef.current,
           initialTerminalContextsRef.current,
+          initialLargePastesRef.current,
           initialSkillMetadataRef.current,
         );
       },
@@ -1830,10 +2068,14 @@ export function ComposerPromptEditor({
         value={value}
         cursor={cursor}
         terminalContexts={terminalContexts}
+        largePastes={largePastes}
+        largePasteEnabled={largePasteEnabled}
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
         onRemoveTerminalContext={onRemoveTerminalContext}
+        onAddLargePaste={onAddLargePaste}
+        onRemoveLargePaste={onRemoveLargePaste}
         onChange={onChange}
         onPaste={onPaste}
         editorRef={editorRef}

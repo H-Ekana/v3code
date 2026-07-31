@@ -12,6 +12,7 @@ import {
   shouldSubmitComposerOnEnter,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { INLINE_LARGE_PASTE_PLACEHOLDER } from "./lib/largePaste";
 
 describe("shouldSubmitComposerOnEnter", () => {
   it("submits plain Enter on desktop", () => {
@@ -161,6 +162,15 @@ describe("replaceTextRange", () => {
 describe("expandCollapsedComposerCursor", () => {
   it("keeps cursor unchanged when no mention segment is present", () => {
     expect(expandCollapsedComposerCursor("plain text", 5)).toBe(5);
+  });
+
+  it("treats a large-paste chip as one cursor position", () => {
+    const text = `before ${INLINE_LARGE_PASTE_PLACEHOLDER} after`;
+    const collapsedAfterPaste = "before ".length + 1;
+
+    expect(expandCollapsedComposerCursor(text, collapsedAfterPaste)).toBe(collapsedAfterPaste);
+    expect(collapseExpandedComposerCursor(text, collapsedAfterPaste)).toBe(collapsedAfterPaste);
+    expect(isCollapsedCursorAdjacentToInlineToken(text, collapsedAfterPaste, "left")).toBe(true);
   });
 
   it("maps collapsed mention cursor to expanded text cursor", () => {

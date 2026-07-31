@@ -39,6 +39,7 @@ import {
   ensureInlineTerminalContextPlaceholders,
   normalizeTerminalContextText,
 } from "./lib/terminalContext";
+import { type LargePasteDraft, ensureInlineLargePastePlaceholders } from "./lib/largePaste";
 import {
   type ElementContextDraft,
   type ElementContextSelection,
@@ -64,7 +65,7 @@ const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
 const isConversationReference = Schema.is(ConversationReferenceSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 9;
+const COMPOSER_DRAFT_STORAGE_VERSION = 10;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -110,6 +111,13 @@ const PersistedTerminalContextDraft = Schema.Struct({
 });
 type PersistedTerminalContextDraft = typeof PersistedTerminalContextDraft.Type;
 
+const PersistedLargePasteDraft = Schema.Struct({
+  id: Schema.String,
+  text: Schema.String,
+  createdAt: Schema.String,
+});
+type PersistedLargePasteDraft = typeof PersistedLargePasteDraft.Type;
+
 const PersistedElementContextStackFrame = Schema.Struct({
   functionName: Schema.NullOr(Schema.String),
   fileName: Schema.NullOr(Schema.String),
@@ -136,6 +144,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
   terminalContexts: Schema.optionalKey(Schema.Array(PersistedTerminalContextDraft)),
+  largePastes: Schema.optionalKey(Schema.Array(PersistedLargePasteDraft)),
   elementContexts: Schema.optionalKey(Schema.Array(PersistedElementContextDraft)),
   previewAnnotations: Schema.optionalKey(Schema.Array(PreviewAnnotationPayloadSchema)),
   reviewComments: Schema.optionalKey(Schema.Array(ReviewCommentContextSchema)),
@@ -261,6 +270,7 @@ export interface ComposerThreadDraftState {
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
   terminalContexts: TerminalContextDraft[];
+  largePastes: LargePasteDraft[];
   /**
    * Element-pick attachments captured from the in-app preview browser. The
    * full payload (selector / html / styles / source frame) is persisted
@@ -411,6 +421,9 @@ interface ComposerDraftStoreState {
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
+  addLargePaste: (threadRef: ComposerThreadTarget, paste: LargePasteDraft) => void;
+  setLargePastes: (threadRef: ComposerThreadTarget, pastes: LargePasteDraft[]) => void;
+  removeLargePaste: (threadRef: ComposerThreadTarget, pasteId: string) => void;
   setTerminalContexts: (threadRef: ComposerThreadTarget, contexts: TerminalContextDraft[]) => void;
   setModelSelection: (
     threadRef: ComposerThreadTarget,
@@ -593,6 +606,7 @@ const EMPTY_IMAGES: ComposerImageAttachment[] = [];
 const EMPTY_IDS: string[] = [];
 const EMPTY_PERSISTED_ATTACHMENTS: PersistedComposerImageAttachment[] = [];
 const EMPTY_TERMINAL_CONTEXTS: TerminalContextDraft[] = [];
+const EMPTY_LARGE_PASTES: LargePasteDraft[] = [];
 const EMPTY_ELEMENT_CONTEXTS: ElementContextDraft[] = [];
 const EMPTY_PREVIEW_ANNOTATIONS: PreviewAnnotationPayload[] = [];
 const EMPTY_REVIEW_COMMENTS: ReviewCommentContext[] = [];
@@ -617,6 +631,7 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   nonPersistedImageIds: EMPTY_IDS,
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   terminalContexts: EMPTY_TERMINAL_CONTEXTS,
+  largePastes: EMPTY_LARGE_PASTES,
   elementContexts: EMPTY_ELEMENT_CONTEXTS,
   previewAnnotations: EMPTY_PREVIEW_ANNOTATIONS,
   reviewComments: EMPTY_REVIEW_COMMENTS,
@@ -640,6 +655,7 @@ export function createEmptyThreadDraft(): ComposerThreadDraftState {
     nonPersistedImageIds: [],
     persistedAttachments: [],
     terminalContexts: [],
+    largePastes: [],
     elementContexts: [],
     previewAnnotations: [],
     reviewComments: [],
@@ -714,6 +730,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.images.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.terminalContexts.length === 0 &&
+    draft.largePastes.length === 0 &&
     draft.elementContexts.length === 0 &&
     draft.previewAnnotations.length === 0 &&
     draft.reviewComments.length === 0 &&
@@ -1694,6 +1711,20 @@ function normalizePersistedDraftsByThreadId(
           return normalized ? [normalized] : [];
         })
       : [];
+    const largePastes = Array.isArray(draftCandidate.largePastes)
+      ? draftCandidate.largePastes.flatMap((entry) => {
+          if (
+            !entry ||
+            typeof entry.id !== "string" ||
+            entry.id.length === 0 ||
+            typeof entry.text !== "string" ||
+            typeof entry.createdAt !== "string"
+          ) {
+            return [];
+          }
+          return [{ id: entry.id, text: entry.text, createdAt: entry.createdAt }];
+        })
+      : [];
     const elementContexts = Array.isArray(draftCandidate.elementContexts)
       ? draftCandidate.elementContexts.flatMap((entry) => {
           const normalized = normalizePersistedElementContextDraft(entry);
@@ -1716,9 +1747,9 @@ function normalizePersistedDraftsByThreadId(
       draftCandidate.interactionMode === "plan" || draftCandidate.interactionMode === "default"
         ? draftCandidate.interactionMode
         : null;
-    const prompt = ensureInlineTerminalContextPlaceholders(
-      promptCandidate,
-      terminalContexts.length,
+    const prompt = ensureInlineLargePastePlaceholders(
+      ensureInlineTerminalContextPlaceholders(promptCandidate, terminalContexts.length),
+      largePastes.length,
     );
     // If the draft already has the v3 shape, use it directly
     const legacyDraftCandidate = draftValue as LegacyPersistedComposerThreadDraftState;
@@ -1772,6 +1803,7 @@ function normalizePersistedDraftsByThreadId(
       promptCandidate.length === 0 &&
       attachments.length === 0 &&
       terminalContexts.length === 0 &&
+      largePastes.length === 0 &&
       elementContexts.length === 0 &&
       previewAnnotations.length === 0 &&
       reviewComments.length === 0 &&
@@ -1798,6 +1830,7 @@ function normalizePersistedDraftsByThreadId(
       prompt,
       attachments,
       ...(terminalContexts.length > 0 ? { terminalContexts } : {}),
+      ...(largePastes.length > 0 ? { largePastes } : {}),
       ...(elementContexts.length > 0 ? { elementContexts } : {}),
       ...(previewAnnotations.length > 0 ? { previewAnnotations } : {}),
       ...(reviewComments.length > 0 ? { reviewComments } : {}),
@@ -1884,6 +1917,7 @@ function partializeComposerDraftStoreState(
       draft.prompt.length === 0 &&
       draft.persistedAttachments.length === 0 &&
       draft.terminalContexts.length === 0 &&
+      draft.largePastes.length === 0 &&
       draft.elementContexts.length === 0 &&
       draft.previewAnnotations.length === 0 &&
       draft.reviewComments.length === 0 &&
@@ -1908,6 +1942,11 @@ function partializeComposerDraftStoreState(
               lineStart: context.lineStart,
               lineEnd: context.lineEnd,
             })),
+          }
+        : {}),
+      ...(draft.largePastes.length > 0
+        ? {
+            largePastes: draft.largePastes.map((paste) => ({ ...paste })),
           }
         : {}),
       ...(draft.elementContexts.length > 0
@@ -2182,6 +2221,7 @@ function toHydratedThreadDraft(
         ...context,
         text: "",
       })) ?? [],
+    largePastes: persistedDraft.largePastes?.map((paste) => ({ ...paste })) ?? [],
     elementContexts:
       persistedDraft.elementContexts?.map((context) => ({
         ...context,
@@ -2621,6 +2661,70 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...existing,
               prompt,
+            };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        addLargePaste: (threadRef, paste) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0 || paste.id.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (existing.largePastes.some((entry) => entry.id === paste.id)) {
+              return state;
+            }
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...existing,
+                  largePastes: [...existing.largePastes, paste],
+                },
+              },
+            };
+          });
+        },
+        setLargePastes: (threadRef, pastes) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const nextDraft: ComposerThreadDraftState = {
+              ...existing,
+              largePastes: pastes,
+            };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        removeLargePaste: (threadRef, pasteId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0 || pasteId.length === 0) {
+            return;
+          }
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current) {
+              return state;
+            }
+            const nextDraft: ComposerThreadDraftState = {
+              ...current,
+              largePastes: current.largePastes.filter((paste) => paste.id !== pasteId),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -3449,6 +3553,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nonPersistedImageIds: [],
               persistedAttachments: [],
               terminalContexts: [],
+              largePastes: [],
               elementContexts: [],
               previewAnnotations: [],
               reviewComments: [],
@@ -3482,6 +3587,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               images: [],
               nonPersistedImageIds: [],
               persistedAttachments: [],
+              largePastes: [],
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

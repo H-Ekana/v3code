@@ -11,6 +11,8 @@ import {
 } from "lexical";
 
 import { registerComposerInlineTokenPaste } from "./composerInlineTokenPaste";
+import { registerComposerLargePaste } from "./composerLargePaste";
+import { LARGE_PASTE_CHAR_THRESHOLD } from "../lib/largePaste";
 
 class TestClipboardEvent extends Event {
   readonly clipboardData: DataTransfer;
@@ -148,5 +150,78 @@ describe("registerComposerInlineTokenPaste", () => {
     expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe(
       "<mention:@scope/pkg/sub> ",
     );
+  });
+});
+
+describe("registerComposerLargePaste", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("replaces a paste above the threshold before the plain-text fallback runs", () => {
+    vi.stubGlobal("ClipboardEvent", TestClipboardEvent);
+    const editor = createEditor();
+    const onCreateLargePaste = vi.fn();
+    const plainTextFallback = vi.fn(() => true);
+
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        $getRoot().append(paragraph);
+        paragraph.selectEnd();
+      },
+      { discrete: true },
+    );
+    registerComposerLargePaste(editor, {
+      createLargePasteNode: () => $createTextNode("<large-paste>"),
+      onCreateLargePaste,
+    });
+    editor.registerCommand(PASTE_COMMAND, plainTextFallback, COMMAND_PRIORITY_EDITOR);
+
+    const text = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
+    const event = new TestClipboardEvent(text);
+    editor.update(
+      () => {
+        editor.dispatchCommand(PASTE_COMMAND, event as ClipboardEvent);
+      },
+      { discrete: true },
+    );
+
+    expect(plainTextFallback).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    expect(onCreateLargePaste).toHaveBeenCalledOnce();
+    expect(onCreateLargePaste.mock.calls[0]?.[0]).toMatchObject({ text });
+    expect(editor.getEditorState().read(() => $getRoot().getTextContent())).toBe("<large-paste>");
+  });
+
+  it("leaves a paste exactly at the threshold editable inline", () => {
+    vi.stubGlobal("ClipboardEvent", TestClipboardEvent);
+    const editor = createEditor();
+    const plainTextFallback = vi.fn(() => true);
+
+    editor.update(
+      () => {
+        const paragraph = $createParagraphNode();
+        $getRoot().append(paragraph);
+        paragraph.selectEnd();
+      },
+      { discrete: true },
+    );
+    registerComposerLargePaste(editor, {
+      createLargePasteNode: () => $createTextNode("<large-paste>"),
+      onCreateLargePaste: vi.fn(),
+    });
+    editor.registerCommand(PASTE_COMMAND, plainTextFallback, COMMAND_PRIORITY_EDITOR);
+
+    const event = new TestClipboardEvent("x".repeat(LARGE_PASTE_CHAR_THRESHOLD));
+    editor.update(
+      () => {
+        editor.dispatchCommand(PASTE_COMMAND, event as ClipboardEvent);
+      },
+      { discrete: true },
+    );
+
+    expect(plainTextFallback).toHaveBeenCalledOnce();
+    expect(event.defaultPrevented).toBe(false);
   });
 });

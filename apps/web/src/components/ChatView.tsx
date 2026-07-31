@@ -212,6 +212,7 @@ import {
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
+import { expandInlineLargePastes } from "../lib/largePaste";
 import {
   appendElementContextsToPrompt,
   type ElementContextDraft,
@@ -1350,6 +1351,7 @@ function ChatViewContent(props: ChatViewProps) {
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
+  const setComposerDraftLargePastes = useComposerDraftStore((store) => store.setLargePastes);
   const setComposerDraftElementContexts = useComposerDraftStore(
     (store) => store.setElementContexts,
   );
@@ -4852,6 +4854,7 @@ function ChatViewContent(props: ChatViewProps) {
     const {
       images: composerImages,
       terminalContexts: composerTerminalContexts,
+      largePastes: composerLargePastes,
       elementContexts: composerElementContexts,
       previewAnnotations: composerPreviewAnnotations,
       reviewComments: composerReviewComments,
@@ -4862,7 +4865,8 @@ function ChatViewContent(props: ChatViewProps) {
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
-    const promptForSend = promptRef.current;
+    const promptSnapshotForSend = promptRef.current;
+    const promptForSend = expandInlineLargePastes(promptSnapshotForSend, composerLargePastes);
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -5271,12 +5275,13 @@ function ChatViewContent(props: ChatViewProps) {
           const next = existing.filter((message) => message.id !== messageIdForSend);
           return next.length === existing.length ? existing : next;
         });
-        promptRef.current = promptForSend;
+        promptRef.current = promptSnapshotForSend;
         const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
         composerImagesRef.current = retryComposerImages;
         composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
         composerElementContextsRef.current = composerElementContextsSnapshot;
-        setComposerDraftPrompt(composerDraftTarget, promptForSend);
+        setComposerDraftPrompt(composerDraftTarget, promptSnapshotForSend);
+        setComposerDraftLargePastes(composerDraftTarget, composerLargePastes);
         addComposerDraftImages(composerDraftTarget, retryComposerImages);
         setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
         setComposerDraftElementContexts(composerDraftTarget, composerElementContextsSnapshot);
@@ -5287,8 +5292,11 @@ function ChatViewContent(props: ChatViewProps) {
           composerConversationReferencesSnapshot,
         );
         composerRef.current?.resetCursorState({
-          cursor: collapseExpandedComposerCursor(promptForSend, promptForSend.length),
-          prompt: promptForSend,
+          cursor: collapseExpandedComposerCursor(
+            promptSnapshotForSend,
+            promptSnapshotForSend.length,
+          ),
+          prompt: promptSnapshotForSend,
           detectTrigger: true,
         });
       }

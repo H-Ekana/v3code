@@ -1,5 +1,6 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { INLINE_LARGE_PASTE_PLACEHOLDER } from "./lib/largePaste";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
 export type ComposerSlashCommand = "model" | "plan" | "default" | "compact";
@@ -23,7 +24,8 @@ const isInlineTokenSegment = (
     | { type: "text"; text: string }
     | { type: "mention" }
     | { type: "skill" }
-    | { type: "terminal-context" },
+    | { type: "terminal-context" }
+    | { type: "large-paste" },
 ): boolean => segment.type !== "text";
 
 function clampCursor(text: string, cursor: number): number {
@@ -37,7 +39,8 @@ function isWhitespace(char: string): boolean {
     char === "\n" ||
     char === "\t" ||
     char === "\r" ||
-    char === INLINE_TERMINAL_CONTEXT_PLACEHOLDER
+    char === INLINE_TERMINAL_CONTEXT_PLACEHOLDER ||
+    char === INLINE_LARGE_PASTE_PLACEHOLDER
   );
 }
 
@@ -78,7 +81,7 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
       expandedCursor += expandedLength;
       continue;
     }
-    if (segment.type === "terminal-context") {
+    if (segment.type === "terminal-context" || segment.type === "large-paste") {
       if (remaining <= 1) {
         return expandedCursor + remaining;
       }
@@ -103,7 +106,8 @@ function collapsedSegmentLength(
     | { type: "text"; text: string }
     | { type: "mention" }
     | { type: "skill" }
-    | { type: "terminal-context" },
+    | { type: "terminal-context" }
+    | { type: "large-paste" },
 ): number {
   if (segment.type === "text") {
     return segment.text.length;
@@ -117,6 +121,7 @@ function clampCollapsedComposerCursorForSegments(
     | { type: "mention" }
     | { type: "skill" }
     | { type: "terminal-context" }
+    | { type: "large-paste" }
   >,
   cursorInput: number,
 ): number {
@@ -172,7 +177,7 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
       collapsedCursor += 1;
       continue;
     }
-    if (segment.type === "terminal-context") {
+    if (segment.type === "terminal-context" || segment.type === "large-paste") {
       if (remaining <= 1) {
         return collapsedCursor + remaining;
       }

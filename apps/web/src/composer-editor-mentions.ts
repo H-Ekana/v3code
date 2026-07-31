@@ -2,6 +2,7 @@ import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
 } from "./lib/terminalContext";
+import { INLINE_LARGE_PASTE_PLACEHOLDER, type LargePasteDraft } from "./lib/largePaste";
 import {
   collectComposerInlineTokens,
   type ComposerInlineToken,
@@ -24,6 +25,10 @@ export type ComposerPromptSegment =
   | {
       type: "terminal-context";
       context: TerminalContextDraft | null;
+    }
+  | {
+      type: "large-paste";
+      paste: LargePasteDraft | null;
     };
 
 function rangeIncludesIndex(start: number, end: number, index: number): boolean {
@@ -52,13 +57,18 @@ function forEachPromptSegmentSlice(
       | {
           type: "terminal-context";
           promptOffset: number;
+        }
+      | {
+          type: "large-paste";
+          promptOffset: number;
         },
   ) => boolean | void,
 ): boolean {
   let textCursor = 0;
 
   for (let index = 0; index < prompt.length; index += 1) {
-    if (prompt[index] !== INLINE_TERMINAL_CONTEXT_PLACEHOLDER) {
+    const char = prompt[index];
+    if (char !== INLINE_TERMINAL_CONTEXT_PLACEHOLDER && char !== INLINE_LARGE_PASTE_PLACEHOLDER) {
       continue;
     }
 
@@ -72,7 +82,9 @@ function forEachPromptSegmentSlice(
     ) {
       return true;
     }
-    if (visitor({ type: "terminal-context", promptOffset: index }) === true) {
+    const sliceType =
+      char === INLINE_TERMINAL_CONTEXT_PLACEHOLDER ? "terminal-context" : "large-paste";
+    if (visitor({ type: sliceType, promptOffset: index }) === true) {
       return true;
     }
     textCursor = index + 1;
@@ -198,6 +210,7 @@ export function selectionTouchesMentionBoundary(
 export function splitPromptIntoComposerSegments(
   prompt: string,
   terminalContexts: ReadonlyArray<TerminalContextDraft> = [],
+  largePastes: ReadonlyArray<LargePasteDraft> = [],
 ): ComposerPromptSegment[] {
   if (!prompt) {
     return [];
@@ -205,17 +218,27 @@ export function splitPromptIntoComposerSegments(
 
   const segments: ComposerPromptSegment[] = [];
   let terminalContextIndex = 0;
+  let largePasteIndex = 0;
   forEachPromptSegmentSlice(prompt, (slice) => {
     if (slice.type === "text") {
       segments.push(...splitPromptTextIntoComposerSegments(slice.text));
       return false;
     }
 
+    if (slice.type === "terminal-context") {
+      segments.push({
+        type: "terminal-context",
+        context: terminalContexts[terminalContextIndex] ?? null,
+      });
+      terminalContextIndex += 1;
+      return false;
+    }
+
     segments.push({
-      type: "terminal-context",
-      context: terminalContexts[terminalContextIndex] ?? null,
+      type: "large-paste",
+      paste: largePastes[largePasteIndex] ?? null,
     });
-    terminalContextIndex += 1;
+    largePasteIndex += 1;
     return false;
   });
 
