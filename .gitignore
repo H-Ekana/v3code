@@ -41,3 +41,7 @@ node_modules/
 
 # Machine-local Claude Code settings
 .claude/settings.local.json
+
+# Scratch HOME created by the server test suite. Holds a machine id, a user id,
+# and session transcripts — machine-specific, never shared.
+apps/server/.claude-work-test/
