@@ -364,6 +364,17 @@ export function buildExpiredTerminalContextToastCopy(
   };
 }
 
+export function buildOutboundPromptTooLargeToastCopy(
+  length: number,
+  maxLength: number,
+): { title: string; description: string } | null {
+  if (length <= maxLength) return null;
+  return {
+    title: "Message is too large to send",
+    description: `This message is ${length.toLocaleString("en-US")} characters after attached context is included. The limit is ${maxLength.toLocaleString("en-US")}. Shorten the prompt or remove some attached context.`,
+  };
+}
+
 export function branchMismatchKey(
   threadId: string | null,
   mismatch: { threadBranch: string; currentBranch: string } | null,

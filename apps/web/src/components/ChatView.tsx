@@ -18,6 +18,7 @@ import {
   OrchestrationThreadActivity,
   ProviderInteractionMode,
   ProviderDriverKind,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   RuntimeMode,
   TerminalOpenInput,
 } from "@t3tools/contracts";
@@ -296,6 +297,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
+  buildOutboundPromptTooLargeToastCopy,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
   buildThreadTurnInterruptInput,
@@ -4971,6 +4973,51 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
 
+    const composerImagesSnapshot = [...composerImages];
+    const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
+    const composerElementContextsSnapshot = [...composerElementContexts];
+    const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
+    const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
+    const composerConversationReferencesSnapshot: ConversationReference[] = [
+      ...composerConversationReferences,
+    ];
+    const messageTextWithContexts = appendElementContextsToPrompt(
+      appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
+      composerElementContextsSnapshot,
+    );
+    const messageTextWithPreviewAnnotations = composerPreviewAnnotationsSnapshot.reduce(
+      (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+      messageTextWithContexts,
+    );
+    const messageTextWithReviewComments = appendReviewCommentsToPrompt(
+      messageTextWithPreviewAnnotations,
+      composerReviewCommentsSnapshot,
+    );
+    const messageTextForSend = appendConversationReferencesToPrompt(
+      messageTextWithReviewComments,
+      composerConversationReferencesSnapshot,
+    );
+    const outgoingMessageText = formatOutgoingPrompt({
+      provider: ctxSelectedProvider,
+      model: ctxSelectedModel,
+      models: ctxSelectedProviderModels,
+      effort: ctxSelectedPromptEffort,
+      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+    });
+    const tooLargeToast = buildOutboundPromptTooLargeToastCopy(
+      outgoingMessageText.length,
+      PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+    );
+    if (tooLargeToast) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          ...tooLargeToast,
+        }),
+      );
+      return;
+    }
+
     composerRef.current?.triggerSendCelebration();
     sendInFlightRef.current = true;
     if (isDraftHeroState && activeThreadKey) {
@@ -5001,39 +5048,8 @@ function ChatViewContent(props: ChatViewProps) {
     }
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
-    const composerImagesSnapshot = [...composerImages];
-    const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
-    const composerElementContextsSnapshot = [...composerElementContexts];
-    const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
-    const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
-    const composerConversationReferencesSnapshot: ConversationReference[] = [
-      ...composerConversationReferences,
-    ];
-    const messageTextWithContexts = appendElementContextsToPrompt(
-      appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
-      composerElementContextsSnapshot,
-    );
-    const messageTextWithPreviewAnnotations = composerPreviewAnnotationsSnapshot.reduce(
-      (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
-      messageTextWithContexts,
-    );
-    const messageTextWithReviewComments = appendReviewCommentsToPrompt(
-      messageTextWithPreviewAnnotations,
-      composerReviewCommentsSnapshot,
-    );
-    const messageTextForSend = appendConversationReferencesToPrompt(
-      messageTextWithReviewComments,
-      composerConversationReferencesSnapshot,
-    );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
-    const outgoingMessageText = formatOutgoingPrompt({
-      provider: ctxSelectedProvider,
-      model: ctxSelectedModel,
-      models: ctxSelectedProviderModels,
-      effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
-    });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
         type: "image" as const,

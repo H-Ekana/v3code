@@ -14,6 +14,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
+  buildOutboundPromptTooLargeToastCopy,
   buildLoadingThreadFromShell,
   buildThreadTurnInterruptInput,
   createLocalDispatchSnapshot,
@@ -482,6 +483,17 @@ describe("buildExpiredTerminalContextToastCopy", () => {
     expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
       title: "Expired terminal contexts omitted from message",
       description: "Re-add it if you want that terminal output included.",
+    });
+  });
+});
+
+describe("buildOutboundPromptTooLargeToastCopy", () => {
+  it("accepts the limit and explains an oversized final prompt", () => {
+    expect(buildOutboundPromptTooLargeToastCopy(120_000, 120_000)).toBeNull();
+    expect(buildOutboundPromptTooLargeToastCopy(120_001, 120_000)).toEqual({
+      title: "Message is too large to send",
+      description:
+        "This message is 120,001 characters after attached context is included. The limit is 120,000. Shorten the prompt or remove some attached context.",
     });
   });
 });
