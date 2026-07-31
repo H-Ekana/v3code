@@ -1609,8 +1609,13 @@ const make = Effect.gen(function* () {
       }
     });
 
+    // Started immediately so the PubSub subscription is acquired before start()
+    // returns. `Stream.fromPubSub` subscribes lazily, so a deferred fiber would
+    // let a caller dispatch into the hot stream before anyone is listening and
+    // silently drop that first event.
     yield* Effect.forkScoped(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
+      { startImmediately: true },
     );
 
     // The domain event stream is hot, so work pending before this reactor
