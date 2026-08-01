@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { type EnvironmentId, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -293,6 +293,37 @@ describe("rightPanelStore", () => {
       kind: "preview",
       resourceId: "tab-b",
     });
+  });
+
+  it("tracks one durable detail surface per agent", () => {
+    useRightPanelStore
+      .getState()
+      .openAgent(refA, ProviderDriverKind.make("codex"), "agent-a", "Agent A");
+    useRightPanelStore
+      .getState()
+      .openAgent(refA, ProviderDriverKind.make("claude"), "agent-b", "Agent B");
+    useRightPanelStore
+      .getState()
+      .openAgent(refA, ProviderDriverKind.make("codex"), "agent-a", "Agent A renamed");
+
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces).toEqual([
+      {
+        id: "agent:codex:agent-a",
+        kind: "agent-detail",
+        sourceProvider: "codex",
+        agentId: "agent-a",
+        agentName: "Agent A renamed",
+      },
+      {
+        id: "agent:claude:agent-b",
+        kind: "agent-detail",
+        sourceProvider: "claude",
+        agentId: "agent-b",
+        agentName: "Agent B",
+      },
+    ]);
+    expect(state.activeSurfaceId).toBe("agent:codex:agent-a");
   });
 
   it("tracks one surface per terminal session", () => {

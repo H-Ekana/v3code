@@ -8,6 +8,8 @@ interface Props {
   handlers: ResizableWidthHandlers;
   separatorProps: ResizableWidthSeparatorProps;
   isResizing: boolean;
+  ariaLabel?: string;
+  edge?: "left" | "right";
   className?: string;
 }
 
@@ -19,12 +21,20 @@ interface Props {
  * - Visual indicator is a 1px line that lights up on hover/active to mirror
  *   VS Code / Cursor.
  */
-export function RightPanelResizeHandle({ handlers, separatorProps, isResizing, className }: Props) {
+export function RightPanelResizeHandle({
+  handlers,
+  separatorProps,
+  isResizing,
+  ariaLabel = "Resize preview panel",
+  edge = "left",
+  className,
+}: Props) {
   return (
     <div
-      aria-label="Resize preview panel"
+      aria-label={ariaLabel}
       className={cn(
-        "a11y-resize-handle group absolute inset-y-0 -left-1 z-20 w-2 cursor-col-resize select-none outline-none",
+        "a11y-resize-handle group absolute inset-y-0 z-20 w-2 cursor-col-resize select-none outline-none",
+        edge === "left" ? "-left-1" : "-right-1",
         className,
       )}
       data-resizing={isResizing ? "true" : "false"}

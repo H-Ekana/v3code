@@ -1405,7 +1405,15 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         kind: "provider.approval.respond.failed",
         summary: "Provider approval response failed",
-        detail: "No active provider session is bound to this thread.",
+        // A missing session means the provider callback is gone for good —
+        // the same terminal condition `stalePendingRequestDetail` names. Phrase
+        // it in those words so the stale-request checks in the decider and the
+        // clients clear the request; a bespoke message leaves the thread pinned
+        // on an approval that nothing can ever resolve.
+        detail: `No active provider session is bound to this thread. ${stalePendingRequestDetail(
+          "approval",
+          event.payload.requestId,
+        )}`,
         turnId: null,
         createdAt: event.payload.createdAt,
         requestId: event.payload.requestId,
@@ -1449,7 +1457,11 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           kind: "provider.user-input.respond.failed",
           summary: "Provider user input response failed",
-          detail: "No active provider session is bound to this thread.",
+          // Terminal for the same reason as the approval twin above.
+          detail: `No active provider session is bound to this thread. ${stalePendingRequestDetail(
+            "user-input",
+            event.payload.requestId,
+          )}`,
           turnId: null,
           createdAt: event.payload.createdAt,
           requestId: event.payload.requestId,

@@ -312,6 +312,29 @@
       }
     }
 
+    /* The startup controller owns the only one-shot clock. External SVG animation starts at
+       decode time, which can happen before Electron reveals its window and used to make this
+       sequence appear half-finished or missing. Keep the constellation as stable ambient art;
+       the controller-driven hero meteor supplies the causal launch beat. */
+    .signal-beam,
+    .signal-contact,
+    .signal-lock-pulse,
+    .signal-link-head,
+    .signal-residue {
+      display: none;
+    }
+
+    .signal-orbit-segment,
+    .signal-link,
+    .signal-node {
+      animation: none;
+    }
+
+    .signal-link {
+      opacity: .075;
+      stroke-dashoffset: 0;
+    }
+
     @media (prefers-reduced-motion: reduce) {
       .signal-beam,
       .signal-contact,

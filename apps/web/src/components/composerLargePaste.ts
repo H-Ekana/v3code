@@ -16,7 +16,6 @@ import { randomUUID } from "~/lib/utils";
 
 interface ComposerLargePasteOptions {
   createLargePasteNode: (paste: LargePasteDraft) => LexicalNode;
-  onCreateLargePaste: (paste: LargePasteDraft) => void;
 }
 
 export function registerComposerLargePaste(
@@ -47,9 +46,6 @@ export function registerComposerLargePaste(
         createdAt: new Date().toISOString(),
       };
       selection.insertNodes([options.createLargePasteNode(paste)]);
-      // The draft store must know about the payload before OnChange reports
-      // the new placeholder/id order from this same editor update.
-      options.onCreateLargePaste(paste);
       event.preventDefault();
       return true;
     },

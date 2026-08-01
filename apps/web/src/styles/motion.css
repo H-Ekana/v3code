@@ -111,7 +111,7 @@
     0 0 4px color-mix(in srgb, var(--destructive) 16%, transparent);
 }
 
-.motion-press:active:not(:disabled, [data-disabled]) {
+.motion-press:is(:active, [data-composer-pressing="true"]):not(:disabled, [data-disabled]) {
   transform: translateY(1px) scale(0.98);
   transition-duration: var(--motion-press);
   transition-timing-function: var(--ease-out-quart);
@@ -232,7 +232,7 @@
     transition-duration: 0.01ms;
   }
 
-  .motion-press:active:not(:disabled, [data-disabled]) {
+  .motion-press:is(:active, [data-composer-pressing="true"]):not(:disabled, [data-disabled]) {
     transform: none;
   }
 

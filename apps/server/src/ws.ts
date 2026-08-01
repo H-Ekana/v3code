@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
+  AgentTranscriptReadError,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   type AuthEnvironmentScope,
@@ -79,6 +80,10 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
+import { readAgentTranscript } from "./provider/AgentTranscriptReader.ts";
+import { suggestNextPrompt } from "./promptSuggestion/suggestNextPrompt.ts";
+import { TextGenerationUsageStore } from "./promptSuggestion/usageStore.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -364,6 +369,7 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerService = yield* Effect.serviceOption(ProviderService.ProviderService);
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -1361,6 +1367,76 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.textGenerationGetUsage]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.textGenerationGetUsage,
+            Effect.serviceOption(TextGenerationUsageStore).pipe(
+              Effect.flatMap((store) =>
+                store._tag === "Some"
+                  ? store.value.read(input.window)
+                  : Effect.succeed({
+                      window: input.window,
+                      entries: [],
+                      totalEstimatedCostUsd: null,
+                      hasUnpricedUsage: false,
+                      hasUnreportedTokens: false,
+                      since: null,
+                    }),
+              ),
+            ),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.agentGetTranscript]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentGetTranscript,
+            readAgentTranscript(input, {
+              getThread: (threadId) =>
+                projectionSnapshotQuery.getThreadDetailById(threadId).pipe(
+                  Effect.mapError(
+                    () =>
+                      new AgentTranscriptReadError({
+                        message: "Failed to load the thread agent roster.",
+                      }),
+                  ),
+                ),
+              listSessions: () =>
+                Option.match(providerService, {
+                  onNone: () => Effect.succeed([]),
+                  onSome: (service) => service.listSessions(),
+                }),
+              readCodexAgentThread: (threadId, agentId) =>
+                Option.match(providerService, {
+                  onNone: () =>
+                    Effect.fail(
+                      new AgentTranscriptReadError({
+                        message: "The provider service is unavailable.",
+                      }),
+                    ),
+                  onSome: (service) => {
+                    if (!service.readAgentThread) {
+                      return Effect.fail(
+                        new AgentTranscriptReadError({
+                          message: "The provider cannot read child conversations.",
+                        }),
+                      );
+                    }
+                    return service.readAgentThread({ threadId, agentThreadId: agentId }).pipe(
+                      Effect.mapError(
+                        () =>
+                          new AgentTranscriptReadError({
+                            message: "Failed to read the Codex child conversation.",
+                          }),
+                      ),
+                    );
+                  },
+                }),
+            }),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.threadSuggestNextPrompt]: (input) =>
+          observeRpcEffect(WS_METHODS.threadSuggestNextPrompt, suggestNextPrompt(input), {
+            "rpc.aggregate": "orchestration",
           }),
         [WS_METHODS.serverGetConfig]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {

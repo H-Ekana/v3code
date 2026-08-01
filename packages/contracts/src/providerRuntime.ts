@@ -476,6 +476,24 @@ export const RuntimeTaskUsage = Schema.Struct({
 });
 export type RuntimeTaskUsage = typeof RuntimeTaskUsage.Type;
 
+export const RuntimeAgentActivityKind = Schema.Literals([
+  "reasoning",
+  "planning",
+  "investigating",
+  "editing",
+  "command",
+  "verifying",
+  "reviewing",
+  "delegating",
+  "reporting",
+  "waiting",
+  "other",
+]);
+export type RuntimeAgentActivityKind = typeof RuntimeAgentActivityKind.Type;
+
+export const RuntimeAgentActivityLifecycle = Schema.Literals(["started", "completed"]);
+export type RuntimeAgentActivityLifecycle = typeof RuntimeAgentActivityLifecycle.Type;
+
 /**
  * Agent-linkage fields shared by the task lifecycle payloads. Optional and
  * additive: pre-existing emitters that only set taskId/description remain
@@ -490,6 +508,7 @@ const TaskAgentLinkage = {
   name: Schema.optional(TrimmedNonEmptyStringSchema),
   agentType: Schema.optional(TrimmedNonEmptyStringSchema),
   model: Schema.optional(TrimmedNonEmptyStringSchema),
+  prompt: Schema.optional(TrimmedNonEmptyStringSchema),
   toolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
   parentTaskId: Schema.optional(RuntimeTaskId),
   workflowName: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -502,6 +521,10 @@ const TaskAgentLinkage = {
   scriptPath: Schema.optional(TrimmedNonEmptyStringSchema),
   runId: Schema.optional(TrimmedNonEmptyStringSchema),
   outputFile: Schema.optional(TrimmedNonEmptyStringSchema),
+  reasoningEffort: Schema.optional(TrimmedNonEmptyStringSchema),
+  activityKind: Schema.optional(RuntimeAgentActivityKind),
+  activityLifecycle: Schema.optional(RuntimeAgentActivityLifecycle),
+  plan: Schema.optional(Schema.Array(RuntimePlanStep)),
   timelineBypass: Schema.optional(Schema.Boolean),
 } as const;
 
@@ -509,7 +532,6 @@ const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
-  prompt: Schema.optional(TrimmedNonEmptyStringSchema),
   ...TaskAgentLinkage,
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
@@ -547,6 +569,7 @@ const TaskUpdatedPayload = Schema.Struct({
       "waiting",
     ]),
   ),
+  startTime: Schema.optional(IsoDateTime),
   endTime: Schema.optional(IsoDateTime),
   isBackgrounded: Schema.optional(Schema.Boolean),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),

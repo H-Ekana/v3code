@@ -575,6 +575,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
+            // Drive Grok's native permission policy via `--permission-mode` so
+            // T3 Auto maps to Grok's classifier the way Codex maps to
+            // `auto_review` and Claude to `permissionMode: "auto"`.
+            // Session restarts when runtimeMode changes.
+            runtimeMode: input.runtimeMode,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...(mcpSession

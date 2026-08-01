@@ -31,6 +31,7 @@ export function createDesktopDevProcessPlan({
   vitePlusCliPath = defaultVitePlusCliPath,
   existsSync = NodeFS.existsSync,
   statSync = NodeFS.statSync,
+  startedAtMs = Date.now(),
 } = {}) {
   const previewBuildScript = NodePath.join(
     desktopRoot,
@@ -83,6 +84,11 @@ export function createDesktopDevProcessPlan({
         command: nodeExecutable,
         args: [NodePath.join(desktopRoot, "scripts", "dev-electron.mjs")],
         cwd: desktopRoot,
+        env: {
+          // Do not open a throwaway Electron process from stale output while
+          // both pack watchers produce their first bundles for this run.
+          T3CODE_DESKTOP_DEV_STARTED_AT_MS: String(startedAtMs),
+        },
       },
     ],
   };
@@ -91,7 +97,7 @@ export function createDesktopDevProcessPlan({
 function spawnProcess(processSpec) {
   return NodeChildProcess.spawn(processSpec.command, processSpec.args, {
     cwd: processSpec.cwd,
-    env: process.env,
+    env: { ...process.env, ...processSpec.env },
     stdio: "inherit",
     windowsHide: false,
   });

@@ -120,6 +120,57 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("still surfaces an approval whose requestType is unrecognized", () => {
+    // Regression: OpenCode's `permission` vocabulary is open-ended, so kinds
+    // like `grep`/`glob` canonicalize to requestType "unknown". Dropping them
+    // left the server counting an approval no card could ever resolve, which
+    // pinned the thread as un-settleable forever.
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-unknown-kind",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-unknown-kind",
+          requestType: "unknown",
+          detail: "apps/desktop/**/*.{ts,tsx}",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-unknown-kind",
+        requestKind: "other",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        detail: "apps/desktop/**/*.{ts,tsx}",
+      },
+    ]);
+  });
+
+  it("surfaces an approval carrying no kind information at all", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-no-kind",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Approval requested",
+        tone: "approval",
+        payload: { requestId: "req-no-kind" },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-no-kind",
+        requestKind: "other",
+        createdAt: "2026-02-23T00:00:01.000Z",
+      },
+    ]);
+  });
+
   it("clears stale pending approvals when provider reports unknown pending request", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

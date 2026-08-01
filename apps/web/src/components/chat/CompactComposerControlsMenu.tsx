@@ -33,28 +33,26 @@ export const runtimeModeConfig: Record<
 > = {
   "approval-required": {
     label: "Supervised",
-    description: "Ask before commands and file changes.",
+    description: "Ask before commands & edits.",
     compactDescription: "Asks first",
     icon: LockIcon,
   },
   "auto-accept-edits": {
     label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    compactDescription: "Edits run, rest asks",
+    description: "Edits free; ask for the rest.",
+    compactDescription: "Edits free",
     icon: PenLineIcon,
   },
   auto: {
     label: "Auto",
-    description:
-      "Reviewed automation: an AI reviewer checks every action first and still stops to ask you before anything risky or destructive.",
-    compactDescription: "AI-reviewed; still asks before risky actions",
+    description: "AI-reviewed; still asks before risky work.",
+    compactDescription: "AI-reviewed",
     icon: SparklesIcon,
   },
   "full-access": {
     label: "Full access",
-    description:
-      "No review and no prompts: every command and edit runs immediately, including destructive ones. Nothing stops to ask you.",
-    compactDescription: "No review, no prompts",
+    description: "No prompts, including destructive.",
+    compactDescription: "No prompts",
     icon: LockOpenIcon,
   },
 };

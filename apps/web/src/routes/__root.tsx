@@ -246,10 +246,10 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
 
 function useStartupSplashReadySignal() {
   useEffect(() => {
-    const frame = window.requestAnimationFrame(markStartupSplashAppReady);
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
+    // This effect itself proves React committed the root route. Deferring the signal through
+    // requestAnimationFrame can stall indefinitely while Electron's window is hidden; visual
+    // readiness is tracked separately by the startup splash reveal handshake.
+    markStartupSplashAppReady();
   }, []);
 }
 

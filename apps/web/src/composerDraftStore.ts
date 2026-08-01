@@ -266,6 +266,14 @@ const PersistedComposerDraftStoreStorage = Schema.Struct({
  */
 export interface ComposerThreadDraftState {
   prompt: string;
+  /**
+   * Ghost next-prompt suggestion held for this thread. Lives beside the draft
+   * so switching threads doesn't throw away a generation that was already paid
+   * for — it is shown again when you come back. Deliberately NOT persisted to
+   * storage: it is derived from the conversation as it stood when the turn
+   * settled, so resurrecting it after a reload could be stale.
+   */
+  ghostSuggestion: string | null;
   images: ComposerImageAttachment[];
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
@@ -421,6 +429,7 @@ interface ComposerDraftStoreState {
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
+  setGhostSuggestion: (threadRef: ComposerThreadTarget, ghostSuggestion: string | null) => void;
   addLargePaste: (threadRef: ComposerThreadTarget, paste: LargePasteDraft) => void;
   setLargePastes: (threadRef: ComposerThreadTarget, pastes: LargePasteDraft[]) => void;
   removeLargePaste: (threadRef: ComposerThreadTarget, pasteId: string) => void;
@@ -627,6 +636,7 @@ const EMPTY_COMPOSER_DRAFT_MODEL_STATE = Object.freeze<ComposerDraftModelState>(
 
 const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   prompt: "",
+  ghostSuggestion: null,
   images: EMPTY_IMAGES,
   nonPersistedImageIds: EMPTY_IDS,
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
@@ -651,6 +661,7 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
 export function createEmptyThreadDraft(): ComposerThreadDraftState {
   return {
     prompt: "",
+    ghostSuggestion: null,
     images: [],
     nonPersistedImageIds: [],
     persistedAttachments: [],
@@ -727,6 +738,7 @@ function normalizeTerminalContextsForThread(
 function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
   return (
     draft.prompt.length === 0 &&
+    draft.ghostSuggestion === null &&
     draft.images.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.terminalContexts.length === 0 &&
@@ -2210,6 +2222,8 @@ function toHydratedThreadDraft(
 
   return {
     prompt: persistedDraft.prompt,
+    // Runtime-only: a stored ghost is never rehydrated (see the field's doc).
+    ghostSuggestion: null,
     images: hydrateImagesFromPersisted(persistedDraft.attachments),
     nonPersistedImageIds: [],
     persistedAttachments: [...persistedDraft.attachments],
@@ -2654,6 +2668,29 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...existing,
               prompt,
+            };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setGhostSuggestion: (threadRef, ghostSuggestion) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (existing.ghostSuggestion === ghostSuggestion) {
+              return state;
+            }
+            const nextDraft: ComposerThreadDraftState = {
+              ...existing,
+              ghostSuggestion,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

@@ -36,6 +36,176 @@
 
 ---
 
+# [OPEN 2026-08-01] LIVE CONVERSATIONS COULD STOP UPDATING UNTIL V3 CODE WAS RESTARTED
+
+## Incident
+
+An already-open V3 Code client appeared to accept messages in multiple conversations, then made
+the new conversation content disappear or failed to show the replies. The affected row continued
+to look busy, so this presented as an unresponsive agent. Closing and reopening V3 Code caused all
+of the missing conversation content to appear immediately.
+
+The inspected example was the top-level Codex thread `Audit Subagent Progress Visibility`, V3
+thread ID `7d308a68-1dd2-4917-965f-a47ba7dd7c0a`, provider thread ID
+`019fbc0c-9f23-72c0-98e8-23bccda6f7f6`. Although it was described during triage as a
+sub-agent, the backend classified it as a normal top-level thread; `active_agent_count` was zero.
+
+Two short turns make a compact forensic marker:
+
+- At `2026-08-01T08:06:42.751Z` (`13:36:42` IST), the user sent `This is what the agent came back
+with`. Event sequences 40606-40615 show message accepted -> turn requested -> session
+  starting/running -> assistant reply -> session ready -> checkpoint ready. The assistant reply
+  was persisted at `08:06:48.810Z`, and the turn completed at `08:06:48.900Z`.
+- At `2026-08-01T08:07:49.802Z` (`13:37:49` IST), the user sent `Hello are you there?`. Event
+  sequences 40646-40657 show the same healthy lifecycle. The persisted reply was `Yes, I'm here.
+Send the agent's response or screenshot and I'll review it.` at `08:07:53.593Z`; the turn and
+  checkpoint completed at `08:07:53.651Z`.
+
+## Second incident: global server backlog exposed by Grok (2026-08-01)
+
+A fresh reproduction in the still-open client proved this issue can begin before the renderer. The
+thread was `Audit Grok 4.5 Auto-Approve`, V3 thread ID
+`260f02b1-5f46-452a-959c-f6989cced30f`, Grok ACP session ID
+`019fbd37-ba55-7ec2-95ab-6645d64e0b4e`. The screenshot showed three persisted user bubbles with
+no visible replies:
+
+- `Give me the TLDR. I am reading all the dawg` at `12:13:18.948Z` (sequences 48369-48370).
+- `aint*` at `12:13:46.315Z` (sequences 48450-48451).
+- `hello?` at `12:14:43.872Z` (sequences 48616-48617).
+
+Grok was responsive. Its native provider log showed prompt 3 producing 136 logged events/chunks,
+prompt 4 producing 58, and prompt 5 producing 30. It generated the TLDR by `12:13:27Z` and generated
+text for the later prompts too. The failure was the server path carrying those events into durable
+orchestration state. At `12:19:14Z`, the latest durable event for this thread was still the TLDR
+reply at `12:13:27.032Z`: more than five minutes behind the live Grok log, which had already reached
+`12:14:50Z`. The global event stream was also behind (its newest event had `occurred_at`
+`12:13:47.312Z` and belonged to another thread), proving cross-thread ingestion backlog rather than
+one slow model call.
+
+### Cross-provider Codex reproduction in the diagnostic thread
+
+The diagnostic Codex conversation failed during the same window, so this is not a Grok-only UI or
+adapter defect. V3 thread `6ab589b2-1ace-4080-acee-76016ca62cec` persisted and accepted two sends:
+
+- The text report at `12:15:54.197Z` (sequences 48804-48805).
+- Its screenshot at `12:16:02.661Z` (sequences 48827-48828).
+
+Both emitted `thread.turn-start-requested` and received accepted command receipts. Both caused the
+session projection to say `starting`, but neither obtained a `projection_turns` row, a provider
+`turn.started`, an assistant message, or an error. The provider-native log contains neither prompt.
+Only the later `hello?` at `12:21:13.768Z` reached Codex, started turn
+`019fbd45-7736-7691-95e2-5bb4bf958978`, and produced assistant output. Thus the apparent silence in
+the diagnostic chat was real before the renderer: accepted turn-start requests were stranded before
+provider dispatch. Later messages sent while that `hello?` turn was running were delivered as
+steering input to that one active turn, not started as independent turns.
+
+### Projection corruption observed in the Grok thread
+
+When delayed Grok events finally landed, sequence order no longer represented occurrence order. A
+late `turn.started` selected the newest pending user message, so the TLDR reply became associated
+with the later `hello?`; `aint*` had no correct turn association. Two completed turn rows were
+created with `pending_message_id = null`, and a late `ready` session event overwrote a newer
+`starting` state. Restarting can rehydrate whatever is durable, but it cannot repair these incorrect
+durable associations.
+
+### Likely shared mechanism; exact dispatch failure still unresolved
+
+`ProviderRuntimeIngestion.ts` sends provider runtime events plus `thread.turn-start-requested` domain
+events through one process-wide `makeDrainableWorker`. Grok emits every assistant message chunk as
+an individual runtime event; the three short prompts produced 224 logged chunks, each entering that
+single unbounded FIFO worker. `ProviderCommandReactor.ts` independently places all providers' turn
+start intents on another process-wide single-consumer `makeDrainableWorker`. A turn start awaits
+session setup before it forks provider `sendTurn`, so a delayed or stalled setup can hold later
+provider commands globally.
+
+The five-minute runtime-ingestion backlog and the missing Codex dispatch overlap exactly and explain
+the cross-thread symptom, but the retained evidence does not prove which awaited session operation
+stranded the first two Codex starts or why it recovered for `hello?`. Instrument both worker queue
+depth/oldest-item age and each turn-start stage (`dequeued`, `session ensured`, `sendTurn forked`,
+provider acknowledged) before naming the final root cause.
+
+Grok ACP `session/prompt` records used `status=failed` / `errorTag=Interrupt` even when text and
+`turn.completed` were emitted. Current cleanup interrupts the joined prompt fiber in an `ensuring`
+path, so this telemetry is not sufficient evidence that Grok itself failed.
+
+## What the backend proved in the first incident
+
+- Both client send-command receipts were `accepted` with no error. Every provider/server command
+  receipt in the two lifecycle windows was also accepted.
+- `projection_thread_messages` contained both user messages and both complete assistant replies;
+  none were streaming or partial when inspected.
+- `projection_turns` marked both turns `completed`, with populated completion times and ready
+  checkpoints. `projection_thread_sessions` was `ready`, with `active_turn_id = null` and no
+  `last_error` after each turn.
+- All nine projectors had advanced to sequence 40804 after the restart, beyond the last incident
+  event at sequence 40657. The event log, read models, and provider log agreed.
+- A later message in the same thread started another turn normally and immediately persisted an
+  assistant progress message, further ruling out a dead Codex session.
+
+This places the observed failure after durable ingestion/projection: the already-open renderer's
+live thread state, WebSocket subscription/completion-marker handling, or timeline publication/render
+path. The restart forced a cold rehydration from the correct persisted state. There is not enough
+client telemetry from this incident to distinguish those frontend boundaries, so do not call this
+a confirmed cache bug yet.
+
+Current source already defers persisted catch-up publication until the `synchronized` marker in
+`packages/client-runtime/src/state/threads.ts`, and `ChatView.tsx` keeps the timeline in
+`initialHydration` until the thread status becomes `live`. This incident therefore must not be
+silently folded into the older history-replayed-as-live-activity issue. Verify the installed
+build actually contains those guards, then investigate whether a live subscription can advance its
+cursor without publishing the reduced state, miss its completion marker, or leave React rendering
+an older thread snapshot.
+
+## Attachment observation (probably separate)
+
+The first affected message above was persisted with `attachments: []`, so the agent correctly said
+that no screenshot was attached. Two earlier screenshots for the same thread were durably stored and
+referenced at `08:04:24Z`. An image written at `13:38:44` IST belonged to a different thread, likely
+the later diagnostic conversation. This does not prove an attachment upload defect; on recurrence,
+record which thread is selected when the attachment is added and compare the attachment ID in the
+composer, `thread.message-sent`, and the userdata attachment directory.
+
+## What to capture before restarting next time
+
+1. Record the affected V3 thread ID, environment, client surface/build, route, and whether the
+   connection is local, remote/relay, or tunnel. Note whether switching away and back repairs it or
+   only a full V3 Code restart does.
+2. Query `orchestration_events` and `orchestration_command_receipts` for the send command and record
+   the event sequence range. Compare it with `projection_thread_messages`, `projection_turns`,
+   `projection_thread_sessions`, `provider_session_runtime`, and every `projection_state` cursor.
+3. Preserve the matching provider log from
+   `~/.t3/userdata/logs/provider/events.<v3-thread-id>.log`. Do not infer a provider failure merely
+   from missing UI rows when the log contains `item/agentMessage/delta`, `turn/completed`, and the
+   projections contain the finalized message.
+4. Capture renderer/connection diagnostics around `subscribeThread`: requested `afterSequence`,
+   each received event sequence, whether `synchronized` arrived, the last reduced sequence, the last
+   published sequence, and the timeline row IDs React received. This instrumentation is the main
+   missing evidence from this incident.
+5. Capture `ProviderRuntimeIngestion` and `ProviderCommandReactor` queue depth, oldest-item age, and
+   the per-turn timestamps for dequeue, session setup, `sendTurn`, and provider acknowledgement.
+   Preserve both the affected thread log and the high-volume thread log that may be blocking it.
+6. Before repair, screenshot the stale timeline and sidebar state. After repair, capture the same
+   route and identify which missing message IDs appeared. Avoid restarting until the read-only
+   database/log snapshot is complete.
+
+## Recovery and acceptance target
+
+- Confirmed recovery for this incident: fully close and reopen V3 Code. All affected conversations
+  then rehydrated with their persisted messages and replies. No database repair or provider stop was
+  needed. This applies to the first, renderer-only incident. Restart recovery was not tested for the
+  later server-backlog reproduction and would not correct already-misassociated durable turns.
+- A future fix is complete only when an already-open client continues to show each accepted user
+  message and finalized assistant reply without a route change or restart, including across a
+  reconnect/catch-up boundary. Add a regression where a warm subscribed thread receives user and
+  assistant message events plus the synchronized marker and verify that the published React state
+  contains them exactly once.
+- Add a concurrent-provider regression where one provider emits hundreds of tiny assistant chunks
+  while another thread starts a turn. The second provider must receive its prompt promptly, every
+  pending message must bind to the intended turn, occurrence-time regressions must not overwrite
+  newer session state, and one thread's traffic must not create multi-minute global lag.
+
+---
+
 # 🟢 [FIXED 2026-07-29] THREAD DELETION COULD DO NOTHING AFTER THE USER CLICKED `YES`
 
 ## Original bug

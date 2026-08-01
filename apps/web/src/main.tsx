@@ -35,6 +35,11 @@ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string
 
 const app = <AppRoot router={router} />;
 
+// Arm the boot controller before React begins mounting. The splash used to start after the
+// entire initial render call, so its minimum hold and the artwork's own clocks had different
+// epochs under cold-start load.
+startStartupSplashTransition();
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     {clerkPublishableKey && hasCloudPublicConfig() ? (
@@ -52,5 +57,3 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     )}
   </React.StrictMode>,
 );
-
-startStartupSplashTransition();

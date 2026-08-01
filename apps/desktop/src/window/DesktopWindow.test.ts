@@ -41,7 +41,12 @@ import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
-import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
+import {
+  MENU_ACTION_CHANNEL,
+  STARTUP_SPLASH_READY_CHANNEL,
+  STARTUP_SPLASH_REVEALED_CHANNEL,
+  WINDOW_FULLSCREEN_STATE_CHANNEL,
+} from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
@@ -186,6 +191,7 @@ function makeTestLayer(input: {
     bounds: DesktopAppSettings.DesktopWindowBounds,
   ) => Effect.Effect<void>;
   readonly openedExternalUrls?: unknown[];
+  readonly revealedWindows?: Electron.BrowserWindow[];
 }) {
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const desktopAppSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
@@ -234,7 +240,10 @@ function makeTestLayer(input: {
     focusedMainOrFirst: Ref.get(input.mainWindow),
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
-    reveal: () => Effect.void,
+    reveal: (window) =>
+      Effect.sync(() => {
+        input.revealedWindows?.push(window);
+      }),
     sendAll: () => Effect.void,
     destroyAll: Effect.void,
     syncAllAppearance: (sync) => sync(input.window),
@@ -433,10 +442,17 @@ describe("DesktopWindow", () => {
         assert.isFalse(createdWindowOptions[0]?.webPreferences?.backgroundThrottling);
         assert.deepEqual(fakeWindow.setAutoHideCursor.mock.calls, [[false]]);
         assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["v3code-dev://app/"]);
-        assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
+        assert.equal(fakeWindow.openDevTools.mock.calls.length, 0);
       }).pipe(Effect.provide(layer));
     }),
   );
+
+  it("opens development DevTools only when explicitly requested", () => {
+    assert.isFalse(DesktopWindow.shouldOpenDevelopmentDevTools(true, undefined));
+    assert.isFalse(DesktopWindow.shouldOpenDevelopmentDevTools(true, "0"));
+    assert.isFalse(DesktopWindow.shouldOpenDevelopmentDevTools(false, "1"));
+    assert.isTrue(DesktopWindow.shouldOpenDevelopmentDevTools(true, "1"));
+  });
 
   it.effect("uses the persisted main window bounds when opening the window", () =>
     Effect.gen(function* () {
@@ -493,7 +509,161 @@ describe("DesktopWindow", () => {
           return yield* Effect.die("window ready-to-show listener was not registered");
         }
         readyToShow();
+        assert.equal(fakeWindow.maximize.mock.calls.length, 0);
+        const ipcMessage = fakeWindow.webContentsListeners.get("ipc-message");
+        if (!ipcMessage) {
+          return yield* Effect.die("window ipc-message listener was not registered");
+        }
+        ipcMessage({}, STARTUP_SPLASH_READY_CHANNEL);
         assert.equal(fakeWindow.maximize.mock.calls.length, 1);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("reveals only after both the native window and renderer splash are ready", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealedWindows: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        revealedWindows,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const readyToShow = fakeWindow.windowListeners.get("ready-to-show");
+        const ipcMessage = fakeWindow.webContentsListeners.get("ipc-message");
+        if (!readyToShow || !ipcMessage) {
+          return yield* Effect.die("startup reveal listeners were not registered");
+        }
+
+        readyToShow();
+        assert.deepEqual(revealedWindows, []);
+        ipcMessage({}, "desktop:unrelated-message");
+        assert.deepEqual(revealedWindows, []);
+
+        ipcMessage({}, STARTUP_SPLASH_READY_CHANNEL);
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
+        assert.deepEqual(fakeWindow.send.mock.calls, [[STARTUP_SPLASH_REVEALED_CHANNEL]]);
+
+        ipcMessage({}, STARTUP_SPLASH_READY_CHANNEL);
+        readyToShow();
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("accepts renderer splash readiness before Electron paint readiness", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealedWindows: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        revealedWindows,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const readyToShow = fakeWindow.windowListeners.get("ready-to-show");
+        const ipcMessage = fakeWindow.webContentsListeners.get("ipc-message");
+        if (!readyToShow || !ipcMessage) {
+          return yield* Effect.die("startup reveal listeners were not registered");
+        }
+
+        ipcMessage({}, STARTUP_SPLASH_READY_CHANNEL);
+        assert.deepEqual(revealedWindows, []);
+        readyToShow();
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("re-acknowledges splash readiness after a renderer reload", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealedWindows: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        revealedWindows,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const readyToShow = fakeWindow.windowListeners.get("ready-to-show");
+        const ipcMessage = fakeWindow.webContentsListeners.get("ipc-message");
+        if (!readyToShow || !ipcMessage) {
+          return yield* Effect.die("startup reveal listeners were not registered");
+        }
+
+        readyToShow();
+        ipcMessage({}, STARTUP_SPLASH_READY_CHANNEL);
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
+        assert.deepEqual(fakeWindow.send.mock.calls, [[STARTUP_SPLASH_REVEALED_CHANNEL]]);
+
+        // A new renderer document sends READY again, but the BrowserWindow must remain a
+        // single reveal while the new controller receives its own REVEALED acknowledgement.
+        ipcMessage({}, STARTUP_SPLASH_READY_CHANNEL);
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
+        assert.deepEqual(fakeWindow.send.mock.calls, [
+          [STARTUP_SPLASH_REVEALED_CHANNEL],
+          [STARTUP_SPLASH_REVEALED_CHANNEL],
+        ]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("falls back to revealing if the renderer handshake never arrives", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealedWindows: Electron.BrowserWindow[] = [];
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        revealedWindows,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const readyToShow = fakeWindow.windowListeners.get("ready-to-show");
+        if (!readyToShow) {
+          return yield* Effect.die("window ready-to-show listener was not registered");
+        }
+        readyToShow();
+
+        yield* TestClock.adjust(DesktopWindow.STARTUP_SPLASH_REVEAL_FALLBACK_MS - 1);
+        assert.deepEqual(revealedWindows, []);
+        yield* TestClock.adjust(1);
+        yield* Effect.promise(() => Promise.resolve());
+        assert.deepEqual(revealedWindows, [fakeWindow.window]);
+        assert.deepEqual(fakeWindow.send.mock.calls, [[STARTUP_SPLASH_REVEALED_CHANNEL]]);
       }).pipe(Effect.provide(layer));
     }),
   );

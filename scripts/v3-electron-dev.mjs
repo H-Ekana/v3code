@@ -110,6 +110,9 @@ export function createV3ElectronDevLaunch(
       T3CODE_DEV_INSTANCE: useRealData ? "v3-real-data" : "v3-subagent-sidebar",
       T3CODE_DISABLE_AUTO_UPDATE: "1",
       T3CODE_DESKTOP_APP_STAGE_LABEL: "Nightly",
+      T3CODE_BUNDLED_DEV: options.bundledDev === true ? "1" : "0",
+      T3CODE_DESKTOP_OPEN_DEVTOOLS: options.openDevTools === true ? "1" : "0",
+      VITE_T3CODE_SKIP_STARTUP_SPLASH: options.skipSplash === true ? "1" : "0",
       // The demo responder and demo sidebar synthesise fake agents, which would
       // mask the real rosters this mode exists to show.
       ...(useRealData
@@ -147,10 +150,21 @@ export function createV3ElectronDevLaunch(
     dataHome,
     appData,
     useRealData,
+    bundledDev: options.bundledDev === true,
+    openDevTools: options.openDevTools === true,
+    skipSplash: options.skipSplash === true,
     // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev launcher has no Effect runtime.
     command: process.platform === "win32" ? "node.exe" : "node",
     args: ["scripts/dev-runner.ts", "dev:desktop", "--home-dir", dataHome],
     environment,
+  };
+}
+
+export function resolveV3ElectronDevFlags(argv) {
+  return {
+    bundledDev: argv.includes("--bundled-vite") && !argv.includes("--classic-vite"),
+    openDevTools: argv.includes("--devtools"),
+    skipSplash: argv.includes("--skip-splash"),
   };
 }
 
@@ -160,6 +174,11 @@ function printLaunchSummary(launch) {
   console.log(`[v3-electron-dev] mode:      ${launch.useRealData ? "real data" : "demo"}`);
   console.log(`[v3-electron-dev] data:      ${launch.dataHome}`);
   console.log(`[v3-electron-dev] app data:  ${launch.appData}`);
+  console.log(
+    "[v3-electron-dev] renderer:  " + (launch.bundledDev ? "bundled dev" : "classic Vite"),
+  );
+  console.log("[v3-electron-dev] DevTools:  " + (launch.openDevTools ? "open" : "closed"));
+  console.log("[v3-electron-dev] splash:    " + (launch.skipSplash ? "skipped" : "enabled"));
   console.log("[v3-electron-dev] Ports are selected automatically to avoid conflicts.");
   console.log("[v3-electron-dev] Press Ctrl+C to stop Electron and all development services.");
 }
@@ -189,8 +208,12 @@ async function resolveDataHome(argv) {
 }
 
 async function main() {
-  const homeDir = await resolveDataHome(process.argv.slice(2));
-  const launch = createV3ElectronDevLaunch(process.cwd(), process.env, { homeDir });
+  const argv = process.argv.slice(2);
+  const homeDir = await resolveDataHome(argv);
+  const launch = createV3ElectronDevLaunch(process.cwd(), process.env, {
+    homeDir,
+    ...resolveV3ElectronDevFlags(argv),
+  });
   printLaunchSummary(launch);
 
   if (process.argv.includes("--dry-run")) return;

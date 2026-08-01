@@ -15,7 +15,12 @@ import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
-import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
+import {
+  MENU_ACTION_CHANNEL,
+  STARTUP_SPLASH_READY_CHANNEL,
+  STARTUP_SPLASH_REVEALED_CHANNEL,
+  WINDOW_FULLSCREEN_STATE_CHANNEL,
+} from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
@@ -24,6 +29,7 @@ const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linu
 const TITLEBAR_LIGHT_SYMBOL_COLOR = "#1f2937";
 const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
 const MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS = 500;
+export const STARTUP_SPLASH_REVEAL_FALLBACK_MS = 5_000;
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 const DEVELOPMENT_RETRYABLE_LOAD_ERROR_CODES = new Set([
   -2, // ERR_FAILED
@@ -34,6 +40,13 @@ const DEVELOPMENT_RETRYABLE_LOAD_ERROR_CODES = new Set([
   -106, // ERR_INTERNET_DISCONNECTED
   -118, // ERR_CONNECTION_TIMED_OUT
 ]);
+
+export function shouldOpenDevelopmentDevTools(
+  isDevelopment: boolean,
+  configuredValue: string | undefined,
+): boolean {
+  return isDevelopment && configuredValue?.trim() === "1";
+}
 
 type WindowTitleBarOptions = Pick<
   Electron.BrowserWindowConstructorOptions,
@@ -626,25 +639,90 @@ export const make = Effect.gen(function* () {
       );
     });
 
+    let nativeWindowReady = false;
+    let rendererSplashReady = false;
+    let revealStarted = false;
+    let revealCompleted = false;
+    let revealFallbackFiber: Fiber.Fiber<void, never> | undefined;
+
+    const clearRevealFallback = () => {
+      if (revealFallbackFiber === undefined) return;
+      const fiber = revealFallbackFiber;
+      revealFallbackFiber = undefined;
+      runFork(Fiber.interrupt(fiber));
+    };
+    const notifyRendererRevealed = () => {
+      if (!window.isDestroyed()) {
+        window.webContents.send(STARTUP_SPLASH_REVEALED_CHANNEL);
+      }
+    };
+    const revealWindow = () => {
+      if (revealStarted || window.isDestroyed()) return;
+      revealStarted = true;
+      clearRevealFallback();
+
+      if (persistedSettings.mainWindowMaximized) {
+        window.maximize();
+      }
+      void runPromise(
+        Effect.gen(function* () {
+          yield* electronWindow.reveal(window);
+          revealCompleted = true;
+          notifyRendererRevealed();
+          yield* dismissConnectingSplash;
+        }),
+      );
+    };
+    const revealWhenReady = () => {
+      if (nativeWindowReady && rendererSplashReady) {
+        revealWindow();
+      }
+    };
+    const onNativeWindowReady = () => {
+      nativeWindowReady = true;
+      revealWhenReady();
+      if (revealStarted || revealFallbackFiber !== undefined) return;
+      revealFallbackFiber = runFork(
+        Effect.sleep(STARTUP_SPLASH_REVEAL_FALLBACK_MS).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              revealFallbackFiber = undefined;
+              revealWindow();
+            }),
+          ),
+        ),
+      );
+    };
+    window.webContents.on("ipc-message", (_event, channel) => {
+      if (channel !== STARTUP_SPLASH_READY_CHANNEL) return;
+      rendererSplashReady = true;
+      // A renderer reload creates a fresh splash controller inside the same, already-visible
+      // BrowserWindow. Re-acknowledge that document without trying to reveal the window again.
+      if (revealCompleted) {
+        notifyRendererRevealed();
+        return;
+      }
+      revealWhenReady();
+    });
+
     const revealSubscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
     if (environment.platform === "linux") {
       revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
     }
-    bindFirstRevealTrigger(revealSubscribers, () => {
-      // Reveal the real window, then close the connecting splash (if any) so the
-      // two don't overlap and there's no blank gap between them.
-      if (persistedSettings.mainWindowMaximized) {
-        window.maximize();
-      }
-      void runPromise(Effect.andThen(electronWindow.reveal(window), dismissConnectingSplash));
-    });
+    bindFirstRevealTrigger(revealSubscribers, onNativeWindowReady);
 
     loadApplication();
-    if (environment.isDevelopment) {
+    if (
+      shouldOpenDevelopmentDevTools(
+        environment.isDevelopment,
+        process.env.T3CODE_DESKTOP_OPEN_DEVTOOLS,
+      )
+    ) {
       window.webContents.openDevTools({ mode: "detach" });
     }
 
     window.on("closed", () => {
+      clearRevealFallback();
       clearDevelopmentLoadRetry();
       clearBoundsPersist();
       void runPromise(electronWindow.clearMain(Option.some(window)));

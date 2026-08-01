@@ -34,6 +34,12 @@ const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
 const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
+const devStartedAtMs = Number(process.env.T3CODE_DESKTOP_DEV_STARTED_AT_MS);
+const minimumBundleMtimeMs = Number.isFinite(devStartedAtMs)
+  ? // Tolerate coarse filesystem mtimes while still rejecting output left by
+    // an earlier development run.
+    devStartedAtMs - 1_000
+  : undefined;
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
 
@@ -42,6 +48,7 @@ await waitForResources({
   files: requiredFiles,
   tcpHost: devServer.hostname,
   tcpPort: port,
+  minimumFileMtimeMs: minimumBundleMtimeMs,
 });
 
 const childEnv = { ...process.env };

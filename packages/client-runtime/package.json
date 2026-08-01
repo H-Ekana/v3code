@@ -47,6 +47,10 @@
       "types": "./src/state/assets.ts",
       "default": "./src/state/assets.ts"
     },
+    "./state/agent-transcript": {
+      "types": "./src/state/agentTranscript.ts",
+      "default": "./src/state/agentTranscript.ts"
+    },
     "./state/connections": {
       "types": "./src/state/connections.ts",
       "default": "./src/state/connections.ts"
@@ -62,6 +66,14 @@
     "./state/git": {
       "types": "./src/state/git.ts",
       "default": "./src/state/git.ts"
+    },
+    "./state/textGenerationUsage": {
+      "types": "./src/state/textGenerationUsage.ts",
+      "default": "./src/state/textGenerationUsage.ts"
+    },
+    "./state/promptSuggestion": {
+      "types": "./src/state/promptSuggestion.ts",
+      "default": "./src/state/promptSuggestion.ts"
     },
     "./state/models": {
       "types": "./src/state/models.ts",

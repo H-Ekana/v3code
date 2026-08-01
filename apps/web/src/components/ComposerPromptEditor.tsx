@@ -61,6 +61,7 @@ import {
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
 } from "~/composer-logic";
+import { registerComposerListContinuation } from "./composerListContinuationPlugin";
 import {
   selectionTouchesMentionBoundary,
   splitPromptIntoComposerSegments,
@@ -1001,6 +1002,16 @@ function collectLargePasteIds(node: LexicalNode): string[] {
   return [];
 }
 
+function collectLargePastes(node: LexicalNode): LargePasteDraft[] {
+  if (node instanceof ComposerLargePasteNode) {
+    return [node.__paste];
+  }
+  if ($isElementNode(node)) {
+    return node.getChildren().flatMap((child) => collectLargePastes(child));
+  }
+  return [];
+}
+
 export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
@@ -1023,6 +1034,11 @@ interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  /**
+   * Grayed-out next-prompt suggestion shown when the draft is empty.
+   * Not part of the controlled value until the user accepts it (Tab).
+   */
+  ghostSuggestion?: string | null;
   className?: string;
   onRemoveTerminalContext: (contextId: string) => void;
   onAddLargePaste: (paste: LargePasteDraft) => void;
@@ -1101,6 +1117,25 @@ function ComposerCommandKeyPlugin(props: {
       unregisterTab();
     };
   }, [editor, props]);
+
+  return null;
+}
+
+/**
+ * Continues markdown ordered/bullet list markers when Enter inserts a newline
+ * (Shift+Enter on desktop; plain Enter on mobile). Runs after submit/menu
+ * handling so bare desktop Enter still sends the message.
+ */
+function ComposerListContinuationPlugin() {
+  const [editor] = useLexicalComposerContext();
+
+  useEffect(() => {
+    return registerComposerListContinuation(editor, {
+      readExpandedCursor: $readExpandedSelectionOffsetFromEditorState,
+      selectionTouchesInlineToken: $selectionTouchesInlineToken,
+      setSelectionRangeAtComposerOffsets: $setSelectionRangeAtComposerOffsets,
+    });
+  }, [editor]);
 
   return null;
 }
@@ -1407,22 +1442,13 @@ function ComposerInlineTokenPastePlugin() {
   return null;
 }
 
-function ComposerLargePastePlugin(props: {
-  enabled: boolean;
-  onCreateLargePaste: (paste: LargePasteDraft) => void;
-}) {
+function ComposerLargePastePlugin(props: { enabled: boolean }) {
   const [editor] = useLexicalComposerContext();
-  const onCreateLargePasteRef = useRef(props.onCreateLargePaste);
-
-  useEffect(() => {
-    onCreateLargePasteRef.current = props.onCreateLargePaste;
-  }, [props.onCreateLargePaste]);
 
   useEffect(() => {
     if (!props.enabled) return;
     return registerComposerLargePaste(editor, {
       createLargePasteNode: $createComposerLargePasteNode,
-      onCreateLargePaste: (paste) => onCreateLargePasteRef.current(paste),
     });
   }, [editor, props.enabled]);
 
@@ -1715,6 +1741,7 @@ function ComposerPromptEditorInner({
   skills,
   disabled,
   placeholder,
+  ghostSuggestion = null,
   className,
   onRemoveTerminalContext,
   onAddLargePaste,
@@ -1726,6 +1753,7 @@ function ComposerPromptEditorInner({
 }: ComposerPromptEditorProps) {
   const [editor] = useLexicalComposerContext();
   const onChangeRef = useRef(onChange);
+  const onAddLargePasteRef = useRef(onAddLargePaste);
   const initialCursor = clampCollapsedComposerCursor(value, cursor);
   const terminalContextsSignature = terminalContextSignature(terminalContexts);
   const terminalContextsSignatureRef = useRef(terminalContextsSignature);
@@ -1750,6 +1778,10 @@ function ComposerPromptEditorInner({
   useEffect(() => {
     onChangeRef.current = onChange;
   }, [onChange]);
+
+  useEffect(() => {
+    onAddLargePasteRef.current = onAddLargePaste;
+  }, [onAddLargePaste]);
 
   useLayoutEffect(() => {
     skillMetadataRef.current = skillMetadataByName(skills);
@@ -1925,7 +1957,8 @@ function ComposerPromptEditorInner({
         $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
       );
       const terminalContextIds = collectTerminalContextIds($getRoot());
-      const largePasteIds = collectLargePasteIds($getRoot());
+      const largePastesInEditor = collectLargePastes($getRoot());
+      const largePasteIds = largePastesInEditor.map((paste) => paste.id);
       const previousSnapshot = snapshotRef.current;
       if (
         previousSnapshot.value === nextValue &&
@@ -1961,6 +1994,14 @@ function ComposerPromptEditorInner({
         terminalContextIds,
         largePasteIds,
       );
+      // Commit the placeholder before exposing a new payload to the controlled
+      // draft store. Reversing this order lets the stale prompt rewrite the
+      // editor and erase the chip that was just inserted.
+      for (const paste of largePastesInEditor) {
+        if (!previousSnapshot.largePasteIds.includes(paste.id)) {
+          onAddLargePasteRef.current(paste);
+        }
+      }
     });
   }, []);
 
@@ -1981,7 +2022,15 @@ function ComposerPromptEditorInner({
             />
           }
           placeholder={
-            terminalContexts.length > 0 || largePastes.length > 0 ? null : (
+            terminalContexts.length > 0 || largePastes.length > 0 ? null : ghostSuggestion ? (
+              <div
+                data-composer-ghost-suggestion="true"
+                className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/45 sm:text-[14px]"
+              >
+                <span>{ghostSuggestion}</span>
+                <span className="ml-2 text-[12px] text-muted-foreground/35">Tab to use</span>
+              </div>
+            ) : (
               <div
                 data-composer-placeholder="true"
                 className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/55 sm:text-[14px]"
@@ -1994,6 +2043,7 @@ function ComposerPromptEditorInner({
         />
         <OnChangePlugin onChange={handleEditorChange} />
         <ComposerCommandKeyPlugin {...(onCommandKeyDown ? { onCommandKeyDown } : {})} />
+        <ComposerListContinuationPlugin />
         <ComposerSurroundSelectionPlugin
           terminalContexts={terminalContexts}
           largePastes={largePastes}
@@ -2003,10 +2053,7 @@ function ComposerPromptEditorInner({
         <ComposerInlineTokenArrowPlugin />
         <ComposerInlineTokenSelectionNormalizePlugin />
         <ComposerInlineTokenBackspacePlugin />
-        <ComposerLargePastePlugin
-          enabled={largePasteEnabled}
-          onCreateLargePaste={onAddLargePaste}
-        />
+        <ComposerLargePastePlugin enabled={largePasteEnabled} />
         <ComposerInlineTokenPastePlugin />
         <ComposerChipSelectionPlugin />
         <HistoryPlugin />
@@ -2024,6 +2071,7 @@ export function ComposerPromptEditor({
   skills,
   disabled,
   placeholder,
+  ghostSuggestion = null,
   className,
   onRemoveTerminalContext,
   onAddLargePaste,
@@ -2073,6 +2121,7 @@ export function ComposerPromptEditor({
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
+        ghostSuggestion={ghostSuggestion}
         onRemoveTerminalContext={onRemoveTerminalContext}
         onAddLargePaste={onAddLargePaste}
         onRemoveLargePaste={onRemoveLargePaste}

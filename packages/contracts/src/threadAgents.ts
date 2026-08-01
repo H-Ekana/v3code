@@ -65,12 +65,38 @@ export const ThreadAgentUsage = Schema.Struct({
 });
 export type ThreadAgentUsage = typeof ThreadAgentUsage.Type;
 
+export const ThreadAgentActivityKind = Schema.Literals([
+  "reasoning",
+  "planning",
+  "investigating",
+  "editing",
+  "command",
+  "verifying",
+  "reviewing",
+  "delegating",
+  "reporting",
+  "waiting",
+  "other",
+]);
+export type ThreadAgentActivityKind = typeof ThreadAgentActivityKind.Type;
+
+export const ThreadAgentActivityLifecycle = Schema.Literals(["started", "completed"]);
+export type ThreadAgentActivityLifecycle = typeof ThreadAgentActivityLifecycle.Type;
+
+export const ThreadAgentPlanStep = Schema.Struct({
+  step: TrimmedNonEmptyString,
+  status: Schema.Literals(["pending", "inProgress", "completed"]),
+});
+export type ThreadAgentPlanStep = typeof ThreadAgentPlanStep.Type;
+
 export const ThreadAgentActivityEntry = Schema.Struct({
   at: IsoDateTime,
   summary: TrimmedNonEmptyString,
   // Health signal for this entry: a failed command/tool inside an otherwise
   // running agent. Absent means unknown, not success.
   outcome: Schema.optional(Schema.Literals(["ok", "error"])),
+  kind: Schema.optional(ThreadAgentActivityKind),
+  lifecycle: Schema.optional(ThreadAgentActivityLifecycle),
 });
 export type ThreadAgentActivityEntry = typeof ThreadAgentActivityEntry.Type;
 
@@ -112,8 +138,14 @@ export const ThreadAgentSnapshot = Schema.Struct({
   // ("explorer").
   agentType: Schema.optional(TrimmedNonEmptyString),
   model: Schema.optional(TrimmedNonEmptyString),
+  // Full task brief supplied when the child was spawned. Kept separate from
+  // `name`, which is the stable compact card identity.
+  objective: Schema.optional(TrimmedNonEmptyString),
+  reasoningEffort: Schema.optional(TrimmedNonEmptyString),
   status: ThreadAgentStatus,
   currentActivity: Schema.optional(TrimmedNonEmptyString),
+  currentActivityKind: Schema.optional(ThreadAgentActivityKind),
+  currentActivityLifecycle: Schema.optional(ThreadAgentActivityLifecycle),
   lastToolName: Schema.optional(TrimmedNonEmptyString),
   usage: Schema.optional(ThreadAgentUsage),
   firstStartedAt: IsoDateTime,
@@ -135,6 +167,7 @@ export const ThreadAgentSnapshot = Schema.Struct({
   phaseTitle: Schema.optional(TrimmedNonEmptyString),
   // kind === "workflow" only.
   phases: Schema.optional(Schema.Array(ThreadAgentWorkflowPhase)),
+  plan: Schema.optional(Schema.Array(ThreadAgentPlanStep)),
   scriptPath: Schema.optional(TrimmedNonEmptyString),
   runId: Schema.optional(TrimmedNonEmptyString),
   // Reserved for the approval deep-link milestone; no emitter populates it yet.

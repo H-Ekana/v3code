@@ -64,6 +64,12 @@ export interface AcpSessionRuntimeOptions {
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
+  /**
+   * Optional ACP `_meta` stamped onto `session/new` and `session/load`.
+   * Grok uses this for `autoMode` / `yoloMode` so permission policy survives
+   * process restarts and is not left sticky from a prior Full access session.
+   */
+  readonly sessionSetupMeta?: { readonly [x: string]: unknown };
   readonly clientInfo: {
     readonly name: string;
     readonly version: string;
@@ -561,6 +567,7 @@ export const make = (
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...(options.sessionSetupMeta ? { _meta: options.sessionSetupMeta } : {}),
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const sessionLoadTimeout = Duration.fromInputUnsafe(
           options.sessionLoadTimeout ?? defaultSessionLoadTimeout,
@@ -634,6 +641,7 @@ export const make = (
         const createPayload = {
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...(options.sessionSetupMeta ? { _meta: options.sessionSetupMeta } : {}),
         } satisfies EffectAcpSchema.NewSessionRequest;
         const created = yield* runLoggedRequest(
           "session/new",

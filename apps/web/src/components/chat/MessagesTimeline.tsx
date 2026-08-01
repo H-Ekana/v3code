@@ -527,7 +527,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const isNearEnd = resolveTimelineIsAtEnd(state);
     const isStrictlyAtEnd = resolveTimelineIsStrictlyAtEnd(state);
     if (isNearEnd !== undefined) {
-      onIsAtEndChange(isNearEnd, isStrictlyAtEnd ?? isNearEnd);
+      // Do not fall back strict→near: free-scroll re-arm only on the true edge.
+      onIsAtEndChange(isNearEnd, isStrictlyAtEnd === true);
     }
     if (!state || minimapItems.length === 0) {
       return;

@@ -55,15 +55,16 @@ export interface TimelineEndSignalDecision {
  * Decides what reaching (or leaving) the live edge means for follow state and
  * the "a new text" indicator.
  *
- * The subtlety this exists to encode: **arriving at the live edge must always
- * re-arm follow and clear the indicator, even when the caller already believed
- * it was at the end.** Scrolling is not a single event — a wheel gesture routes
- * through `cancelTimelineLiveFollowForUserNavigation` on every tick, which
- * drops the mode to `free-scrolling` without moving the at-end flag. A
- * `previousIsAtEnd === isAtEnd` early-return therefore stranded the mode at
- * `free-scrolling` while the reader sat at the bottom, so every subsequent
- * streamed chunk re-showed the indicator and nothing could ever hide it.
- * Clicking the indicator worked only because that path sets the mode directly.
+ * `isAtEnd` is LegendList's generous half-viewport `isNearEnd` (drives
+ * "caught up" / indicator dismissal). `isStrictlyAtEnd` is the true live edge.
+ *
+ * Re-arming follow from free-scrolling requires the **strict** edge. A wheel
+ * gesture cancels live-follow on every tick without clearing the at-end flag;
+ * if the reader is still pinned to the true bottom, the next end signal must
+ * re-arm so streamed chunks do not strand the "New messages" chip. But if they
+ * only left the strict edge (still inside the half-viewport slack), treating
+ * that as re-arm caused tool rows / other non-text growth to snap them back
+ * to the bottom while free-scrolling.
  *
  * Leaving the edge while live-follow is armed is deliberately NOT treated as
  * the reader opting out — that is programmatic drift (content growing under a
@@ -72,6 +73,7 @@ export interface TimelineEndSignalDecision {
  */
 export function resolveTimelineEndSignal(input: {
   readonly isAtEnd: boolean;
+  readonly isStrictlyAtEnd: boolean;
   readonly previousIsAtEnd: boolean;
   readonly liveFollowArmed: boolean;
 }): TimelineEndSignalDecision {
@@ -85,11 +87,14 @@ export function resolveTimelineEndSignal(input: {
   }
 
   if (input.isAtEnd) {
+    // Stay following when already armed; only re-enter follow from free when
+    // the reader is on the true live edge (not merely within half a viewport).
+    const enterFollowingEnd = input.liveFollowArmed || input.isStrictlyAtEnd;
     return {
       nextIsAtEnd: true,
-      enterFollowingEnd: true,
+      enterFollowingEnd,
       enterFreeScrolling: false,
-      hideNewTextIndicator: true,
+      hideNewTextIndicator: enterFollowingEnd,
     };
   }
 

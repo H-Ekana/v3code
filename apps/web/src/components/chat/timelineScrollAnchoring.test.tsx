@@ -195,9 +195,14 @@ describe("resolveSentMessageRevealOffset", () => {
 });
 
 describe("resolveTimelineEndSignal", () => {
-  it("re-arms follow and clears the indicator on arrival at the live edge", () => {
+  it("re-arms follow and clears the indicator on arrival at the strict live edge", () => {
     expect(
-      resolveTimelineEndSignal({ isAtEnd: true, previousIsAtEnd: false, liveFollowArmed: false }),
+      resolveTimelineEndSignal({
+        isAtEnd: true,
+        isStrictlyAtEnd: true,
+        previousIsAtEnd: false,
+        liveFollowArmed: false,
+      }),
     ).toEqual({
       nextIsAtEnd: true,
       enterFollowingEnd: true,
@@ -214,6 +219,7 @@ describe("resolveTimelineEndSignal", () => {
   it("re-arms even when it already believed it was at the end", () => {
     const decision = resolveTimelineEndSignal({
       isAtEnd: true,
+      isStrictlyAtEnd: true,
       previousIsAtEnd: true,
       liveFollowArmed: false,
     });
@@ -222,9 +228,50 @@ describe("resolveTimelineEndSignal", () => {
     expect(decision.nextIsAtEnd).toBe(true);
   });
 
+  // Free-scrolling inside the half-viewport slack must not re-arm follow.
+  // Tool/work rows (and other non-text growth) re-fire end detection; treating
+  // near-end as re-arm snapped the reader to the bottom while they were reading
+  // above the live edge.
+  it("does not re-arm follow from free-scrolling on near-end alone", () => {
+    expect(
+      resolveTimelineEndSignal({
+        isAtEnd: true,
+        isStrictlyAtEnd: false,
+        previousIsAtEnd: true,
+        liveFollowArmed: false,
+      }),
+    ).toEqual({
+      nextIsAtEnd: true,
+      enterFollowingEnd: false,
+      enterFreeScrolling: false,
+      hideNewTextIndicator: false,
+    });
+  });
+
+  it("keeps follow armed while still near the end", () => {
+    expect(
+      resolveTimelineEndSignal({
+        isAtEnd: true,
+        isStrictlyAtEnd: false,
+        previousIsAtEnd: true,
+        liveFollowArmed: true,
+      }),
+    ).toEqual({
+      nextIsAtEnd: true,
+      enterFollowingEnd: true,
+      enterFreeScrolling: false,
+      hideNewTextIndicator: true,
+    });
+  });
+
   it("stands down to free-scrolling when the reader leaves a settled edge", () => {
     expect(
-      resolveTimelineEndSignal({ isAtEnd: false, previousIsAtEnd: true, liveFollowArmed: false }),
+      resolveTimelineEndSignal({
+        isAtEnd: false,
+        isStrictlyAtEnd: false,
+        previousIsAtEnd: true,
+        liveFollowArmed: false,
+      }),
     ).toEqual({
       nextIsAtEnd: false,
       enterFollowingEnd: false,
@@ -236,6 +283,7 @@ describe("resolveTimelineEndSignal", () => {
   it("does not re-enter free-scrolling when it was already free-scrolling", () => {
     const decision = resolveTimelineEndSignal({
       isAtEnd: false,
+      isStrictlyAtEnd: false,
       previousIsAtEnd: false,
       liveFollowArmed: false,
     });
@@ -247,7 +295,12 @@ describe("resolveTimelineEndSignal", () => {
   // reader opting out — keep following, just clear the signal.
   it("treats drift away from the edge while live-following as not opting out", () => {
     expect(
-      resolveTimelineEndSignal({ isAtEnd: false, previousIsAtEnd: true, liveFollowArmed: true }),
+      resolveTimelineEndSignal({
+        isAtEnd: false,
+        isStrictlyAtEnd: false,
+        previousIsAtEnd: true,
+        liveFollowArmed: true,
+      }),
     ).toEqual({
       nextIsAtEnd: true,
       enterFollowingEnd: false,

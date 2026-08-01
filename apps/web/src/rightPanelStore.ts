@@ -8,7 +8,7 @@
  * singleton surfaces.
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { ProviderDriverKind, ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -22,6 +22,7 @@ export const RIGHT_PANEL_KINDS = [
   "preview",
   "terminal",
   "agents",
+  "agent-detail",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -46,7 +47,14 @@ export type RightPanelSurface =
       revealRequestId: number;
     }
   | { id: "plan"; kind: "plan" }
-  | { id: "agents"; kind: "agents" };
+  | { id: "agents"; kind: "agents" }
+  | {
+      id: `agent:${string}:${string}`;
+      kind: "agent-detail";
+      sourceProvider: ProviderDriverKind;
+      agentId: string;
+      agentName: string;
+    };
 
 export const RIGHT_PANEL_ROOT_PANE_ID = "pane:root";
 export const RIGHT_PANEL_WORKSPACE_DROP_ID = "workspace:root";
@@ -115,8 +123,17 @@ export interface ThreadRightPanelState {
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-  open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  open: (
+    ref: ScopedThreadRef,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "agent-detail">,
+  ) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
+  openAgent: (
+    ref: ScopedThreadRef,
+    sourceProvider: ProviderDriverKind,
+    agentId: string,
+    agentName: string,
+  ) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
   splitTerminal: (
@@ -146,7 +163,10 @@ interface RightPanelStoreState {
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
-  toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  toggle: (
+    ref: ScopedThreadRef,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "agent-detail">,
+  ) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -548,7 +568,7 @@ export function projectRightPanelDrop(
 }
 
 const singletonSurface = (
-  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal">,
+  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "agent-detail">,
 ): RightPanelSurface => {
   switch (kind) {
     case "diff":
@@ -726,6 +746,26 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")
               : current.surfaces;
             return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+          }),
+        })),
+      openAgent: (ref, sourceProvider, agentId, agentName) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            const surface = {
+              id: `agent:${sourceProvider}:${agentId}`,
+              kind: "agent-detail",
+              sourceProvider,
+              agentId,
+              agentName,
+            } as const;
+            return {
+              ...current,
+              isOpen: true,
+              activeSurfaceId: surface.id,
+              surfaces: current.surfaces.some((entry) => entry.id === surface.id)
+                ? current.surfaces.map((entry) => (entry.id === surface.id ? surface : entry))
+                : [...current.surfaces, surface],
+            };
           }),
         })),
       openFile: (ref, relativePath, line) =>

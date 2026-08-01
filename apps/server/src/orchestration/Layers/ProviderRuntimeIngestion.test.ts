@@ -606,6 +606,73 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  it("preserves agent objectives, semantic activity, plans, and authoritative start time", () => {
+    const agents = new Map<string, ThreadAgentSnapshot>();
+    const base = {
+      eventId: asEventId("rich-agent-event"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+    } as const;
+
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.started",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("rich-agent-1"),
+        description: "Review telemetry",
+        prompt: "Inspect every agent telemetry path and report gaps",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        activityKind: "reasoning",
+        activityLifecycle: "started",
+      },
+    });
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.progress",
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("rich-agent-1"),
+        description: "Reviewing the adapter",
+        summary: "Reviewing the adapter",
+        activityKind: "reviewing",
+        activityLifecycle: "started",
+        plan: [
+          { step: "Inspect events", status: "completed" },
+          { step: "Verify UI", status: "inProgress" },
+        ],
+      },
+    });
+    foldTaskAgentEvent(agents, {
+      ...base,
+      type: "task.updated",
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: {
+        taskId: RuntimeTaskId.make("rich-agent-1"),
+        status: "running",
+        startTime: "2026-01-01T00:00:01.000Z",
+      },
+    });
+
+    expect(agents.get("rich-agent-1")).toMatchObject({
+      objective: "Inspect every agent telemetry path and report gaps",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      currentActivityKind: "reviewing",
+      currentActivityLifecycle: "started",
+      lastStartedAt: "2026-01-01T00:00:01.000Z",
+      plan: [
+        { step: "Inspect events", status: "completed" },
+        { step: "Verify UI", status: "inProgress" },
+      ],
+    });
+    expect(agents.get("rich-agent-1")?.recentActivity.at(-1)).toMatchObject({
+      kind: "reviewing",
+      lifecycle: "started",
+    });
+  });
+
   it("feeds progress step descriptions to the activity log without renaming the card", () => {
     // Claude sends no `summary` while an agent runs: the step lives in
     // `description` and `lastToolName` is nearly constant. A captured run

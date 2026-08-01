@@ -10,6 +10,13 @@ function surfaces(): RightPanelSurface[] {
     { id: "s-diff", kind: "diff" },
     { id: "s-files", kind: "files" },
     { id: "s-agents", kind: "agents" },
+    {
+      id: "agent:codex:agent-a",
+      kind: "agent-detail",
+      sourceProvider: "codex",
+      agentId: "agent-a",
+      agentName: "Agent A",
+    },
   ] as unknown as RightPanelSurface[];
 }
 
@@ -65,7 +72,7 @@ describe("RightPanelTabs semantics", () => {
   it("keeps exactly one tab in the tab order (roving tabindex)", () => {
     const html = render();
     const tabSegments = html.split('role="tab"').slice(1);
-    expect(tabSegments).toHaveLength(3);
+    expect(tabSegments).toHaveLength(4);
     const selected = tabSegments.filter((segment) =>
       segment.slice(0, 200).includes('aria-selected="true"'),
     );
