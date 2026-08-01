@@ -271,3 +271,54 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+// ---------------------------------------------------------------------------
+// Next-prompt suggestion (composer ghost text)
+// ---------------------------------------------------------------------------
+
+export interface PromptSuggestionPromptInput {
+  conversation: string;
+}
+
+/**
+ * Prompt for predicting what the user would type next after a turn ends.
+ * Mirrors Claude Code-style "prompt suggestions": short, user-voice, silence OK.
+ */
+export function buildPromptSuggestionPrompt(input: PromptSuggestionPromptInput) {
+  const prompt = [
+    "You suggest the next user message in a coding agent chat.",
+    "Return a JSON object with key: suggestion.",
+    "The suggestion must be exactly what the USER would type next into the composer — not what the assistant would say.",
+    "",
+    "Rules:",
+    '- suggestion is either a short next user prompt (2-12 words) OR an empty string "" when nothing is obvious',
+    "- Prefer silence (empty string) over a weak or generic guess",
+    "- Match the user's tone and level of directness",
+    "- Be specific to this conversation (not generic advice)",
+    "- Continue an obvious workflow when clear (tests, commit, continue, implement plan, fix remaining issue)",
+    "- If the assistant asked a yes/no or whether to continue, suggest the natural short reply (e.g. yes, continue)",
+    "- If the user already stated what they will do next, suggest that next request",
+    '- Never use assistant voice (no "I\'ll", "Let me", "I can", "Here\'s")',
+    "- Never end with a question mark",
+    "- Never use markdown, bullets, quotes wrapping the whole suggestion, or multiple sentences",
+    "- Never suggest thanks, praise, or evaluative filler (looks good, great, perfect)",
+    "- Never invent unrelated new work the user did not imply",
+    "",
+    "Examples of good suggestions:",
+    "- run the tests",
+    "- commit this",
+    "- add unit tests for the login form",
+    "- yes",
+    "- continue",
+    "- implement the plan",
+    "",
+    "Recent conversation (oldest first):",
+    limitSection(input.conversation, 12_000),
+  ].join("\n");
+
+  const outputSchema = Schema.Struct({
+    suggestion: Schema.String,
+  });
+
+  return { prompt, outputSchema };
+}

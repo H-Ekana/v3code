@@ -3,6 +3,8 @@ import type { OrchestrationThreadActivity, ThreadAgentSnapshot } from "@t3tools/
 import {
   deriveAgentPanelState,
   deriveLatestAgentSnapshot,
+  formatAgentDisplayName,
+  formatAgentObjective,
   formatAgentTokenCount,
 } from "./threadAgents.ts";
 
@@ -24,6 +26,30 @@ const persistedAgent = {
   recentActivity: [],
   updatedAt: "2026-07-21T03:52:03.936Z",
 };
+
+describe("agent identity presentation", () => {
+  it("cleans only recognized generated display-name wrappers", () => {
+    expect(formatAgentDisplayName("You are transcript_review")).toBe("transcript_review");
+    expect(formatAgentDisplayName("Role: roster-review")).toBe("roster-review");
+    expect(formatAgentDisplayName("Role: ---")).toBe("Role: ---");
+    expect(formatAgentDisplayName("Accessibility review")).toBe("Accessibility review");
+  });
+
+  it("removes a leading role sentence only when it matches the structured name", () => {
+    expect(
+      formatAgentObjective(
+        "transcript_review",
+        "You are transcript-review. Perform a read-only consistency review.",
+      ),
+    ).toBe("Perform a read-only consistency review.");
+    expect(
+      formatAgentObjective("reader_review", "Role: contract_review. Inspect the contract."),
+    ).toBe("Role: contract_review. Inspect the contract.");
+    expect(formatAgentObjective("reader_review", "You are reviewing one focused file.")).toBe(
+      "You are reviewing one focused file.",
+    );
+  });
+});
 
 function activity(
   kind: string,

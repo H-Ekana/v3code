@@ -1,14 +1,26 @@
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { ProviderDriverKind, type ThreadAgentSnapshot } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import AgentsPanel, {
   computeAgentLifecycleAccents,
+  getAgentRosterMaxWidth,
   resolveAgentElapsedTiming,
   resolveAgentExecutionMode,
 } from "./AgentsPanel";
 
 const TIMESTAMP = "2026-07-27T10:00:00.000Z";
+
+describe("agent roster sizing", () => {
+  it("reserves transcript space and clamps the roster width", () => {
+    expect(getAgentRosterMaxWidth(600)).toBe(224);
+    expect(getAgentRosterMaxWidth(900)).toBe(480);
+    expect(getAgentRosterMaxWidth(1400)).toBe(520);
+  });
+});
 
 function agent(
   overrides: Partial<ThreadAgentSnapshot> & Pick<ThreadAgentSnapshot, "agentId" | "provider">,
@@ -350,6 +362,114 @@ describe("AgentCard work kind", () => {
 
     expect(markup).toContain("Reading the diff");
     expect(markup).not.toContain("Inspect");
+  });
+});
+
+describe("AgentCard detail actions", () => {
+  it("opens agent details from the primary action without toggling recent activity", () => {
+    if (typeof globalThis.ResizeObserver !== "function") {
+      globalThis.ResizeObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver;
+    }
+    const snapshot = agent({
+      agentId: "semantic-agent",
+      provider: ProviderDriverKind.make("codex"),
+      name: "Semantic agent",
+      objective: "Implement a richer agent experience",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      currentActivity: "Tracing the activity pipeline",
+      currentActivityKind: "reasoning",
+      currentActivityLifecycle: "started",
+      plan: [
+        { step: "Inspect the roster", status: "completed" },
+        { step: "Wire the detail tab", status: "inProgress" },
+      ],
+      recentActivity: [
+        {
+          at: TIMESTAMP,
+          summary: "A focused command failed",
+          outcome: "error",
+          kind: "command",
+          lifecycle: "completed",
+        },
+      ],
+    });
+    const onOpenAgent = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      act(() => {
+        root.render(<AgentsPanel agents={[snapshot]} mode="embedded" onOpenAgent={onOpenAgent} />);
+      });
+
+      const primaryAction = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open details for Semantic agent"]',
+      );
+      const disclosure = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Show recent activity for Semantic agent"]',
+      );
+      expect(primaryAction).not.toBeNull();
+      expect(disclosure).not.toBeNull();
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+      expect(container.querySelector("#agent-transcript-detail")).toBeNull();
+
+      act(() => primaryAction?.click());
+      expect(onOpenAgent).toHaveBeenCalledOnce();
+      expect(onOpenAgent).toHaveBeenCalledWith(snapshot);
+      expect(primaryAction?.getAttribute("aria-current")).toBe("true");
+      expect(container.querySelector("#agent-transcript-detail")?.textContent).toContain(
+        "Implement a richer agent experience",
+      );
+      expect(
+        container.querySelector('[role="separator"][aria-label="Resize agent roster"]'),
+      ).not.toBeNull();
+      expect(container.textContent).toContain("Back to agents");
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+
+      act(() => disclosure?.click());
+      expect(onOpenAgent).toHaveBeenCalledOnce();
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+      expect(container.textContent).toContain("Assigned: Implement a richer agent experience");
+      expect(container.textContent).toContain("Wire the detail tab");
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it("surfaces semantic mode, plan progress, effort, failures, and visible status", () => {
+    const markup = renderAgent(
+      agent({
+        agentId: "rich-agent",
+        provider: ProviderDriverKind.make("codex"),
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        currentActivityKind: "reasoning",
+        currentActivityLifecycle: "started",
+        plan: [
+          { step: "Inspect", status: "completed" },
+          { step: "Implement", status: "inProgress" },
+        ],
+        recentActivity: [
+          { at: TIMESTAMP, summary: "Command failed", outcome: "error", kind: "command" },
+        ],
+      }),
+    );
+
+    expect(markup).toContain("Reasoning now");
+    expect(markup).toContain("gpt-5.6-sol · medium");
+    expect(markup).toContain("1/2 steps");
+    expect(markup).toContain("1 failed");
+    expect(markup).toContain(">Running</span>");
+    expect(markup).toContain('title="Test agent"');
+    expect(markup).toContain("@container/agent-roster");
+    expect(markup).toContain("@min-[22rem]/agent-roster:inline-flex");
   });
 });
 

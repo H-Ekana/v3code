@@ -69,6 +69,41 @@ describe("AgentsLiveStrip", () => {
     expect(markup).toContain("1 background");
   });
 
+  it("prioritizes attention, failures, and semantic work over aggregate usage", () => {
+    const waiting = {
+      ...LIVE_AGENT,
+      status: "waiting",
+      currentActivityKind: "waiting",
+      currentActivityLifecycle: "started",
+      recentActivity: [
+        {
+          at: TIMESTAMP,
+          summary: "Focused test failed",
+          outcome: "error",
+          kind: "verifying",
+          lifecycle: "completed",
+        },
+      ],
+    } as ThreadAgentSnapshot;
+    const reasoning = {
+      ...LIVE_AGENT,
+      agentId: "agent-2",
+      currentActivityKind: "reasoning",
+      currentActivityLifecycle: "started",
+    } as ThreadAgentSnapshot;
+    const markup = renderToStaticMarkup(
+      <AgentsLiveStrip agents={[waiting, reasoning]} onOpen={() => undefined} />,
+    );
+
+    expect(markup).toContain("1 need input");
+    expect(markup).toContain("1 failed");
+    expect(markup).toContain("Reasoning");
+    expect(markup).toContain("@3xl/agents-live:inline");
+    expect(markup).toContain(
+      'aria-label="2 agents active, 1 need input, 1 failed activities — open agents panel"',
+    );
+  });
+
   it("renders nothing when every agent has settled", () => {
     const settled = { ...LIVE_AGENT, status: "completed" } as ThreadAgentSnapshot;
     const markup = renderToStaticMarkup(

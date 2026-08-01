@@ -941,6 +941,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const readAgentThread: ProviderServiceMethod<"readAgentThread"> = Effect.fn("readAgentThread")(
+    function* (input) {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.readAgentThread",
+        allowRecovery: true,
+      });
+      if (!routed.adapter.readAgentThread) {
+        return yield* new ProviderAdapterRequestError({
+          provider: routed.adapter.provider,
+          method: "thread/read",
+          detail: "This provider does not expose addressable child threads.",
+        });
+      }
+      return yield* routed.adapter.readAgentThread(routed.threadId, input.agentThreadId);
+    },
+  );
+
   const respondToUserInput: ProviderServiceMethod<"respondToUserInput"> = Effect.fn(
     "respondToUserInput",
   )(function* (rawInput) {
@@ -1228,6 +1246,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    readAgentThread,
     rollbackConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

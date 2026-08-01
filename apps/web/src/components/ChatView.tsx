@@ -164,6 +164,7 @@ import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import AgentsPanel from "./AgentsPanel";
+import AgentTranscriptPanel from "./AgentTranscriptPanel";
 import AgentsLiveStrip from "./chat/AgentsLiveStrip";
 import PlanSidebar from "./PlanSidebar";
 import ThreadTerminalDrawer, { clampDrawerHeight } from "./ThreadTerminalDrawer";
@@ -1665,6 +1666,23 @@ function ChatViewContent(props: ChatViewProps) {
   const rightPanelState = useRightPanelStore((state) =>
     selectThreadRightPanelState(state.byThreadKey, activeThreadRef),
   );
+  const legacyAgentDetailSurfaceIds = useMemo(
+    () =>
+      rightPanelState.surfaces.flatMap((surface) =>
+        surface.kind === "agent-detail" ? [surface.id] : [],
+      ),
+    [rightPanelState.surfaces],
+  );
+  useEffect(() => {
+    if (!activeThreadRef || legacyAgentDetailSurfaceIds.length === 0) return;
+    const store = useRightPanelStore.getState();
+    if (!rightPanelState.surfaces.some((surface) => surface.kind === "agents")) {
+      store.open(activeThreadRef, "agents");
+    }
+    for (const surfaceId of legacyAgentDetailSurfaceIds) {
+      store.closeSurface(activeThreadRef, surfaceId);
+    }
+  }, [activeThreadRef, legacyAgentDetailSurfaceIds, rightPanelState.surfaces]);
   const activeRightPanelSurface = useRightPanelStore((state) =>
     selectActiveRightPanelSurface(state.byThreadKey, activeThreadRef),
   );
@@ -2393,13 +2411,13 @@ function ChatViewContent(props: ChatViewProps) {
     const state = deriveAgentPanelState(threadAgents);
     return state.runningCount + state.waitingCount + state.backgroundRunningCount > 0;
   }, [threadAgents]);
-  const pendingApprovals = useMemo(
-    () => derivePendingApprovals(threadActivities),
-    [threadActivities],
-  );
-  // Pending input is a durable interaction, not an arrival-only effect. Derive
-  // it on every render so a selected thread's hydrated activity payload cannot
-  // be hidden behind stale collection identity.
+  // Pending approval and pending input are durable interactions, not
+  // arrival-only effects. Derive both on every render so a selected thread's
+  // hydrated activity payload cannot be hidden behind stale collection
+  // identity. Memoizing on `threadActivities` left the approval card invisible
+  // until a reload even though the server had already published the
+  // `approval.requested` activity.
+  const pendingApprovals = derivePendingApprovals(threadActivities);
   const pendingUserInputs = derivePendingUserInputs(threadActivities);
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingDraftAnswers = useMemo(
@@ -3516,6 +3534,21 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
   }, [activeThreadRef]);
+  const requestAgentFollowUp = useCallback(
+    (agentName: string) => {
+      const prefix = `Follow up with sub-agent ${agentName}: `;
+      const current = promptRef.current;
+      const nextPrompt = current.trim().length > 0 ? `${current}\n\n${prefix}` : prefix;
+      promptRef.current = nextPrompt;
+      setComposerDraftPrompt(composerDraftTarget, nextPrompt);
+      composerRef.current?.resetCursorState({
+        cursor: nextPrompt.length,
+        prompt: nextPrompt,
+      });
+      scheduleComposerFocus();
+    },
+    [composerDraftTarget, scheduleComposerFocus, setComposerDraftPrompt],
+  );
   const autoOpenedV3DemoAgentsRef = useRef<string | null>(null);
   useEffect(() => {
     if (
@@ -4052,6 +4085,7 @@ function ChatViewContent(props: ChatViewProps) {
     isStrictlyAtEndRef.current = isStrictlyAtEnd;
     const decision = resolveTimelineEndSignal({
       isAtEnd,
+      isStrictlyAtEnd,
       previousIsAtEnd: isAtEndRef.current,
       liveFollowArmed:
         liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current,
@@ -6197,7 +6231,31 @@ function ChatViewContent(props: ChatViewProps) {
           />
         </Suspense>
       ) : surface.kind === "agents" ? (
-        <AgentsPanel agents={threadAgents} onOpenScript={openAgentScript} mode="embedded" />
+        <AgentsPanel
+          agents={threadAgents}
+          onOpenScript={openAgentScript}
+          threadRef={activeThreadRef}
+          markdownCwd={gitCwd ?? undefined}
+          mode="embedded"
+          onOpenChanges={addDiffSurface}
+          onFollowUp={requestAgentFollowUp}
+        />
+      ) : surface.kind === "agent-detail" ? (
+        <AgentTranscriptPanel
+          agent={
+            threadAgents.find(
+              (agent) =>
+                agent.provider === surface.sourceProvider && agent.agentId === surface.agentId,
+            ) ?? null
+          }
+          fallbackName={surface.agentName}
+          threadRef={activeThreadRef}
+          sourceProvider={surface.sourceProvider}
+          agentId={surface.agentId}
+          markdownCwd={gitCwd ?? undefined}
+          onOpenChanges={addDiffSurface}
+          onFollowUp={requestAgentFollowUp}
+        />
       ) : surface.kind === "plan" ? (
         <PlanSidebar
           activePlan={activePlan}

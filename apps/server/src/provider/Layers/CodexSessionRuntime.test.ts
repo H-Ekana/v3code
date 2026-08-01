@@ -21,8 +21,10 @@ import {
   isRecoverableThreadResumeError,
   openCodexThread,
   requestCodexThreadCompaction,
+  rememberCollabSpawnMetadata,
   shouldDivertCollabNotification,
   shouldRememberSubAgentActivity,
+  type CollabChildAgent,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -425,6 +427,128 @@ describe("shouldRememberSubAgentActivity", () => {
       }),
       true,
     );
+  });
+});
+
+describe("rememberCollabSpawnMetadata", () => {
+  it("correlates spawn metadata from agentsStates when receiver ids are empty", () => {
+    const children = new Map<string, CollabChildAgent>([
+      ["nested-child", { agentPath: "/root/parent/nested", interrupted: false }],
+    ]);
+
+    const metadata = rememberCollabSpawnMetadata(
+      children,
+      {
+        method: "item/started",
+        params: {
+          startedAtMs: 1_778_000_000_000,
+          threadId: "parent-agent",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-1",
+            tool: "spawnAgent",
+            senderThreadId: "parent-agent",
+            receiverThreadIds: [],
+            agentsStates: { "nested-child": { status: "pendingInit" } },
+            prompt: "Implement the nested slice",
+            model: "gpt-5.6-sol",
+            reasoningEffort: "medium",
+            status: "inProgress",
+          },
+        },
+      },
+      "root-thread",
+    );
+
+    NodeAssert.deepStrictEqual(children.get("nested-child"), {
+      agentPath: "/root/parent/nested",
+      interrupted: false,
+      metadataEmitted: true,
+      prompt: "Implement the nested slice",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      parentTaskId: "parent-agent",
+    });
+    NodeAssert.deepStrictEqual(metadata, [
+      {
+        agentThreadId: "nested-child",
+        agentPath: "/root/parent/nested",
+        interrupted: false,
+        metadataEmitted: true,
+        prompt: "Implement the nested slice",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        parentTaskId: "parent-agent",
+      },
+    ]);
+  });
+
+  it("does not label the canonical root thread as an agent parent", () => {
+    const children = new Map<string, CollabChildAgent>();
+
+    rememberCollabSpawnMetadata(
+      children,
+      {
+        method: "item/started",
+        params: {
+          startedAtMs: 1_778_000_000_000,
+          threadId: "root-thread",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-1",
+            tool: "spawnAgent",
+            senderThreadId: "root-thread",
+            receiverThreadIds: ["child-thread"],
+            agentsStates: {},
+            prompt: "Inspect the adapter",
+            model: null,
+            reasoningEffort: null,
+            status: "inProgress",
+          },
+        },
+      },
+      "root-thread",
+    );
+
+    NodeAssert.deepStrictEqual(children.get("child-thread"), {
+      agentPath: undefined,
+      interrupted: false,
+      metadataEmitted: true,
+      prompt: "Inspect the adapter",
+    });
+  });
+
+  it("registers child ids that appear only on the completed spawn item", () => {
+    const children = new Map<string, CollabChildAgent>();
+    const completedNotification = {
+      method: "item/completed" as const,
+      params: {
+        completedAtMs: 1_778_000_000_100,
+        threadId: "root-thread",
+        turnId: "turn-1",
+        item: {
+          type: "collabAgentToolCall" as const,
+          id: "collab-late",
+          tool: "spawnAgent" as const,
+          senderThreadId: "root-thread",
+          receiverThreadIds: ["late-child"],
+          agentsStates: { "late-child": { status: "pendingInit" as const, message: null } },
+          prompt: "Inspect accessibility",
+          model: "gpt-5.6-terra",
+          reasoningEffort: "low" as const,
+          status: "completed" as const,
+        },
+      },
+    };
+
+    const metadata = rememberCollabSpawnMetadata(children, completedNotification, "root-thread");
+    const duplicate = rememberCollabSpawnMetadata(children, completedNotification, "root-thread");
+
+    NodeAssert.equal(metadata[0]?.agentThreadId, "late-child");
+    NodeAssert.equal(metadata[0]?.prompt, "Inspect accessibility");
+    NodeAssert.deepStrictEqual(duplicate, []);
   });
 });
 

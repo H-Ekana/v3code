@@ -20,7 +20,7 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it, vi } from "@effect/vitest";
+import { describe, it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -45,8 +45,40 @@ import {
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
-import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { deriveCollabAgentName, makeCodexAdapter } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+
+describe("deriveCollabAgentName", () => {
+  it("uses an explicit role name without the Role prefix", () => {
+    NodeAssert.equal(
+      deriveCollabAgentName(
+        "Role: reader_review. Read-only review. Inspect one file.",
+        "child-thread-1",
+      ),
+      "reader_review",
+    );
+  });
+
+  it("uses a generated You are role without the prompt prefix", () => {
+    NodeAssert.equal(
+      deriveCollabAgentName(
+        "You are transcript_review. Perform a read-only consistency review.",
+        "child-thread-1",
+      ),
+      "transcript_review",
+    );
+  });
+
+  it("falls back to a concise first sentence", () => {
+    NodeAssert.equal(
+      deriveCollabAgentName(
+        "Review transcript accessibility. Do not edit files.",
+        "child-thread-1",
+      ),
+      "Review transcript accessibility",
+    );
+  });
+});
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -97,6 +129,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly readAgentThreadImpl = vi.fn(
+    (agentThreadId: string): Promise<CodexThreadSnapshot> =>
+      Promise.resolve({
+        threadId: agentThreadId,
+        turns: [],
+      }),
+  );
+
   public readonly rollbackThreadImpl = vi.fn(
     (_numTurns: number): Promise<CodexThreadSnapshot> =>
       Promise.resolve({
@@ -140,6 +180,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   compactThread = Effect.promise(() => this.compactThreadImpl());
 
   readThread = Effect.promise(() => this.readThreadImpl());
+
+  readAgentThread(agentThreadId: string) {
+    return Effect.promise(() => this.readAgentThreadImpl(agentThreadId));
+  }
 
   rollbackThread(numTurns: number) {
     return Effect.promise(() => this.rollbackThreadImpl(numTurns));
@@ -381,6 +425,26 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       yield* adapter.compactThread(threadId);
 
       NodeAssert.equal(runtime.compactThreadImpl.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("routes an addressable child-thread read through the active parent runtime", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-child-read");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      NodeAssert.ok(adapter.readAgentThread);
+      const snapshot = yield* adapter.readAgentThread(threadId, "child-thread-1");
+
+      NodeAssert.deepStrictEqual(runtime.readAgentThreadImpl.mock.calls[0], ["child-thread-1"]);
+      NodeAssert.equal(snapshot.threadId, "child-thread-1");
     }),
   );
 
@@ -633,6 +697,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         payload: {
           agentThreadId: "child-thread-1",
           agentPath: "/root/marlow",
+          prompt: "Audit the adapter telemetry",
+          model: "gpt-5.6-sol",
+          reasoningEffort: "medium",
+          parentTaskId: "parent-agent-thread",
           method: "turn/started",
           params: { threadId: "child-thread-1", turn: { id: "child-turn-1" } },
         },
@@ -649,6 +717,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       NodeAssert.equal(firstEvent.value.payload.taskId, "child-thread-1");
       NodeAssert.equal(firstEvent.value.payload.name, "marlow");
+      NodeAssert.equal(firstEvent.value.payload.prompt, "Audit the adapter telemetry");
+      NodeAssert.equal(firstEvent.value.payload.model, "gpt-5.6-sol");
+      NodeAssert.equal(firstEvent.value.payload.reasoningEffort, "medium");
+      NodeAssert.equal(firstEvent.value.payload.parentTaskId, "parent-agent-thread");
       NodeAssert.equal(firstEvent.value.payload.timelineBypass, true);
     }),
   );
@@ -702,6 +774,75 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       // The root emission produced nothing, so the real child arrives first.
       NodeAssert.equal(firstEvent.value.payload.taskId, "child-thread-1");
       NodeAssert.equal(firstEvent.value.payload.name, "marlow");
+    }),
+  );
+
+  it.effect("maps late collab spawn metadata to a task.started identity patch", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-metadata"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.750Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/marlow",
+          prompt: "Audit the adapter telemetry",
+          model: "gpt-5.6-sol",
+          reasoningEffort: "medium",
+          method: "subAgent/metadata",
+        },
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.started") return;
+      NodeAssert.equal(firstEvent.value.payload.prompt, "Audit the adapter telemetry");
+      NodeAssert.equal(firstEvent.value.payload.model, "gpt-5.6-sol");
+      NodeAssert.equal(firstEvent.value.payload.reasoningEffort, "medium");
+      NodeAssert.equal(firstEvent.value.payload.timelineBypass, true);
+    }),
+  );
+
+  it.effect("maps a fast child completion receipt to reporting followed by idle", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-state-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.900Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-thread-1",
+          prompt: "Review transcript accessibility.",
+          model: "gpt-5.6-terra",
+          reasoningEffort: "low",
+          method: "subAgent/state",
+          params: { status: "completed", message: "Review complete." },
+        },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events[0]?.type, "task.progress");
+      if (events[0]?.type === "task.progress") {
+        NodeAssert.equal(events[0].payload.summary, "Review complete.");
+        NodeAssert.equal(events[0].payload.name, "Review transcript accessibility");
+      }
+      NodeAssert.equal(events[1]?.type, "task.updated");
+      if (events[1]?.type === "task.updated") {
+        NodeAssert.equal(events[1].payload.status, "idle");
+      }
     }),
   );
 
@@ -790,6 +931,178 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       const usage = firstEvent.value.payload.usage as { totalTokens?: number } | undefined;
       NodeAssert.equal(usage?.totalTokens, 4200);
+    }),
+  );
+
+  it.effect("maps collab child plan updates to structured planning progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-plan"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/marlow",
+          method: "turn/plan/updated",
+          params: {
+            threadId: "child-thread-1",
+            turnId: "child-turn-1",
+            explanation: "Implementation is ready for verification",
+            plan: [
+              { step: "Inspect", status: "completed" },
+              { step: "Run focused tests", status: "inProgress" },
+            ],
+          },
+        },
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.progress") return;
+      NodeAssert.equal(firstEvent.value.payload.activityKind, "planning");
+      NodeAssert.equal(firstEvent.value.payload.activityLifecycle, "completed");
+      NodeAssert.deepStrictEqual(firstEvent.value.payload.plan, [
+        { step: "Inspect", status: "completed" },
+        { step: "Run focused tests", status: "inProgress" },
+      ]);
+      NodeAssert.equal(firstEvent.value.payload.timelineBypass, true);
+    }),
+  );
+
+  it.effect("maps collab child command lifecycle to semantic activity and exact outcome", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-command"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:03.000Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/marlow",
+          method: "item/completed",
+          params: {
+            completedAtMs: 1_778_000_000_000,
+            threadId: "child-thread-1",
+            turnId: "child-turn-1",
+            item: {
+              type: "commandExecution",
+              id: "command-1",
+              command: "vp test run CodexAdapter.test.ts",
+              commandActions: [],
+              cwd: "/tmp/project",
+              durationMs: 42,
+              exitCode: 1,
+              aggregatedOutput: "one test failed",
+              processId: null,
+              status: "failed",
+            },
+          },
+        },
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.progress") return;
+      NodeAssert.equal(firstEvent.value.payload.description, "vp test run CodexAdapter.test.ts");
+      NodeAssert.equal(firstEvent.value.payload.activityKind, "verifying");
+      NodeAssert.equal(firstEvent.value.payload.activityLifecycle, "completed");
+      NodeAssert.equal(firstEvent.value.payload.outcome, "error");
+      NodeAssert.equal(firstEvent.value.payload.timelineBypass, true);
+    }),
+  );
+
+  it.effect("uses provider-exposed reasoning summaries for started reasoning activity", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-reasoning"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:03.000Z",
+        method: "collab/agentActivity",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/marlow",
+          method: "item/started",
+          params: {
+            startedAtMs: 1_778_000_000_000,
+            threadId: "child-thread-1",
+            turnId: "child-turn-1",
+            item: {
+              type: "reasoning",
+              id: "reasoning-1",
+              summary: ["Inspecting the adapter boundary"],
+              content: ["internal reasoning must not be surfaced"],
+            },
+          },
+        },
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.progress") return;
+      NodeAssert.equal(firstEvent.value.payload.description, "Inspecting the adapter boundary");
+      NodeAssert.doesNotMatch(firstEvent.value.payload.description, /internal reasoning/);
+      NodeAssert.equal(firstEvent.value.payload.activityKind, "reasoning");
+      NodeAssert.equal(firstEvent.value.payload.activityLifecycle, "started");
+      NodeAssert.equal(firstEvent.value.payload.outcome, undefined);
+    }),
+  );
+
+  it.effect("marks approval waits as started and resolved waiting activity", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      for (const [id, activeFlags] of [
+        ["evt-collab-waiting", ["waitingOnApproval"]],
+        ["evt-collab-resumed", []],
+      ] as const) {
+        yield* runtime.emit({
+          id: asEventId(id),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:04.000Z",
+          method: "collab/agentActivity",
+          threadId: asThreadId("thread-1"),
+          payload: {
+            agentThreadId: "child-thread-1",
+            agentPath: "/root/marlow",
+            method: "thread/status/changed",
+            params: {
+              threadId: "child-thread-1",
+              status: { type: "active", activeFlags },
+            },
+          },
+        });
+      }
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events[0]?.type, "task.updated");
+      NodeAssert.equal(events[1]?.type, "task.updated");
+      if (events[0]?.type !== "task.updated" || events[1]?.type !== "task.updated") return;
+      NodeAssert.equal(events[0].payload.status, "waiting");
+      NodeAssert.equal(events[0].payload.activityKind, "waiting");
+      NodeAssert.equal(events[0].payload.activityLifecycle, "started");
+      NodeAssert.equal(events[1].payload.status, "running");
+      NodeAssert.equal(events[1].payload.activityLifecycle, "completed");
     }),
   );
 

@@ -273,7 +273,20 @@ function itemDetail(itemType: CanonicalItemType, item: CodexLifecycleItem): stri
   const itemRecord = item as Record<string, unknown>;
   const action = itemRecord.action as Record<string, unknown> | undefined;
   const actionQueries = Array.isArray(action?.queries) ? action.queries : [];
+  const reasoningSummary =
+    item.type === "reasoning"
+      ? item.summary
+          ?.map((part) => trimText(part))
+          .filter((part) => part !== undefined)
+          .join("\n")
+      : undefined;
+  const changedFiles =
+    item.type === "fileChange"
+      ? item.changes.map((change) => trimText(change.path)).filter((path) => path !== undefined)
+      : [];
   const candidates = [
+    reasoningSummary,
+    changedFiles.length > 0 ? changedFiles.join(", ") : undefined,
     ...(itemType === "web_search"
       ? [itemRecord.query, action?.query, ...actionQueries, action?.pattern, action?.url]
       : []),
@@ -291,6 +304,86 @@ function itemDetail(itemType: CanonicalItemType, item: CodexLifecycleItem): stri
     return trimmed;
   }
   return undefined;
+}
+
+type TaskActivityKind =
+  | "reasoning"
+  | "planning"
+  | "investigating"
+  | "editing"
+  | "command"
+  | "verifying"
+  | "reviewing"
+  | "delegating"
+  | "reporting"
+  | "waiting"
+  | "other";
+
+function commandLooksLikeVerification(command: string): boolean {
+  return /(?:^|[\s;&|])(?:test|check|lint|typecheck|build)(?:$|[\s;&|:])/i.test(command);
+}
+
+function taskActivityKind(itemType: CanonicalItemType, item: CodexLifecycleItem): TaskActivityKind {
+  switch (itemType) {
+    case "reasoning":
+      return "reasoning";
+    case "plan":
+      return "planning";
+    case "file_change":
+      return "editing";
+    case "command_execution":
+      return item.type === "commandExecution" && commandLooksLikeVerification(item.command)
+        ? "verifying"
+        : "command";
+    case "web_search":
+    case "image_view":
+      return "investigating";
+    case "review_entered":
+    case "review_exited":
+      return "reviewing";
+    case "collab_agent_tool_call":
+      return "delegating";
+    case "assistant_message":
+      return "reporting";
+    default:
+      return "other";
+  }
+}
+
+function taskActivityOutcome(
+  item: CodexLifecycleItem,
+  lifecycle: "started" | "completed",
+): "ok" | "error" | undefined {
+  if (lifecycle !== "completed") return undefined;
+  switch (item.type) {
+    case "commandExecution":
+      if (
+        item.status === "failed" ||
+        item.status === "declined" ||
+        (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0)
+      ) {
+        return "error";
+      }
+      return item.status === "completed" ? "ok" : undefined;
+    case "fileChange":
+      return item.status === "completed" ? "ok" : item.status === "failed" ? "error" : undefined;
+    case "mcpToolCall":
+      return item.error !== null && item.error !== undefined
+        ? "error"
+        : item.status === "completed"
+          ? "ok"
+          : item.status === "failed"
+            ? "error"
+            : undefined;
+    case "dynamicToolCall":
+      return item.success === true
+        ? "ok"
+        : item.success === false || item.status === "failed"
+          ? "error"
+          : undefined;
+    default:
+      return undefined;
+  }
 }
 
 function toRequestTypeFromMethod(method: string): CanonicalRequestType {
@@ -516,6 +609,10 @@ function mapCollabAgentActivity(
       ? (event.payload as {
           agentThreadId?: unknown;
           agentPath?: unknown;
+          prompt?: unknown;
+          model?: unknown;
+          reasoningEffort?: unknown;
+          parentTaskId?: unknown;
           method?: unknown;
           params?: unknown;
         })
@@ -535,23 +632,36 @@ function mapCollabAgentActivity(
     return [];
   }
   const nickname = agentPathSegments.at(-1);
+  const prompt = typeof wrapper.prompt === "string" ? trimText(wrapper.prompt) : undefined;
+  const model = typeof wrapper.model === "string" ? trimText(wrapper.model) : undefined;
+  const reasoningEffort =
+    typeof wrapper.reasoningEffort === "string" ? trimText(wrapper.reasoningEffort) : undefined;
+  const parentTaskId =
+    typeof wrapper.parentTaskId === "string" ? RuntimeTaskId.make(wrapper.parentTaskId) : undefined;
   const inner: ProviderEvent = {
     ...event,
     method: wrapper.method,
     ...(wrapper.params !== undefined ? { payload: wrapper.params } : {}),
   };
+  const fallbackName = deriveCollabAgentName(prompt, agentThreadId);
   const base = {
     ...runtimeEventBase(event, canonicalThreadId),
     payload: {
       taskId: RuntimeTaskId.make(agentThreadId),
-      description: nickname ?? agentThreadId,
-      name: nickname ?? agentThreadId,
+      description: nickname ?? fallbackName,
+      name: nickname ?? fallbackName,
       taskType: "local_agent",
+      ...(prompt ? { prompt } : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(parentTaskId ? { parentTaskId } : {}),
       timelineBypass: true,
     },
   } as const;
 
   switch (wrapper.method) {
+    case "subAgent/metadata":
+      return [{ ...base, type: "task.started", payload: { ...base.payload } }];
     case "turn/started":
       return [{ ...base, type: "task.started", payload: { ...base.payload } }];
     case "turn/completed": {
@@ -598,6 +708,70 @@ function mapCollabAgentActivity(
           payload: { taskId: base.payload.taskId, status: "stopped", timelineBypass: true },
         },
       ];
+    case "subAgent/state": {
+      const state =
+        wrapper.params !== null && typeof wrapper.params === "object"
+          ? (wrapper.params as { readonly status?: unknown; readonly message?: unknown })
+          : undefined;
+      const status = state?.status;
+      const message = typeof state?.message === "string" ? trimText(state.message) : undefined;
+      if (status === "completed") {
+        return [
+          ...(message
+            ? [
+                {
+                  ...base,
+                  type: "task.progress" as const,
+                  payload: {
+                    ...base.payload,
+                    description: message,
+                    summary: message,
+                    activityKind: "reporting" as const,
+                    activityLifecycle: "completed" as const,
+                  },
+                },
+              ]
+            : []),
+          {
+            ...base,
+            type: "task.updated" as const,
+            payload: { ...base.payload, status: "idle" as const },
+          },
+        ];
+      }
+      if (status === "errored" || status === "notFound") {
+        return [
+          {
+            ...base,
+            type: "task.completed",
+            payload: {
+              ...base.payload,
+              status: "failed",
+              ...(message ? { summary: message } : {}),
+            },
+          },
+        ];
+      }
+      if (status === "interrupted" || status === "shutdown") {
+        return [
+          {
+            ...base,
+            type: "task.completed",
+            payload: { ...base.payload, status: "stopped" },
+          },
+        ];
+      }
+      if (status === "pendingInit" || status === "running") {
+        return [
+          {
+            ...base,
+            type: "task.updated",
+            payload: { ...base.payload, status: status === "pendingInit" ? "pending" : "running" },
+          },
+        ];
+      }
+      return [];
+    }
     case "thread/status/changed": {
       const payload = readPayload(
         EffectCodexSchema.V2ThreadStatusChangedNotification,
@@ -608,13 +782,16 @@ function mapCollabAgentActivity(
       if (status.type === "active") {
         // Flags (waitingOnApproval/waitingOnUserInput) mean blocked; active
         // with no flags means the wait resolved and the agent is running again.
+        const isWaiting = status.activeFlags.length > 0;
         return [
           {
             ...base,
             type: "task.updated",
             payload: {
               taskId: base.payload.taskId,
-              status: status.activeFlags.length > 0 ? "waiting" : "running",
+              status: isWaiting ? "waiting" : "running",
+              activityKind: "waiting",
+              activityLifecycle: isWaiting ? "started" : "completed",
               timelineBypass: true,
             },
           },
@@ -672,6 +849,31 @@ function mapCollabAgentActivity(
         },
       ];
     }
+    case "turn/plan/updated": {
+      const payload = readPayload(EffectCodexSchema.V2TurnPlanUpdatedNotification, inner.payload);
+      if (!payload) return [];
+      const explanation = trimText(payload.explanation);
+      return [
+        {
+          ...base,
+          type: "task.progress",
+          payload: {
+            ...base.payload,
+            description: explanation ?? "Updated plan",
+            ...(explanation ? { summary: explanation } : {}),
+            activityKind: "planning",
+            activityLifecycle: "completed",
+            plan: payload.plan.map((step) => ({
+              step: trimText(step.step) ?? "step",
+              status:
+                step.status === "completed" || step.status === "inProgress"
+                  ? step.status
+                  : "pending",
+            })),
+          },
+        },
+      ];
+    }
     case "item/started":
     case "item/completed": {
       const payload =
@@ -684,6 +886,9 @@ function mapCollabAgentActivity(
       const detail = itemDetail(itemType, item);
       const summary = detail ?? title;
       if (!summary) return [];
+      const activityLifecycle =
+        wrapper.method === "item/started" ? ("started" as const) : ("completed" as const);
+      const outcome = taskActivityOutcome(item, activityLifecycle);
       return [
         {
           ...base,
@@ -693,6 +898,9 @@ function mapCollabAgentActivity(
             description: summary,
             summary,
             ...(title ? { lastToolName: title } : {}),
+            activityKind: taskActivityKind(itemType, item),
+            activityLifecycle,
+            ...(outcome ? { outcome } : {}),
           },
         },
       ];
@@ -700,6 +908,17 @@ function mapCollabAgentActivity(
     default:
       return [];
   }
+}
+
+export function deriveCollabAgentName(prompt: string | undefined, agentThreadId: string): string {
+  const roleName = prompt?.match(/^\s*(?:Role:\s*|You are\s+(?:the\s+)?)([\w-]+)/i)?.[1];
+  if (roleName) return roleName;
+  return (
+    prompt
+      ?.split(/[.!?\n]/, 1)[0]
+      ?.trim()
+      .slice(0, 48) || agentThreadId
+  );
 }
 
 function mapToRuntimeEvents(
@@ -1836,6 +2055,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
 
+  const readAgentThread: NonNullable<CodexAdapterShape["readAgentThread"]> = (
+    threadId,
+    agentThreadId,
+  ) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) => session.runtime.readAgentThread(agentThreadId)),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/read", cause),
+      ),
+      Effect.map((snapshot) => ({
+        threadId: ThreadId.make(snapshot.threadId),
+        turns: snapshot.turns,
+      })),
+    );
+
   const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns) => {
     if (!Number.isInteger(numTurns) || numTurns < 1) {
       return Effect.fail(
@@ -1948,6 +2184,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     compactThread,
     readThread,
+    readAgentThread,
     rollbackThread,
     respondToRequest,
     respondToUserInput,

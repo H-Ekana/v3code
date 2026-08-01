@@ -112,6 +112,12 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
+  /** Read an addressable child thread owned by an active parent session. */
+  readonly readAgentThread?: (
+    threadId: ThreadId,
+    agentThreadId: string,
+  ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
   /**
    * Roll back a provider thread by N turns.
    */

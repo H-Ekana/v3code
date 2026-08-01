@@ -139,6 +139,9 @@ export interface CodexSessionRuntimeShape {
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  readonly readAgentThread: (
+    agentThreadId: string,
+  ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
@@ -610,9 +613,18 @@ function readRouteFields(notification: CodexServerNotification): {
   }
 }
 
-interface CollabChildAgent {
+export interface CollabChildAgent {
   readonly agentPath: string | undefined;
   readonly interrupted: boolean;
+  readonly metadataEmitted?: boolean;
+  readonly prompt?: string;
+  readonly model?: string;
+  readonly reasoningEffort?: string;
+  readonly parentTaskId?: string;
+}
+
+interface CollabSpawnMetadata extends CollabChildAgent {
+  readonly agentThreadId: string;
 }
 
 export function shouldRememberSubAgentActivity(input: {
@@ -660,10 +672,70 @@ function rememberSubAgentActivity(
   }
   const interrupted = item.kind === "interrupted";
   const previous = childAgents.get(item.agentThreadId);
-  childAgents.set(item.agentThreadId, { agentPath: item.agentPath, interrupted });
+  childAgents.set(item.agentThreadId, {
+    ...previous,
+    agentPath: item.agentPath,
+    interrupted,
+  });
   return interrupted && !previous?.interrupted
     ? { agentThreadId: item.agentThreadId, agentPath: item.agentPath }
     : undefined;
+}
+
+export function rememberCollabSpawnMetadata(
+  childAgents: Map<string, CollabChildAgent>,
+  notification: CodexServerNotification,
+  providerThreadId: string | undefined,
+): ReadonlyArray<CollabSpawnMetadata> {
+  if (notification.method !== "item/started" && notification.method !== "item/completed") {
+    return [];
+  }
+  const item = notification.params.item;
+  if (item.type !== "collabAgentToolCall" || item.tool !== "spawnAgent") return [];
+
+  const childThreadIds = new Set([...item.receiverThreadIds, ...Object.keys(item.agentsStates)]);
+  childThreadIds.delete(item.senderThreadId);
+
+  const prompt = item.prompt?.trim() || undefined;
+  const model = item.model?.trim() || undefined;
+  const reasoningEffort = item.reasoningEffort?.trim() || undefined;
+  const parentTaskId =
+    providerThreadId !== undefined && item.senderThreadId !== providerThreadId
+      ? item.senderThreadId
+      : undefined;
+
+  return Array.from(childThreadIds).flatMap((childThreadId) => {
+    const previous = childAgents.get(childThreadId);
+    const metadata = {
+      agentPath: previous?.agentPath,
+      interrupted: previous?.interrupted ?? false,
+      metadataEmitted: true,
+      ...(prompt ? { prompt } : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(parentTaskId ? { parentTaskId } : {}),
+    };
+    childAgents.set(childThreadId, metadata);
+    return previous?.metadataEmitted ? [] : [{ agentThreadId: childThreadId, ...metadata }];
+  });
+}
+
+function collabAgentStateUpdates(
+  childAgents: Map<string, CollabChildAgent>,
+  notification: CodexServerNotification,
+): ReadonlyArray<{
+  readonly agentThreadId: string;
+  readonly state: { readonly status: string; readonly message?: string | null };
+  readonly metadata: CollabChildAgent | undefined;
+}> {
+  if (notification.method !== "item/started" && notification.method !== "item/completed") return [];
+  const item = notification.params.item;
+  if (item.type !== "collabAgentToolCall") return [];
+  return Object.entries(item.agentsStates).map(([agentThreadId, state]) => ({
+    agentThreadId,
+    state,
+    metadata: childAgents.get(agentThreadId),
+  }));
 }
 
 /** Synthetic method carrying an intercepted child-thread notification. */
@@ -936,6 +1008,43 @@ export const makeCodexSessionRuntime = (
           : undefined;
 
         rememberCollabReceiverTurns(collabReceiverTurns, notification, route.turnId);
+        const spawnedAgents = rememberCollabSpawnMetadata(
+          collabChildAgents,
+          notification,
+          providerThreadId,
+        );
+        for (const spawnedAgent of spawnedAgents) {
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: COLLAB_AGENT_ACTIVITY_METHOD,
+            payload: {
+              ...spawnedAgent,
+              method: "subAgent/metadata",
+            },
+          });
+        }
+        for (const update of collabAgentStateUpdates(collabChildAgents, notification)) {
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: COLLAB_AGENT_ACTIVITY_METHOD,
+            payload: {
+              agentThreadId: update.agentThreadId,
+              ...(update.metadata?.agentPath ? { agentPath: update.metadata.agentPath } : {}),
+              ...(update.metadata?.prompt ? { prompt: update.metadata.prompt } : {}),
+              ...(update.metadata?.model ? { model: update.metadata.model } : {}),
+              ...(update.metadata?.reasoningEffort
+                ? { reasoningEffort: update.metadata.reasoningEffort }
+                : {}),
+              ...(update.metadata?.parentTaskId
+                ? { parentTaskId: update.metadata.parentTaskId }
+                : {}),
+              method: "subAgent/state",
+              params: update.state,
+            },
+          });
+        }
         const interruption = rememberSubAgentActivity(
           collabChildAgents,
           notification,
@@ -998,6 +1107,12 @@ export const makeCodexSessionRuntime = (
             payload: {
               agentThreadId: notificationThreadId,
               ...(knownChild?.agentPath ? { agentPath: knownChild.agentPath } : {}),
+              ...(knownChild?.prompt ? { prompt: knownChild.prompt } : {}),
+              ...(knownChild?.model ? { model: knownChild.model } : {}),
+              ...(knownChild?.reasoningEffort
+                ? { reasoningEffort: knownChild.reasoningEffort }
+                : {}),
+              ...(knownChild?.parentTaskId ? { parentTaskId: knownChild.parentTaskId } : {}),
               method: notification.method,
               params: payload,
             },
@@ -1505,6 +1620,14 @@ export const makeCodexSessionRuntime = (
         });
         return parseThreadSnapshot(response);
       }),
+      readAgentThread: (agentThreadId) =>
+        Effect.gen(function* () {
+          const response = yield* client.request("thread/read", {
+            threadId: agentThreadId,
+            includeTurns: true,
+          });
+          return parseThreadSnapshot(response);
+        }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;

@@ -313,6 +313,9 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
     );
+    const generatePromptSuggestion = vi.fn<TextGenerationShape["generatePromptSuggestion"]>((_) =>
+      Effect.succeed({ suggestion: null }),
+    );
     const providerSnapshots = [
       {
         instanceId: modelSelection.instanceId,
@@ -422,6 +425,7 @@ describe("ProviderCommandReactor", () => {
         Layer.mock(TextGeneration, {
           generateBranchName,
           generateThreadTitle,
+          generatePromptSuggestion,
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
@@ -2891,6 +2895,68 @@ describe("ProviderCommandReactor", () => {
         (activity.payload as Record<string, unknown>).requestId === "approval-request-1",
     );
     expect(resolvedActivity).toBeUndefined();
+  });
+
+  it("marks an approval stale when no provider session is bound to the thread", async () => {
+    // Regression: the bespoke "No active provider session" detail did not match
+    // the stale-request checks in the decider and the clients, so approving a
+    // request whose session had gone left it open forever — the thread could
+    // never be settled or snoozed again.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-approval-requested-no-session"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-approval-requested-no-session"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Approval requested",
+          payload: {
+            requestId: "approval-request-no-session",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.approval.respond",
+        commandId: CommandId.make("cmd-approval-respond-no-session"),
+        threadId: ThreadId.make("thread-1"),
+        requestId: asApprovalRequestId("approval-request-no-session"),
+        decision: "accept",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      if (!thread) return false;
+      return thread.activities.some(
+        (activity) => activity.kind === "provider.approval.respond.failed",
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const failureActivity = thread?.activities.find(
+      (activity) => activity.kind === "provider.approval.respond.failed",
+    );
+    expect(failureActivity?.payload).toMatchObject({
+      requestId: "approval-request-no-session",
+      detail: expect.stringContaining(
+        "Stale pending approval request: approval-request-no-session",
+      ),
+    });
+    expect(harness.respondToRequest.mock.calls.length).toBe(0);
   });
 
   it("surfaces non-resumable provider user-input callbacks as stale failures", async () => {

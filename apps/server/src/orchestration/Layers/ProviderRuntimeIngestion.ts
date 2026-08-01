@@ -153,6 +153,21 @@ function workflowPhasesEqual(
   );
 }
 
+function agentPlanEqual(
+  left: ThreadAgentSnapshot["plan"],
+  right: ThreadAgentSnapshot["plan"],
+): boolean {
+  return (
+    left === right ||
+    (left !== undefined &&
+      right !== undefined &&
+      left.length === right.length &&
+      left.every(
+        (step, index) => step.step === right[index]?.step && step.status === right[index]?.status,
+      ))
+  );
+}
+
 const AGENT_TEXT_LIMIT = 180;
 
 /** Roster snapshots duplicate these strings on every append — keep them small. */
@@ -174,6 +189,9 @@ export function foldTaskAgentEvent(
   const summary = "summary" in payload ? payload.summary : undefined;
   const nextUsage = "usage" in payload ? taskUsage(payload.usage) : undefined;
   const lastToolName = "lastToolName" in payload ? payload.lastToolName : undefined;
+  const objective = payload.prompt;
+  const activityKind = payload.activityKind ?? previous?.currentActivityKind;
+  const activityLifecycle = payload.activityLifecycle ?? previous?.currentActivityLifecycle;
   // A progress `description` is the agent's *current step* ("Reading
   // ClaudeAdapter.ts", "Running Find companion log emitters"), not its identity.
   // Claude sends no `summary` while running, so without this the feed falls all
@@ -200,9 +218,15 @@ export function foldTaskAgentEvent(
   // from the stored (truncated) one on every event and append a duplicate row
   // per tick. A tool switch under an unchanged step is not its own entry — the
   // card renders `lastToolName` separately.
-  const activityChanged =
-    boundedActivityLabel !== undefined && boundedActivityLabel !== previous?.currentActivity;
   const outcome = "outcome" in payload ? payload.outcome : undefined;
+  const previousActivity = previous?.recentActivity.at(-1);
+  const activityChanged =
+    boundedActivityLabel !== undefined &&
+    (boundedActivityLabel !== previous?.currentActivity ||
+      (payload.activityKind !== undefined && payload.activityKind !== previousActivity?.kind) ||
+      (payload.activityLifecycle !== undefined &&
+        payload.activityLifecycle !== previousActivity?.lifecycle) ||
+      (outcome !== undefined && outcome !== previousActivity?.outcome));
   const recentActivity =
     activityChanged && boundedActivityLabel !== undefined
       ? [
@@ -213,6 +237,8 @@ export function foldTaskAgentEvent(
             // text, and each entry is duplicated into every roster snapshot.
             summary: boundedActivityLabel,
             ...(outcome ? { outcome } : {}),
+            ...(payload.activityKind ? { kind: payload.activityKind } : {}),
+            ...(payload.activityLifecycle ? { lifecycle: payload.activityLifecycle } : {}),
           },
         ].slice(-THREAD_AGENT_RECENT_ACTIVITY_LIMIT)
       : (previous?.recentActivity ?? []);
@@ -224,6 +250,7 @@ export function foldTaskAgentEvent(
   const reactivated =
     wasSettled && status !== "idle" && !THREAD_AGENT_TERMINAL_STATUSES.has(status);
   const explicitEndTime = event.type === "task.updated" ? event.payload.endTime : undefined;
+  const explicitStartTime = event.type === "task.updated" ? event.payload.startTime : undefined;
   const terminal = THREAD_AGENT_TERMINAL_STATUSES.has(status);
   // Re-derive kind whenever this event carries a taskType/parent — a child
   // registered from an early notification (before its parent linkage arrived)
@@ -264,8 +291,14 @@ export function foldTaskAgentEvent(
       payload.taskId,
     ...(agentType ? { agentType } : {}),
     ...((payload.model ?? previous?.model) ? { model: payload.model ?? previous?.model } : {}),
+    ...((objective ?? previous?.objective) ? { objective: objective ?? previous?.objective } : {}),
+    ...((payload.reasoningEffort ?? previous?.reasoningEffort)
+      ? { reasoningEffort: payload.reasoningEffort ?? previous?.reasoningEffort }
+      : {}),
     status,
     ...(currentActivity ? { currentActivity } : {}),
+    ...(!settledNow && activityKind ? { currentActivityKind: activityKind } : {}),
+    ...(!settledNow && activityLifecycle ? { currentActivityLifecycle: activityLifecycle } : {}),
     ...((lastToolName ?? previous?.lastToolName)
       ? { lastToolName: lastToolName ?? previous?.lastToolName }
       : {}),
@@ -276,9 +309,11 @@ export function foldTaskAgentEvent(
       : {}),
     firstStartedAt: previous?.firstStartedAt ?? event.createdAt,
     // Reset per activation so live timers exclude idle gaps between runs.
-    lastStartedAt: reactivated
-      ? event.createdAt
-      : (previous?.lastStartedAt ?? previous?.firstStartedAt ?? event.createdAt),
+    lastStartedAt:
+      explicitStartTime ??
+      (reactivated
+        ? event.createdAt
+        : (previous?.lastStartedAt ?? previous?.firstStartedAt ?? event.createdAt)),
     lastActivityAt: event.createdAt,
     // Prefer the provider's explicit end time, then an already-recorded one;
     // only stamp ingestion time on the FIRST terminal transition so duplicate
@@ -303,6 +338,7 @@ export function foldTaskAgentEvent(
       ? { phaseTitle: payload.phaseTitle ?? previous?.phaseTitle }
       : {}),
     ...((payload.phases ?? previous?.phases) ? { phases: payload.phases ?? previous?.phases } : {}),
+    ...((payload.plan ?? previous?.plan) ? { plan: payload.plan ?? previous?.plan } : {}),
     ...((payload.scriptPath ?? previous?.scriptPath)
       ? { scriptPath: payload.scriptPath ?? previous?.scriptPath }
       : {}),
@@ -338,10 +374,15 @@ export function foldTaskAgentEvent(
     previous.name !== next.name ||
     previous.agentType !== next.agentType ||
     previous.model !== next.model ||
+    previous.objective !== next.objective ||
+    previous.reasoningEffort !== next.reasoningEffort ||
     previous.phaseIndex !== next.phaseIndex ||
     previous.phaseTitle !== next.phaseTitle ||
     !workflowPhasesEqual(previous.phases, next.phases) ||
+    !agentPlanEqual(previous.plan, next.plan) ||
     previous.currentActivity !== next.currentActivity ||
+    previous.currentActivityKind !== next.currentActivityKind ||
+    previous.currentActivityLifecycle !== next.currentActivityLifecycle ||
     activityChanged ||
     usageStepChanged ||
     previous.endedAt !== next.endedAt ||

@@ -1,10 +1,20 @@
-import { createContext, memo, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  memo,
+  type CSSProperties,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   THREAD_AGENT_COLLAPSED_ACTIVITY_COUNT,
+  type ScopedThreadRef,
   type ThreadAgentSnapshot,
 } from "@t3tools/contracts";
 import {
   deriveAgentPanelState,
+  formatAgentDisplayName,
   formatAgentTokenCount,
   isDetachedCompanionAgent,
   isTerminalAgentStatus,
@@ -12,7 +22,14 @@ import {
   type AgentPanelPhase,
   type AgentPanelRow,
 } from "@t3tools/client-runtime/state/thread-agents";
-import { BotIcon, BracesIcon, CheckIcon, ChevronRightIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  BotIcon,
+  BracesIcon,
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+} from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Badge } from "./ui/badge";
 import { ScrollArea } from "./ui/scroll-area";
@@ -21,17 +38,51 @@ import { formatTimestamp, parseTimestampDate } from "../timestampFormat";
 import { useClientSettings } from "../hooks/useSettings";
 import { formatProviderDisplayName } from "../lib/contextWindow";
 import { getStatusPresentation, type StatusAxes } from "../lib/statusPresentation";
+import { useResizableWidth } from "../hooks/useResizableWidth";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
+import AgentTranscriptPanel from "./AgentTranscriptPanel";
+import { RightPanelResizeHandle } from "./preview/RightPanelResizeHandle";
 
 interface AgentsPanelProps {
   agents: ReadonlyArray<ThreadAgentSnapshot>;
   onOpenScript?: (scriptPath: string) => void;
+  onOpenAgent?: (agent: ThreadAgentSnapshot) => void;
+  onOpenChanges?: (() => void) | undefined;
+  onFollowUp?: ((agentName: string) => void) | undefined;
+  threadRef?: ScopedThreadRef;
+  markdownCwd?: string | undefined;
   mode?: "sheet" | "sidebar" | "embedded";
+}
+
+interface AgentSelection {
+  key: string;
+  sourceProvider: ThreadAgentSnapshot["provider"];
+  agentId: ThreadAgentSnapshot["agentId"];
+  name: string;
+}
+
+const AgentSelectionContext = createContext<string | null>(null);
+
+function agentSelectionKey(agent: ThreadAgentSnapshot): string {
+  return `${agent.provider}:${agent.agentId}`;
+}
+
+const AGENT_ROSTER_WIDTH_STORAGE_KEY = "t3code:agent-roster-width";
+const AGENT_ROSTER_DEFAULT_WIDTH = 288;
+const AGENT_ROSTER_MIN_WIDTH = 224;
+const AGENT_ROSTER_MAX_WIDTH = 520;
+const AGENT_TRANSCRIPT_MIN_WIDTH = 420;
+
+export function getAgentRosterMaxWidth(containerWidth: number): number {
+  return Math.max(
+    AGENT_ROSTER_MIN_WIDTH,
+    Math.min(AGENT_ROSTER_MAX_WIDTH, Math.floor(containerWidth - AGENT_TRANSCRIPT_MIN_WIDTH)),
+  );
 }
 
 /**
  * Agent lifecycle expressed on the four shared axes. The panel keeps its own
- * domain labels below ("Idle · resumable" says more here than the shared
+ * domain labels below ("Finished · resumable" says more here than the shared
  * "Ready to resume"), but colour and motion come from `statusPresentation` so
  * an agent card and a thread row cannot disagree about what running looks like.
  */
@@ -81,11 +132,49 @@ const STATUS_LABEL: Record<ThreadAgentSnapshot["status"], string> = {
   pending: "Queued",
   running: "Running",
   waiting: "Waiting",
-  idle: "Idle · resumable",
+  idle: "Finished · resumable",
   completed: "Completed",
   failed: "Failed",
   stopped: "Stopped",
 };
+
+const ACTIVITY_KIND_LABEL = {
+  reasoning: "Reasoning",
+  planning: "Planning",
+  investigating: "Investigating",
+  editing: "Editing",
+  command: "Running command",
+  verifying: "Verifying",
+  reviewing: "Reviewing",
+  delegating: "Delegating",
+  reporting: "Reporting",
+  waiting: "Waiting",
+  other: "Working",
+} as const;
+
+function formatActivityKind(
+  kind: ThreadAgentSnapshot["currentActivityKind"],
+  lifecycle?: ThreadAgentSnapshot["currentActivityLifecycle"],
+): string | null {
+  if (!kind) return null;
+  const label = ACTIVITY_KIND_LABEL[kind];
+  if (kind === "command") {
+    return lifecycle === "started"
+      ? label
+      : lifecycle === "completed"
+        ? "Command completed"
+        : label;
+  }
+  return lifecycle === "started"
+    ? `${label} now`
+    : lifecycle === "completed"
+      ? `${label} completed`
+      : label;
+}
+
+function agentActivityRegionId(agentId: string): string {
+  return `agent-activity-${encodeURIComponent(agentId)}`;
+}
 
 export type AgentExecutionMode = "launching-job" | "detached-job";
 
@@ -355,15 +444,19 @@ function AgentCard({
   agent,
   shells = EMPTY_AGENT_SNAPSHOTS,
   showProviderIcon = true,
+  onOpenAgent,
 }: {
   agent: ThreadAgentSnapshot;
   shells?: ReadonlyArray<ThreadAgentSnapshot>;
   showProviderIcon?: boolean;
+  onOpenAgent?: ((agent: ThreadAgentSnapshot) => void) | undefined;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [showAllActivity, setShowAllActivity] = useState(false);
   const settings = useClientSettings();
   const accent = useAgentAccent(String(agent.agentId));
+  const selected = useContext(AgentSelectionContext) === agentSelectionKey(agent);
+  const displayName = formatAgentDisplayName(agent.name);
   const settled = isTerminalAgentStatus(agent.status);
   // Settled cards lead with outcome (error first); live cards with activity.
   const activity =
@@ -379,7 +472,8 @@ function AgentCard({
           agent.resultSummary ??
           agent.errorMessage);
   const hasFeed = agent.recentActivity.length > 0;
-  const hasDetails = hasFeed || shells.length > 0;
+  const hasDetails =
+    hasFeed || shells.length > 0 || Boolean(agent.objective) || Boolean(agent.plan?.length);
   const isLive = agent.status === "running" || agent.status === "waiting";
   const executionMode = resolveAgentExecutionMode(agent);
   // The Codex companion writes its live job phase (investigating | editing |
@@ -390,7 +484,10 @@ function AgentCard({
   // it, so `phaseIndex` (set only on workflow children) gates the duplicate.
   // Settled cards drop it: a finished agent's last phase is noise next to its
   // outcome.
-  const workKind = isLive && agent.phaseIndex === undefined ? agent.phaseTitle : undefined;
+  const workKind =
+    (isLive
+      ? formatActivityKind(agent.currentActivityKind, agent.currentActivityLifecycle)
+      : null) ?? (isLive && agent.phaseIndex === undefined ? agent.phaseTitle : undefined);
   // Newest first, matching how the card reads top-down.
   const orderedActivity = agent.recentActivity.toReversed();
   const activityCount = orderedActivity.length;
@@ -398,6 +495,12 @@ function AgentCard({
     ? orderedActivity
     : orderedActivity.slice(0, THREAD_AGENT_COLLAPSED_ACTIVITY_COUNT);
   const hiddenActivityCount = activityCount - visibleActivity.length;
+  const activityRegionId = agentActivityRegionId(String(agent.agentId));
+  const failedActivityCount = agent.recentActivity.filter(
+    (entry) => entry.outcome === "error",
+  ).length;
+  const completedPlanSteps = agent.plan?.filter((step) => step.status === "completed").length ?? 0;
+  const planStepCount = agent.plan?.length ?? 0;
 
   return (
     // A div wrapping a header button, rather than one big button: the expanded
@@ -409,126 +512,205 @@ function AgentCard({
         // inactive surface. That transition is the card body's ONLY move
         // during a completion — the ring→check on the status mark is the
         // single coordinated accent.
-        "agent-card group/agent w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-left",
+        "agent-card group/agent w-full rounded-lg border border-border/60 bg-card px-2.5 py-2 text-left @min-[22rem]/agent-roster:px-3",
         accent === "arrival" && "agent-card-arrival",
         hasDetails && "hover:border-primary/25",
         isLive && "border-primary/20 bg-primary/[0.035] shadow-[0_0_8px_-4px_var(--primary)]",
         agent.status === "waiting" && "border-warning/25",
-        settled && "opacity-80",
+        settled && agent.status !== "failed" && "opacity-80",
+        selected && "border-primary/35 bg-primary/[0.07] opacity-100",
       )}
     >
-      <button
-        type="button"
-        onClick={() => hasDetails && setExpanded((value) => !value)}
-        aria-expanded={hasDetails ? expanded : undefined}
-        className={cn(
-          "w-full rounded-sm text-left outline-hidden focus-visible:ring-1 focus-visible:ring-primary/60",
-          hasDetails ? "cursor-pointer" : "cursor-default",
-        )}
-      >
-        <div className="flex items-center gap-2">
-          {showProviderIcon ? (
-            <AgentProviderIcon agent={agent} />
-          ) : (
-            <AgentStatusDot status={agent.status} />
+      <div className="flex min-w-0 items-stretch gap-1">
+        <button
+          type="button"
+          disabled={!onOpenAgent}
+          onClick={() => onOpenAgent?.(agent)}
+          aria-label={onOpenAgent ? `Open details for ${displayName}` : undefined}
+          aria-current={selected ? "true" : undefined}
+          aria-controls={onOpenAgent ? "agent-transcript-detail" : undefined}
+          className={cn(
+            "min-w-0 flex-1 rounded-sm text-left outline-hidden focus-visible:ring-1 focus-visible:ring-primary/60",
+            onOpenAgent ? "cursor-pointer" : "cursor-default",
           )}
-          <span className="min-w-0 truncate text-[12.5px] font-semibold">{agent.name}</span>
-          {agent.agentType ? (
-            <Badge variant="secondary" size="sm" className="min-w-0 max-w-28 shrink truncate">
-              {agent.agentType}
-            </Badge>
-          ) : null}
-          {executionMode ? (
-            <Badge
-              variant="outline"
-              size="sm"
-              className="shrink-0 text-muted-foreground"
-              data-agent-execution-mode={executionMode}
-            >
-              {AGENT_EXECUTION_MODE_LABEL[executionMode]}
-            </Badge>
-          ) : null}
-          {agent.model ? (
-            <Badge variant="outline" size="sm" className="shrink-0 text-muted-foreground">
-              {agent.model}
-            </Badge>
-          ) : null}
-          <span className="ml-auto shrink-0">
-            <AgentElapsed agent={agent} />
-          </span>
-          {agent.status === "completed" ? (
-            // The running ring contracts into this check. One element, one
-            // move: no card glow, icon flash, or border sweep beside it.
-            <span
-              className={cn(
-                "inline-flex size-3 shrink-0 items-center justify-center rounded-full text-success",
-                accent === "completion" && "agent-completion-mark",
-              )}
-            >
-              <CheckIcon className="size-3" />
-            </span>
-          ) : null}
-        </div>
-        {activity || workKind ? (
-          <div
-            className={cn(
-              "mt-1 truncate text-[11.5px]",
-              agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            {showProviderIcon ? (
+              <AgentProviderIcon agent={agent} />
+            ) : (
+              <AgentStatusDot status={agent.status} />
             )}
-          >
-            {workKind ? (
-              <span className="font-semibold tracking-wide text-primary/85 uppercase">
-                {workKind}
+            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" title={displayName}>
+              {displayName}
+            </span>
+            {agent.agentType ? (
+              <Badge
+                variant="secondary"
+                size="sm"
+                className="hidden min-w-0 max-w-28 shrink truncate @min-[22rem]/agent-roster:inline-flex"
+              >
+                {agent.agentType}
+              </Badge>
+            ) : null}
+            {executionMode ? (
+              <Badge
+                variant="outline"
+                size="sm"
+                className="hidden shrink-0 text-muted-foreground @min-[22rem]/agent-roster:inline-flex"
+                data-agent-execution-mode={executionMode}
+              >
+                {AGENT_EXECUTION_MODE_LABEL[executionMode]}
+              </Badge>
+            ) : null}
+            {agent.model ? (
+              <Badge
+                variant="outline"
+                size="sm"
+                className="hidden min-w-0 max-w-28 shrink truncate text-muted-foreground @min-[22rem]/agent-roster:inline-flex"
+                title={
+                  agent.reasoningEffort ? `${agent.model} · ${agent.reasoningEffort}` : agent.model
+                }
+              >
+                {agent.model}
+                {agent.reasoningEffort ? ` · ${agent.reasoningEffort}` : ""}
+              </Badge>
+            ) : agent.reasoningEffort ? (
+              <Badge
+                variant="outline"
+                size="sm"
+                className="hidden shrink-0 text-muted-foreground @min-[22rem]/agent-roster:inline-flex"
+              >
+                {agent.reasoningEffort}
+              </Badge>
+            ) : null}
+            <span className="ml-auto shrink-0">
+              <AgentElapsed agent={agent} />
+            </span>
+            {agent.status === "completed" ? (
+              // The running ring contracts into this check. One element, one
+              // move: no card glow, icon flash, or border sweep beside it.
+              <span
+                className={cn(
+                  "hidden size-3 shrink-0 items-center justify-center rounded-full text-success @min-[16rem]/agent-roster:inline-flex",
+                  accent === "completion" && "agent-completion-mark",
+                )}
+              >
+                <CheckIcon className="size-3" />
               </span>
             ) : null}
-            {workKind && activity ? <span className="text-border"> · </span> : null}
-            {activity}
           </div>
+          {activity || workKind ? (
+            <div
+              className={cn(
+                "mt-1 truncate text-xs",
+                agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+              )}
+            >
+              {workKind ? <span className="font-medium text-primary/85">{workKind}</span> : null}
+              {workKind && activity ? <span className="text-border"> · </span> : null}
+              {activity}
+            </div>
+          ) : null}
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground/80">{STATUS_LABEL[agent.status]}</span>
+            {executionMode === "detached-job" ? (
+              <span
+                className="hidden @min-[22rem]/agent-roster:inline"
+                title="The companion does not expose Codex token usage"
+              >
+                Usage unavailable
+              </span>
+            ) : agent.usage ? (
+              <span className="hidden font-mono tabular-nums text-foreground @min-[22rem]/agent-roster:inline">
+                {formatAgentTokenCount(agent.usage.totalTokens)}{" "}
+                <span className="text-muted-foreground">tok</span>
+                {agent.status === "running" ? <span className="text-sky-500"> ↑</span> : null}
+              </span>
+            ) : null}
+            {executionMode !== "detached-job" && agent.usage?.toolUses ? (
+              <span className="hidden items-center gap-2 @min-[22rem]/agent-roster:inline-flex">
+                <span className="text-border">·</span>
+                <span>{agent.usage.toolUses} tools</span>
+              </span>
+            ) : null}
+            {agent.activationCount > 1 ? (
+              <span className="hidden items-center gap-2 @min-[22rem]/agent-roster:inline-flex">
+                <span className="text-border">·</span>
+                <span>run {agent.activationCount}</span>
+              </span>
+            ) : null}
+            {planStepCount > 0 ? (
+              <span className="hidden items-center gap-2 @min-[22rem]/agent-roster:inline-flex">
+                <span className="text-border">·</span>
+                <span>
+                  {completedPlanSteps}/{planStepCount} steps
+                </span>
+              </span>
+            ) : null}
+            {failedActivityCount > 0 ? (
+              <span className="inline-flex items-center gap-1 font-medium text-destructive-foreground">
+                <AlertTriangleIcon className="size-3" />
+                {failedActivityCount} failed
+              </span>
+            ) : null}
+            {shells.length > 0 ? (
+              <span className="rounded-sm bg-muted/50 px-1.5 py-0.5 text-muted-foreground/80">
+                · {shells.length} shell{shells.length === 1 ? "" : "s"}
+              </span>
+            ) : null}
+          </div>
+        </button>
+        {hasDetails ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            aria-label={`${expanded ? "Hide" : "Show"} recent activity for ${displayName}`}
+            aria-expanded={expanded}
+            aria-controls={activityRegionId}
+            className="flex min-w-8 items-center justify-center rounded-sm text-muted-foreground/70 outline-hidden transition-colors duration-200 hover:bg-primary/8 hover:text-primary focus-visible:ring-1 focus-visible:ring-primary/60 pointer-coarse:min-w-11 motion-reduce:transition-none"
+          >
+            <ChevronRightIcon
+              className={cn(
+                "size-3.5 transition-transform duration-200 ease-out motion-reduce:transition-none",
+                expanded && "rotate-90",
+              )}
+            />
+          </button>
         ) : null}
-        <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-          {executionMode === "detached-job" ? (
-            <span title="The companion does not expose Codex token usage">Usage unavailable</span>
-          ) : agent.usage ? (
-            <span className="font-mono tabular-nums text-foreground">
-              {formatAgentTokenCount(agent.usage.totalTokens)}{" "}
-              <span className="text-muted-foreground">tok</span>
-              {agent.status === "running" ? <span className="text-sky-500"> ↑</span> : null}
-            </span>
-          ) : null}
-          {executionMode !== "detached-job" && agent.usage?.toolUses ? (
-            <>
-              <span className="text-border">·</span>
-              <span>{agent.usage.toolUses} tools</span>
-            </>
-          ) : null}
-          {agent.activationCount > 1 ? (
-            <>
-              <span className="text-border">·</span>
-              <span>run {agent.activationCount}</span>
-            </>
-          ) : null}
-          {shells.length > 0 ? (
-            <span className="rounded-sm bg-muted/50 px-1.5 py-0.5 text-muted-foreground/80">
-              · {shells.length} shell{shells.length === 1 ? "" : "s"}
-            </span>
-          ) : null}
-          {hasDetails ? (
-            <span className="ml-auto text-muted-foreground/70">
-              <ChevronRightIcon
-                className={cn(
-                  "size-3 transition-[color,transform] duration-200 ease-out group-hover/agent:text-primary motion-reduce:transition-none",
-                  expanded && "rotate-90",
-                )}
-              />
-            </span>
-          ) : null}
-        </div>
-      </button>
+      </div>
       {expanded && hasDetails ? (
         // Disclosure reveal: the detail feed eases in over 170ms rather than
         // mounting abruptly. Keyed to the disclosure, not to the activity text,
         // so a running agent's per-tick updates never re-trigger it.
-        <div className="agent-activity-reveal mt-2 space-y-0.5 border-t border-primary/15 pt-2">
+        <div
+          id={activityRegionId}
+          className="agent-activity-reveal mt-2 space-y-1 border-t border-primary/15 pt-2"
+        >
+          {agent.objective ? (
+            <div className="line-clamp-3 break-words text-xs text-muted-foreground">
+              <span className="font-medium text-foreground/80">Assigned:</span> {agent.objective}
+            </div>
+          ) : null}
+          {agent.plan?.length ? (
+            <ol className="space-y-0.5 py-0.5 text-[11px] text-muted-foreground">
+              {agent.plan.map((step) => (
+                <li key={`${step.status}:${step.step}`} className="flex gap-2">
+                  <span className="w-3 shrink-0 text-center" aria-hidden>
+                    {step.status === "completed" ? "✓" : step.status === "inProgress" ? "→" : "·"}
+                  </span>
+                  <span className="sr-only">{step.status}: </span>
+                  <span
+                    className={cn(
+                      "min-w-0 break-words",
+                      step.status === "inProgress" && "font-medium text-foreground",
+                    )}
+                  >
+                    {step.step}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          ) : null}
           {visibleActivity.map((entry) => (
             <div key={`${entry.at}-${entry.summary}`} className="flex gap-2 text-[11px]">
               <span className="shrink-0 font-mono tabular-nums text-muted-foreground/60">
@@ -537,18 +719,24 @@ function AgentCard({
                     these read like every other timestamp in the UI. */}
                 {formatTimestamp(entry.at, settings.timestampFormat)}
               </span>
-              <span
-                className={cn(
-                  "min-w-0 flex-1",
-                  // Full text once expanded — truncating the history defeats
-                  // the point of asking to see all of it.
-                  showAllActivity ? "break-words" : "truncate",
-                  entry.outcome === "error"
-                    ? "text-destructive-foreground"
-                    : "text-muted-foreground",
-                )}
-              >
-                {entry.summary}
+              <span className="min-w-0 flex-1">
+                {entry.kind ? (
+                  <span className="mr-1.5 font-medium text-foreground/75">
+                    {formatActivityKind(entry.kind, entry.lifecycle)}
+                  </span>
+                ) : null}
+                <span
+                  className={cn(
+                    // Full text once expanded — truncating the history defeats
+                    // the point of asking to see all of it.
+                    showAllActivity ? "break-words" : "line-clamp-1",
+                    entry.outcome === "error"
+                      ? "text-destructive-foreground"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {entry.summary}
+                </span>
               </span>
             </div>
           ))}
@@ -568,7 +756,7 @@ function AgentCard({
               <button
                 type="button"
                 onClick={() => setShowAllActivity((value) => !value)}
-                className="rounded-sm px-1 py-0.5 text-[11px] text-muted-foreground/70 outline-hidden transition-colors duration-200 hover:text-primary focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none"
+                className="rounded-sm px-1 py-0.5 text-[11px] text-muted-foreground/70 outline-hidden transition-colors duration-200 hover:text-primary focus-visible:ring-1 focus-visible:ring-primary/60 pointer-coarse:min-h-11 pointer-coarse:min-w-11 motion-reduce:transition-none"
               >
                 {showAllActivity ? "Show less" : `Show all ${activityCount}`}
               </button>
@@ -621,9 +809,11 @@ function PhaseHeader({ phase }: { phase: AgentPanelPhase }) {
 function AgentGroup({
   group,
   onOpenScript,
+  onOpenAgent,
 }: {
   group: AgentPanelGroup;
   onOpenScript?: ((scriptPath: string) => void) | undefined;
+  onOpenAgent?: ((agent: ThreadAgentSnapshot) => void) | undefined;
 }) {
   const scriptPath = group.workflow?.scriptPath;
   return (
@@ -633,23 +823,16 @@ function AgentGroup({
           <>
             <span className="truncate">Workflow · {group.workflow.name}</span>
             {scriptPath && onOpenScript ? (
-              <span
-                role="button"
-                tabIndex={0}
+              <button
+                type="button"
                 onClick={(event) => {
                   event.stopPropagation();
                   onOpenScript(scriptPath);
                 }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.stopPropagation();
-                    onOpenScript(scriptPath);
-                  }
-                }}
-                className="inline-flex cursor-pointer items-center gap-1 rounded-sm font-mono text-[10px] font-medium tracking-normal text-primary normal-case outline-hidden transition-colors duration-200 hover:text-primary/80 hover:underline focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none"
+                className="inline-flex min-h-6 cursor-pointer items-center gap-1 rounded-sm font-mono text-[10px] font-medium tracking-normal text-primary normal-case outline-hidden transition-colors duration-200 hover:text-primary/80 hover:underline focus-visible:ring-1 focus-visible:ring-primary/60 pointer-coarse:min-h-11 motion-reduce:transition-none"
               >
                 <BracesIcon className="size-3" /> script
-              </span>
+              </button>
             ) : null}
           </>
         ) : (
@@ -667,7 +850,7 @@ function AgentGroup({
         group.workflow.status === "stopped" ||
         group.workflow.errorMessage) ? (
         <div className="space-y-1.5">
-          <AgentCard agent={group.workflow} />
+          <AgentCard agent={group.workflow} onOpenAgent={onOpenAgent} />
         </div>
       ) : null}
       {group.phases.map((phase) => (
@@ -675,7 +858,7 @@ function AgentGroup({
           <PhaseHeader phase={phase} />
           <div className="space-y-1.5">
             {phase.agents.map((agent) => (
-              <AgentCard key={agent.agentId} agent={agent} />
+              <AgentCard key={agent.agentId} agent={agent} onOpenAgent={onOpenAgent} />
             ))}
           </div>
         </div>
@@ -683,7 +866,7 @@ function AgentGroup({
       {group.rest.length > 0 ? (
         <div className={cn("space-y-1.5", group.phases.length > 0 && "pt-2")}>
           {group.rest.map((agent) => (
-            <AgentCard key={agent.agentId} agent={agent} />
+            <AgentCard key={agent.agentId} agent={agent} onOpenAgent={onOpenAgent} />
           ))}
         </div>
       ) : null}
@@ -705,11 +888,13 @@ function SubagentsSection({
   settledRows,
   settledExpanded,
   onSettledExpandedChange,
+  onOpenAgent,
 }: {
   activeRows: ReadonlyArray<AgentPanelRow>;
   settledRows: ReadonlyArray<AgentPanelRow>;
   settledExpanded: boolean;
   onSettledExpandedChange: (expanded: boolean) => void;
+  onOpenAgent?: ((agent: ThreadAgentSnapshot) => void) | undefined;
 }) {
   if (activeRows.length === 0 && settledRows.length === 0) {
     return null;
@@ -721,7 +906,12 @@ function SubagentsSection({
       {activeRows.length > 0 ? (
         <div className="space-y-1.5">
           {activeRows.map((row) => (
-            <AgentCard key={row.agent.agentId} agent={row.agent} shells={row.shells} />
+            <AgentCard
+              key={row.agent.agentId}
+              agent={row.agent}
+              shells={row.shells}
+              onOpenAgent={onOpenAgent}
+            />
           ))}
         </div>
       ) : null}
@@ -730,7 +920,7 @@ function SubagentsSection({
           <button
             type="button"
             className={cn(
-              "group/finished flex w-full items-center gap-1.5 rounded-sm pr-1 pb-1 pl-2 text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase outline-hidden transition-colors duration-200 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none",
+              "group/finished flex min-h-8 w-full items-center gap-1.5 rounded-sm px-2 text-[11px] font-bold tracking-wide text-muted-foreground uppercase outline-hidden transition-colors duration-200 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/60 pointer-coarse:min-h-11 motion-reduce:transition-none",
               activeRows.length > 0 && "mt-1.5",
             )}
             aria-label={`Finished sub-agents · ${settledRows.length}`}
@@ -750,7 +940,12 @@ function SubagentsSection({
           {settledExpanded ? (
             <div className="space-y-1.5">
               {settledRows.map((row) => (
-                <AgentCard key={row.agent.agentId} agent={row.agent} shells={row.shells} />
+                <AgentCard
+                  key={row.agent.agentId}
+                  agent={row.agent}
+                  shells={row.shells}
+                  onOpenAgent={onOpenAgent}
+                />
               ))}
             </div>
           ) : null}
@@ -764,10 +959,12 @@ function BackgroundTasksSection({
   agents,
   expanded,
   onExpandedChange,
+  onOpenAgent,
 }: {
   agents: ReadonlyArray<ThreadAgentSnapshot>;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
+  onOpenAgent?: ((agent: ThreadAgentSnapshot) => void) | undefined;
 }) {
   if (agents.length === 0) {
     return null;
@@ -777,7 +974,7 @@ function BackgroundTasksSection({
     <section aria-label="Background tasks">
       <button
         type="button"
-        className="group/background flex w-full items-center gap-1.5 rounded-sm px-1 pb-1 text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase outline-hidden transition-colors duration-200 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/60 motion-reduce:transition-none"
+        className="group/background flex min-h-8 w-full items-center gap-1.5 rounded-sm px-2 text-[11px] font-bold tracking-wide text-muted-foreground uppercase outline-hidden transition-colors duration-200 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/60 pointer-coarse:min-h-11 motion-reduce:transition-none"
         aria-expanded={expanded}
         onClick={() => onExpandedChange(!expanded)}
       >
@@ -794,7 +991,12 @@ function BackgroundTasksSection({
       {expanded ? (
         <div className="space-y-1.5">
           {agents.map((agent) => (
-            <AgentCard key={agent.agentId} agent={agent} showProviderIcon={false} />
+            <AgentCard
+              key={agent.agentId}
+              agent={agent}
+              showProviderIcon={false}
+              onOpenAgent={onOpenAgent}
+            />
           ))}
         </div>
       ) : null}
@@ -802,7 +1004,16 @@ function BackgroundTasksSection({
   );
 }
 
-const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: AgentsPanelProps) {
+const AgentsPanel = memo(function AgentsPanel({
+  agents,
+  onOpenScript,
+  onOpenAgent,
+  onOpenChanges,
+  onFollowUp,
+  threadRef,
+  markdownCwd,
+  mode,
+}: AgentsPanelProps) {
   const state = deriveAgentPanelState(agents);
   // Resolved once for the whole roster, above the grouping: a card that moves
   // between `Sub-agents` and the `Finished` group keeps its identity
@@ -813,6 +1024,45 @@ const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: Ag
   // the thing most often being looked for.
   const [finishedExpanded, setFinishedExpanded] = useState(true);
   const [backgroundExpanded, setBackgroundExpanded] = useState(false);
+  const [selection, setSelection] = useState<AgentSelection | null>(null);
+  const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const [splitContainerWidth, setSplitContainerWidth] = useState(1024);
+  const rosterMaxWidth = getAgentRosterMaxWidth(splitContainerWidth);
+  const {
+    width: rosterWidth,
+    isResizing: rosterIsResizing,
+    handlers: rosterResizeHandlers,
+    separatorProps: rosterResizeSeparatorProps,
+  } = useResizableWidth({
+    storageKey: AGENT_ROSTER_WIDTH_STORAGE_KEY,
+    defaultWidth: AGENT_ROSTER_DEFAULT_WIDTH,
+    minWidth: AGENT_ROSTER_MIN_WIDTH,
+    maxWidth: rosterMaxWidth,
+    edge: "right",
+  });
+
+  useEffect(() => {
+    const container = splitContainerRef.current;
+    if (!container || typeof ResizeObserver !== "function") return;
+    const updateWidth = () => setSplitContainerWidth(container.getBoundingClientRect().width);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  const selectedAgent = selection
+    ? (agents.find((agent) => agentSelectionKey(agent) === selection.key) ?? null)
+    : null;
+  const selectAgent = (agent: ThreadAgentSnapshot) => {
+    setSelection({
+      key: agentSelectionKey(agent),
+      sourceProvider: agent.provider,
+      agentId: agent.agentId,
+      name: formatAgentDisplayName(agent.name),
+    });
+    onOpenAgent?.(agent);
+  };
 
   if (agents.length === 0) {
     return (
@@ -831,45 +1081,119 @@ const AgentsPanel = memo(function AgentsPanel({ agents, onOpenScript, mode }: Ag
 
   return (
     <AgentAccentContext.Provider value={accents}>
-      <div className={cn("flex h-full min-h-0 flex-col", mode === "embedded" && "bg-transparent")}>
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="space-y-4 p-3">
-            {state.groups.map((group, index) => (
-              <AgentGroup
-                key={group.workflow?.agentId ?? `group-${index}`}
-                group={group}
-                onOpenScript={onOpenScript}
-              />
-            ))}
-            <SubagentsSection
-              activeRows={state.activeSubagents}
-              settledRows={state.settledSubagents}
-              settledExpanded={finishedExpanded}
-              onSettledExpandedChange={setFinishedExpanded}
-            />
-            <BackgroundTasksSection
-              agents={state.backgroundTasks}
-              expanded={backgroundExpanded}
-              onExpandedChange={setBackgroundExpanded}
-            />
+      <AgentSelectionContext.Provider value={selection?.key ?? null}>
+        <div
+          ref={splitContainerRef}
+          className={cn(
+            "@container/agents-panel h-full min-h-0",
+            mode === "embedded" && "bg-transparent",
+          )}
+        >
+          <div
+            className={cn(
+              "grid h-full min-h-0 grid-cols-1",
+              selection &&
+                "@min-[44rem]/agents-panel:grid-cols-[var(--agent-roster-width)_minmax(0,1fr)]",
+            )}
+            style={
+              selection
+                ? ({ "--agent-roster-width": `${rosterWidth}px` } as CSSProperties)
+                : undefined
+            }
+            data-agent-roster-resizing={rosterIsResizing ? "true" : "false"}
+          >
+            <aside
+              aria-label="Agents"
+              className={cn(
+                "@container/agent-roster relative min-h-0 min-w-0 flex-col border-border/60 @min-[44rem]/agents-panel:flex @min-[44rem]/agents-panel:border-r",
+                selection ? "hidden" : "flex",
+              )}
+            >
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="space-y-4 p-3">
+                  {state.groups.map((group, index) => (
+                    <AgentGroup
+                      key={group.workflow?.agentId ?? `group-${index}`}
+                      group={group}
+                      onOpenScript={onOpenScript}
+                      onOpenAgent={selectAgent}
+                    />
+                  ))}
+                  <SubagentsSection
+                    activeRows={state.activeSubagents}
+                    settledRows={state.settledSubagents}
+                    settledExpanded={finishedExpanded}
+                    onSettledExpandedChange={setFinishedExpanded}
+                    onOpenAgent={selectAgent}
+                  />
+                  <BackgroundTasksSection
+                    agents={state.backgroundTasks}
+                    expanded={backgroundExpanded}
+                    onExpandedChange={setBackgroundExpanded}
+                    onOpenAgent={selectAgent}
+                  />
+                </div>
+              </ScrollArea>
+              <div className="flex items-center gap-3 border-t border-primary/10 bg-primary/[0.025] px-3 py-2 text-[11px] text-muted-foreground">
+                {state.runningCount > 0 ? (
+                  <span className="flex items-center gap-1.5 text-primary">
+                    <span className="size-1.75 rounded-full bg-primary shadow-[0_0_8px_var(--primary)] animate-status-pulse motion-reduce:animate-none" />
+                    {state.runningCount} running
+                  </span>
+                ) : null}
+                {state.waitingCount > 0 ? <span>{state.waitingCount} waiting</span> : null}
+                {state.settledCount > 0 ? <span>{state.settledCount} settled</span> : null}
+                <span className="ml-auto font-mono tabular-nums">
+                  Σ {formatAgentTokenCount(state.totalTokens)} tok
+                </span>
+              </div>
+              {selection ? (
+                <RightPanelResizeHandle
+                  handlers={rosterResizeHandlers}
+                  separatorProps={rosterResizeSeparatorProps}
+                  isResizing={rosterIsResizing}
+                  ariaLabel="Resize agent roster"
+                  edge="right"
+                  className="hidden @min-[44rem]/agents-panel:block"
+                />
+              ) : null}
+            </aside>
+
+            {selection ? (
+              <section
+                id="agent-transcript-detail"
+                aria-label={`${selection.name} conversation`}
+                className="flex min-h-0 min-w-0 flex-col"
+              >
+                <>
+                  <div className="shrink-0 border-b border-border/60 px-3 py-2 @min-[44rem]/agents-panel:hidden">
+                    <button
+                      type="button"
+                      onClick={() => setSelection(null)}
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground outline-hidden transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/60 pointer-coarse:min-h-11 motion-reduce:transition-none"
+                    >
+                      <ChevronLeftIcon className="size-3.5" />
+                      Back to agents
+                    </button>
+                  </div>
+                  <div className="min-h-0 flex-1">
+                    <AgentTranscriptPanel
+                      agent={selectedAgent}
+                      fallbackName={selection.name}
+                      {...(threadRef ? { threadRef } : {})}
+                      sourceProvider={selection.sourceProvider}
+                      agentId={selection.agentId}
+                      markdownCwd={markdownCwd}
+                      onOpenChanges={onOpenChanges}
+                      onFollowUp={onFollowUp}
+                    />
+                  </div>
+                </>
+              </section>
+            ) : null}
           </div>
-        </ScrollArea>
-        <div className="flex items-center gap-3 border-t border-primary/10 bg-primary/[0.025] px-3.5 py-2 text-[11px] text-muted-foreground">
-          {state.runningCount > 0 ? (
-            <span className="flex items-center gap-1.5 text-primary">
-              <span className="size-1.75 rounded-full bg-primary shadow-[0_0_8px_var(--primary)] animate-status-pulse motion-reduce:animate-none" />
-              {state.runningCount} running
-            </span>
-          ) : null}
-          {state.waitingCount > 0 ? <span>{state.waitingCount} waiting</span> : null}
-          {/* The quiet shared completion summary. Bulk and automatic
-              settlement land here rather than on any per-card flourish. */}
-          {state.settledCount > 0 ? <span>{state.settledCount} settled</span> : null}
-          <span className="ml-auto font-mono tabular-nums">
-            Σ {formatAgentTokenCount(state.totalTokens)} tok
-          </span>
         </div>
-      </div>
+      </AgentSelectionContext.Provider>
     </AgentAccentContext.Provider>
   );
 });

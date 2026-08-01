@@ -491,6 +491,7 @@ describe("ClaudeAdapterLive", () => {
         parent_tool_use_id: "toolu-task-explore",
         message: {
           role: "assistant",
+          model: "claude-opus-4-1",
           content: [
             { type: "thinking", thinking: "The reducer is the likely culprit." },
             { type: "text", text: "I'll explore the repo structure first." },
@@ -513,6 +514,19 @@ describe("ClaudeAdapterLive", () => {
       // The spawn description, not the narration: the roster derives the card's
       // name from it, so letting narration through would rename the card.
       assert.equal(progress[0]?.payload.description, "Trace agent card activity rows");
+      assert.deepEqual(
+        progress.map((event) => event.payload.activityKind),
+        ["reasoning", "reporting"],
+      );
+      assert.deepEqual(
+        progress.map((event) => event.payload.activityLifecycle),
+        ["completed", "completed"],
+      );
+      assert.deepEqual(
+        progress.map((event) => event.payload.model),
+        ["claude-opus-4-1", "claude-opus-4-1"],
+        "the card should use the actual forwarded child model",
+      );
       // Cards only — narration must not also spray rows into the conversation.
       assert.equal(progress[0]?.payload.timelineBypass, true);
 
@@ -524,6 +538,138 @@ describe("ClaudeAdapterLive", () => {
           event.payload.delta.includes("explore the repo structure"),
       );
       assert.equal(leakedText, false, "sub-agent text leaked into the parent transcript");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("attributes child tool lifecycle, plans, and outcomes to the sub-agent card", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "implement", attachments: [] });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: "sdk-session-child-tools",
+        uuid: "task-start-child-tools",
+        task_id: "agent-child-tools",
+        description: "Implement and verify telemetry",
+        prompt: "Add focused telemetry coverage",
+        tool_use_id: "toolu-task-child-tools",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-child-tools",
+        uuid: "subagent-tools-start",
+        parent_tool_use_id: "toolu-task-child-tools",
+        message: {
+          role: "assistant",
+          model: "claude-opus-4-1",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu-child-todo",
+              name: "TodoWrite",
+              input: {
+                todos: [
+                  { content: "Inspect adapter", status: "completed" },
+                  { content: "Run focused tests", status: "in_progress" },
+                ],
+              },
+            },
+            {
+              type: "tool_use",
+              id: "toolu-child-test",
+              name: "Bash",
+              input: { command: "vp test run ClaudeAdapter.test.ts" },
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-child-tools",
+        uuid: "subagent-tools-results",
+        parent_tool_use_id: "toolu-task-child-tools",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu-child-todo",
+              content: "Plan saved",
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu-child-test",
+              content: "Assertion failed",
+              is_error: true,
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      for (let tick = 0; tick < 20; tick += 1) yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const progressEvents = runtimeEvents.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { readonly type: "task.progress" }> =>
+          event.type === "task.progress",
+      );
+      const started = progressEvents.filter(
+        (event) => event.payload.activityLifecycle === "started",
+      );
+      assert.deepEqual(
+        started.map((event) => event.payload.activityKind),
+        ["planning", "verifying"],
+      );
+      assert.deepEqual(started[0]?.payload.plan, [
+        { step: "Inspect adapter", status: "completed" },
+        { step: "Run focused tests", status: "inProgress" },
+      ]);
+      assert.equal(started[0]?.payload.model, "claude-opus-4-1");
+
+      const completed = progressEvents.filter(
+        (event) => event.payload.activityLifecycle === "completed",
+      );
+      assert.deepEqual(
+        completed.map((event) => ({
+          summary: event.payload.summary,
+          kind: event.payload.activityKind,
+          outcome: event.payload.outcome,
+        })),
+        [
+          { summary: "TodoWrite completed", kind: "planning", outcome: "ok" },
+          { summary: "Bash failed", kind: "verifying", outcome: "error" },
+        ],
+      );
+      assert.ok(
+        [...started, ...completed].every(
+          (event) =>
+            event.payload.timelineBypass === true &&
+            String(event.payload.taskId) === "agent-child-tools",
+        ),
+        "child tool activity must stay on the attributed card",
+      );
+
+      const taskStarted = runtimeEvents.find((event) => event.type === "task.started");
+      assert.equal(taskStarted?.type, "task.started");
+      if (taskStarted?.type === "task.started") {
+        assert.equal(taskStarted.payload.prompt, "Add focused telemetry coverage");
+      }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -727,7 +873,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("reattaches a non-terminal companion watcher after restart", () => {
+  it.effect("reattaches a queued companion watcher and follows its status after restart", () => {
     const pluginData = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-plugin-restart-"));
     const workspace = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "v3code-ws-restart-"));
     const canonicalWorkspace = NodeFS.realpathSync.native(workspace);
@@ -741,10 +887,10 @@ describe("ClaudeAdapterLive", () => {
     NodeFS.mkdirSync(jobsDir, { recursive: true });
 
     const jobId = "task-restart-live-1";
-    const runningRecord = {
+    const queuedRecord = {
       id: jobId,
-      status: "running",
-      phase: "verifying",
+      status: "queued",
+      phase: "queued",
       title: "Codex Task",
       createdAt: "2026-07-29T06:00:00.000Z",
       startedAt: "2026-07-29T06:00:01.000Z",
@@ -754,12 +900,12 @@ describe("ClaudeAdapterLive", () => {
     };
     NodeFS.writeFileSync(
       NodePath.join(stateDir, "state.json"),
-      JSON.stringify({ version: 1, jobs: [runningRecord] }),
+      JSON.stringify({ version: 1, jobs: [queuedRecord] }),
       "utf8",
     );
     NodeFS.writeFileSync(
       NodePath.join(jobsDir, `${jobId}.json`),
-      JSON.stringify(runningRecord),
+      JSON.stringify(queuedRecord),
       "utf8",
     );
     NodeFS.writeFileSync(
@@ -797,6 +943,37 @@ describe("ClaudeAdapterLive", () => {
         yield* Effect.yieldNow;
       }
 
+      const pending = runtimeEvents.find(
+        (event) =>
+          event.type === "task.updated" &&
+          event.payload.status === "pending" &&
+          event.payload.taskId === "agent-restart-live",
+      );
+      assert.equal(pending?.type, "task.updated");
+      if (pending?.type === "task.updated") {
+        assert.equal(pending.payload.runId, jobId);
+        assert.equal(pending.payload.phaseTitle, "queued");
+        assert.equal(pending.payload.startTime, "2026-07-29T06:00:01.000Z");
+      }
+
+      const runningRecord = {
+        ...queuedRecord,
+        status: "running",
+        phase: "verifying",
+      };
+      NodeFS.writeFileSync(
+        NodePath.join(stateDir, "state.json"),
+        encodeUnknownJsonString({ version: 1, jobs: [runningRecord] }),
+        "utf8",
+      );
+      NodeFS.writeFileSync(
+        NodePath.join(jobsDir, `${jobId}.json`),
+        encodeUnknownJsonString(runningRecord),
+        "utf8",
+      );
+      yield* TestClock.adjust("2 seconds");
+      for (let tick = 0; tick < 20; tick += 1) yield* Effect.yieldNow;
+
       const running = runtimeEvents.find(
         (event) =>
           event.type === "task.updated" &&
@@ -807,6 +984,7 @@ describe("ClaudeAdapterLive", () => {
       if (running?.type === "task.updated") {
         assert.equal(running.payload.runId, jobId);
         assert.equal(running.payload.phaseTitle, "verifying");
+        assert.equal(running.payload.startTime, "2026-07-29T06:00:01.000Z");
       }
 
       const completedRecord = {
@@ -2640,6 +2818,7 @@ describe("ClaudeAdapterLive", () => {
         task_id: "task-subagent-1",
         description: "Running background teammate",
         summary: "Code reviewer checked the migration edge cases.",
+        last_tool_name: "Read",
         usage: {
           total_tokens: 123,
           tool_uses: 4,
@@ -2658,6 +2837,8 @@ describe("ClaudeAdapterLive", () => {
           "Code reviewer checked the migration edge cases.",
         );
         assert.equal(progressEvent.payload.description, "Running background teammate");
+        assert.equal(progressEvent.payload.lastToolName, "Read");
+        assert.equal(progressEvent.payload.activityKind, "investigating");
         assert.deepEqual(progressEvent.payload.usage, {
           totalTokens: 123,
           toolUses: 4,

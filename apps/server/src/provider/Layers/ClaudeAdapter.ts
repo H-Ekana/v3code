@@ -33,6 +33,7 @@ import {
   type ModelSelection,
   ProviderItemId,
   type ProviderRuntimeEvent,
+  type RuntimeAgentActivityKind,
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
@@ -221,6 +222,13 @@ interface ClaudeTaskState {
   readonly blockedBy: Set<string>;
 }
 
+interface SubagentToolState {
+  readonly taskId: string;
+  readonly description: string;
+  readonly toolName: string;
+  readonly activityKind: RuntimeAgentActivityKind;
+}
+
 interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
@@ -256,6 +264,8 @@ interface ClaudeSessionContext {
    * renaming the card to whatever the sub-agent last said.
    */
   readonly agentDescriptionByTaskId: Map<string, string>;
+  /** Forwarded child tool calls, keyed by tool_use id for result attribution. */
+  readonly subagentToolByUseId: Map<string, SubagentToolState>;
   /** Detached Codex companion job watchers, keyed by companion job id. */
   readonly companionWatchers: Map<string, Fiber.Fiber<void, never>>;
   /**
@@ -736,6 +746,39 @@ function isTodoTool(toolName: string): boolean {
   return toolName.toLowerCase().includes("todowrite");
 }
 
+function classifySubagentActivity(
+  toolName: string,
+  input?: Readonly<Record<string, unknown>>,
+): RuntimeAgentActivityKind {
+  const normalized = toolName.toLowerCase();
+  if (isTodoTool(toolName)) return "planning";
+  if (
+    normalized === "task" ||
+    normalized === "agent" ||
+    normalized.includes("subagent") ||
+    normalized.includes("sub-agent")
+  ) {
+    return "delegating";
+  }
+  if (normalized.includes("askuser") || normalized.includes("userinput")) return "waiting";
+  if (normalized.includes("review")) return "reviewing";
+
+  const itemType = classifyToolItemType(toolName);
+  if (itemType === "file_change") return "editing";
+  if (itemType === "command_execution") {
+    const command = readString(input?.command)?.toLowerCase() ?? "";
+    return /(^|\s)(test|check|lint|typecheck|build)(\s|$)|\b(vitest|jest|pytest|cargo test)\b/.test(
+      command,
+    )
+      ? "verifying"
+      : "command";
+  }
+  if (isReadOnlyToolName(toolName) || itemType === "web_search" || itemType === "image_view") {
+    return "investigating";
+  }
+  return "other";
+}
+
 type PlanStep = {
   step: string;
   status: "pending" | "inProgress" | "completed";
@@ -1159,14 +1202,23 @@ function extractAssistantTextBlocks(message: SDKMessage): Array<string> {
 }
 
 /**
- * Narration a forwarded sub-agent message contributes to its agent card, in
- * content order.
- *
- * Text and thinking blocks only: a sub-agent's `tool_use` blocks are already
- * reported through `task_progress.last_tool_name`, so including them here would
- * double up every tool call on the card.
+ * Structured activity a forwarded sub-agent message contributes to its card,
+ * in content order. These tool-use ids are the only safe way to attribute a
+ * later forwarded tool result to the child rather than the parent.
  */
-function extractSubagentNarration(message: SDKMessage): Array<string> {
+function extractSubagentActivities(message: SDKMessage): Array<
+  | {
+      readonly type: "narration";
+      readonly summary: string;
+      readonly activityKind: "reasoning" | "reporting";
+    }
+  | {
+      readonly type: "tool";
+      readonly toolUseId: string;
+      readonly toolName: string;
+      readonly input: Record<string, unknown>;
+    }
+> {
   if (message.type !== "assistant") {
     return [];
   }
@@ -1176,12 +1228,47 @@ function extractSubagentNarration(message: SDKMessage): Array<string> {
     return [];
   }
 
-  const fragments: string[] = [];
+  const activities: Array<
+    | {
+        readonly type: "narration";
+        readonly summary: string;
+        readonly activityKind: "reasoning" | "reporting";
+      }
+    | {
+        readonly type: "tool";
+        readonly toolUseId: string;
+        readonly toolName: string;
+        readonly input: Record<string, unknown>;
+      }
+  > = [];
   for (const block of content) {
     if (!block || typeof block !== "object") {
       continue;
     }
-    const candidate = block as { type?: unknown; text?: unknown; thinking?: unknown };
+    const candidate = block as {
+      type?: unknown;
+      text?: unknown;
+      thinking?: unknown;
+      id?: unknown;
+      name?: unknown;
+      input?: unknown;
+    };
+    if (
+      candidate.type === "tool_use" &&
+      typeof candidate.id === "string" &&
+      typeof candidate.name === "string" &&
+      candidate.input !== null &&
+      typeof candidate.input === "object" &&
+      !Array.isArray(candidate.input)
+    ) {
+      activities.push({
+        type: "tool",
+        toolUseId: candidate.id,
+        toolName: candidate.name,
+        input: candidate.input as Record<string, unknown>,
+      });
+      continue;
+    }
     const raw =
       candidate.type === "text"
         ? candidate.text
@@ -1193,11 +1280,20 @@ function extractSubagentNarration(message: SDKMessage): Array<string> {
     }
     const trimmed = raw.trim();
     if (trimmed.length > 0) {
-      fragments.push(trimmed);
+      activities.push({
+        type: "narration",
+        summary: trimmed,
+        activityKind: candidate.type === "thinking" ? "reasoning" : "reporting",
+      });
     }
   }
 
-  return fragments;
+  return activities;
+}
+
+function extractAssistantModel(message: SDKMessage): string | undefined {
+  if (message.type !== "assistant") return undefined;
+  return readString((message.message as unknown as Record<string, unknown>).model);
 }
 
 function extractContentBlockText(block: unknown): string {
@@ -2614,6 +2710,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       let rolloutInode: number | undefined;
       let nextRolloutLookupAtMs = 0;
       let lastPhase: string | undefined;
+      let lastStatus: CodexCompanionJobRecord["status"] | undefined;
       let waitedMs = 0;
       let pollsWithoutRecord = 0;
       // Whether this watcher has taken responsibility for the card's status.
@@ -2746,15 +2843,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         }
 
-        // Re-assert `running` before replaying lines. The forwarder subagent
-        // settles long before the job does, and a settled card suppresses
-        // `currentActivity` in the reducer — so without this the feed would
-        // fill in but the card would still read as finished.
+        // Re-assert the companion-owned non-terminal state before replaying
+        // lines. The forwarder settles long before the job does, while queued
+        // companions must remain pending until their record becomes running.
         if (
           !settled &&
-          (!pinnedRunning || progress.lines.length > 0 || record.phase !== lastPhase)
+          (!pinnedRunning ||
+            progress.lines.length > 0 ||
+            record.phase !== lastPhase ||
+            record.status !== lastStatus)
         ) {
           lastPhase = record.phase;
+          lastStatus = record.status;
           pinnedRunning = true;
           const stamp = yield* makeEventStamp();
           yield* offerRuntimeEvent({
@@ -2765,7 +2865,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             threadId: context.session.threadId,
             payload: {
               taskId,
-              status: "running",
+              status: record.status === "queued" ? "pending" : "running",
+              ...(record.startedAt ? { startTime: record.startedAt } : {}),
               ...(record.phase ? { phaseTitle: record.phase } : {}),
               runId: jobId,
               timelineBypass: true,
@@ -3019,6 +3120,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
+    // Forwarded child tool results are reliably attributable only after their
+    // corresponding forwarded assistant tool_use block has been observed.
+    // Keep them on the child card and out of the parent transcript.
+    for (const toolResult of toolResultBlocksFromUserMessage(message)) {
+      const childTool = context.subagentToolByUseId.get(toolResult.toolUseId);
+      if (!childTool) continue;
+
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "task.progress",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        payload: {
+          taskId: RuntimeTaskId.make(childTool.taskId),
+          description: childTool.description,
+          summary: toolResult.isError
+            ? `${childTool.toolName} failed`
+            : `${childTool.toolName} completed`,
+          lastToolName: childTool.toolName,
+          activityKind: childTool.activityKind,
+          activityLifecycle: "completed",
+          outcome: toolResult.isError ? "error" : "ok",
+          timelineBypass: true,
+        },
+      });
+      context.subagentToolByUseId.delete(toolResult.toolUseId);
+    }
+
     for (const toolResult of toolResultBlocksFromUserMessage(message)) {
       const toolEntry = Array.from(context.inFlightTools.entries()).find(
         ([, tool]) => tool.itemId === toolResult.toolUseId,
@@ -3178,7 +3309,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : undefined;
     if (subagentTaskId !== undefined) {
       const description = context.agentDescriptionByTaskId.get(subagentTaskId) ?? "Subagent";
-      for (const fragment of extractSubagentNarration(message)) {
+      const model = extractAssistantModel(message);
+      for (const activity of extractSubagentActivities(message)) {
+        if (activity.type === "tool") {
+          context.subagentToolByUseId.set(activity.toolUseId, {
+            taskId: subagentTaskId,
+            description,
+            toolName: activity.toolName,
+            activityKind: classifySubagentActivity(activity.toolName, activity.input),
+          });
+        }
+        const plan =
+          activity.type === "tool" && isTodoTool(activity.toolName)
+            ? extractPlanStepsFromTodoInput(activity.input)
+            : null;
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
           type: "task.progress",
@@ -3189,7 +3333,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           payload: {
             taskId: RuntimeTaskId.make(subagentTaskId),
             description,
-            summary: fragment,
+            summary: activity.type === "narration" ? activity.summary : activity.toolName,
+            activityKind:
+              activity.type === "narration"
+                ? activity.activityKind
+                : classifySubagentActivity(activity.toolName, activity.input),
+            activityLifecycle: activity.type === "narration" ? "completed" : "started",
+            ...(activity.type === "tool" ? { lastToolName: activity.toolName } : {}),
+            ...(plan ? { plan } : {}),
+            ...(model ? { model } : {}),
             // Cards only: without this every sub-agent sentence would also
             // spray a row into the conversation timeline.
             timelineBypass: true,
@@ -3462,6 +3614,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(message.summary ? { summary: message.summary } : {}),
             ...(usage ? { usage } : {}),
             ...(message.last_tool_name ? { lastToolName: message.last_tool_name } : {}),
+            ...(message.last_tool_name
+              ? { activityKind: classifySubagentActivity(message.last_tool_name) }
+              : {}),
             ...(agentType ? { agentType } : {}),
             ...(toolUseId ? { toolUseId } : {}),
           },
@@ -3521,6 +3676,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 : {}),
               ...(readString(item.lastToolName)
                 ? { lastToolName: readString(item.lastToolName) }
+                : {}),
+              ...(readString(item.lastToolName)
+                ? { activityKind: classifySubagentActivity(readString(item.lastToolName)!) }
                 : {}),
               ...(childUsage !== undefined
                 ? {
@@ -4586,6 +4744,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? { cwd: input.cwd } : { cwd: undefined }),
         agentIdByToolUseId: new Map<string, string>(),
         agentDescriptionByTaskId: new Map<string, string>(),
+        subagentToolByUseId: new Map<string, SubagentToolState>(),
         companionWatchers: new Map<string, Fiber.Fiber<void, never>>(),
         companionJobsSeen: new Set<string>(),
         turnState: undefined,

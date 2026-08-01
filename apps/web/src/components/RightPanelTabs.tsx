@@ -313,6 +313,8 @@ function surfaceTitle(
       return "Plan";
     case "agents":
       return "Agents";
+    case "agent-detail":
+      return surface.agentName;
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -375,6 +377,8 @@ function SurfaceIcon({
     case "plan":
       return <ClipboardList className="size-3.5 shrink-0" />;
     case "agents":
+      return <Bot className="size-3.5 shrink-0" />;
+    case "agent-detail":
       return <Bot className="size-3.5 shrink-0" />;
   }
 }

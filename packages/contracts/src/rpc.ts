@@ -24,6 +24,7 @@ import {
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   GitCommandError,
+  TextGenerationError,
   VcsCreateRefInput,
   VcsCreateRefResult,
   VcsCreateWorktreeInput,
@@ -49,6 +50,11 @@ import {
   ReviewDiffPreviewInput,
   ReviewDiffPreviewResult,
 } from "./review.ts";
+import {
+  SuggestNextPromptError,
+  SuggestNextPromptInput,
+  SuggestNextPromptResult,
+} from "./promptSuggestion.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
   ClientOrchestrationCommand,
@@ -161,6 +167,11 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  AgentTranscriptReadError,
+  AgentTranscriptRequest,
+  AgentTranscriptResult,
+} from "./agentTranscript.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -241,6 +252,8 @@ export const WS_METHODS = {
   serverReportClientActivity: "server.reportClientActivity",
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
+  agentGetTranscript: "agent.getTranscript",
+  threadSuggestNextPrompt: "thread.suggestNextPrompt",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -280,6 +293,18 @@ export const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
   payload: Schema.Struct({}),
   success: Schema.Struct({}),
   error: EnvironmentAuthorizationError,
+});
+
+export const WsAgentGetTranscriptRpc = Rpc.make(WS_METHODS.agentGetTranscript, {
+  payload: AgentTranscriptRequest,
+  success: AgentTranscriptResult,
+  error: Schema.Union([AgentTranscriptReadError, EnvironmentAuthorizationError]),
+});
+
+export const WsThreadSuggestNextPromptRpc = Rpc.make(WS_METHODS.threadSuggestNextPrompt, {
+  payload: SuggestNextPromptInput,
+  success: SuggestNextPromptResult,
+  error: Schema.Union([SuggestNextPromptError, EnvironmentAuthorizationError, TextGenerationError]),
 });
 
 export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
@@ -790,6 +815,8 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  WsAgentGetTranscriptRpc,
+  WsThreadSuggestNextPromptRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

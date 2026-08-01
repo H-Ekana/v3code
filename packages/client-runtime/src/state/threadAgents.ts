@@ -431,3 +431,37 @@ export function formatAgentTokenCount(totalTokens: number): string {
   }
   return `${totalTokens}`;
 }
+
+const GENERATED_AGENT_ROLE = /^(?:Role:\s*|You are\s+(?:the\s+)?)([\w-]+)(?:\s+agent)?[.!:]?$/i;
+const OBJECTIVE_ROLE_SENTENCE =
+  /^(?:You are\s+(?:the\s+)?([\w-]+)(?:\s+agent)?|Role:\s*([\w-]+))\.\s*/i;
+
+function normalizeAgentRole(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/-/g, "_");
+}
+
+function isMeaningfulAgentRole(value: string): boolean {
+  return /[a-z0-9_]/i.test(value);
+}
+
+export function formatAgentDisplayName(name: string): string {
+  const trimmed = name.trim();
+  const generatedRole = trimmed.match(GENERATED_AGENT_ROLE)?.[1];
+  return generatedRole && isMeaningfulAgentRole(generatedRole) ? generatedRole : trimmed;
+}
+
+export function formatAgentObjective(name: string, objective: string): string {
+  const trimmed = objective.trim();
+  const match = trimmed.match(OBJECTIVE_ROLE_SENTENCE);
+  const declaredRole = match?.[1] ?? match?.[2];
+  const displayName = formatAgentDisplayName(name);
+  if (
+    !match ||
+    !declaredRole ||
+    !isMeaningfulAgentRole(declaredRole) ||
+    normalizeAgentRole(declaredRole) !== normalizeAgentRole(displayName)
+  ) {
+    return trimmed;
+  }
+  return trimmed.slice(match[0].length).trimStart();
+}

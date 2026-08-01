@@ -88,6 +88,8 @@ import {
   shouldUseCompactComposerFooter,
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
+import { promptSuggestionEnvironment } from "../../state/promptSuggestion";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
@@ -370,9 +372,9 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
               const option = runtimeModeConfig[mode];
               const selected = props.runtimeMode === mode;
               return (
-                <SelectItem key={mode} value={mode} hideIndicator className="min-w-64 py-2">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid min-w-0 flex-1 gap-0.5">
+                <SelectItem key={mode} value={mode} hideIndicator className="min-w-44 py-1.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="grid min-w-0 flex-1 gap-0">
                       <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
                         <RuntimeModeGlyph
                           mode={mode}
@@ -382,7 +384,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                         />
                         {option.label}
                       </span>
-                      <span className="text-muted-foreground text-xs leading-4">
+                      <span className="text-[11px] leading-3.5 text-muted-foreground">
                         {option.description}
                       </span>
                     </div>
@@ -1146,6 +1148,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const isMobileViewport = useMediaQuery("max-sm");
   const isComposerCollapsedMobile =
     isMobileViewport && !forceExpandedOnMobile && !isComposerFocused;
+  const [ghostSuggestion, setGhostSuggestion] = useState<string | null>(null);
+  const ghostGenerationIdRef = useRef<string | null>(null);
+  const previousPhaseRef = useRef(phase);
+  const requestSuggestNextPrompt = useAtomCommand(promptSuggestionEnvironment.suggestNextPrompt, {
+    label: "composer:suggest-next-prompt",
+    reportFailure: false,
+  });
 
   // ------------------------------------------------------------------
   // Refs
@@ -1898,6 +1907,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       promptRef.current = nextPrompt;
       setPrompt(nextPrompt);
+      if (nextPrompt.length > 0) {
+        setGhostSuggestion(null);
+        ghostGenerationIdRef.current = null;
+      }
       if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
         setComposerDraftTerminalContexts(
           composerDraftTarget,
@@ -2247,6 +2260,54 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, []);
 
   // ------------------------------------------------------------------
+  // Ghost next-prompt suggestion (after a turn settles)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const previousPhase = previousPhaseRef.current;
+    previousPhaseRef.current = phase;
+
+    if (phase === "running") {
+      setGhostSuggestion(null);
+      ghostGenerationIdRef.current = null;
+      return;
+    }
+
+    const justSettled = previousPhase === "running" && phase !== "running";
+    if (!justSettled) return;
+    if (!activeThreadId || !environmentId) return;
+    if (promptRef.current.trim().length > 0) return;
+    if (isComposerApprovalState) return;
+
+    let cancelled = false;
+    void requestSuggestNextPrompt({
+      environmentId,
+      input: { threadId: activeThreadId },
+    }).then((result) => {
+      if (cancelled) return;
+      if (result._tag !== "Success") return;
+      if (promptRef.current.trim().length > 0) return;
+      const suggestion = result.value.suggestion?.trim() ?? "";
+      if (!suggestion) {
+        setGhostSuggestion(null);
+        ghostGenerationIdRef.current = null;
+        return;
+      }
+      ghostGenerationIdRef.current = result.value.generationId;
+      setGhostSuggestion(suggestion);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThreadId, environmentId, isComposerApprovalState, phase, requestSuggestNextPrompt]);
+
+  useEffect(() => {
+    // Drop stale ghost when switching threads/drafts.
+    setGhostSuggestion(null);
+    ghostGenerationIdRef.current = null;
+  }, [activeThreadId, draftId, composerDraftTarget]);
+
+  // ------------------------------------------------------------------
   // Callbacks: command key
   // ------------------------------------------------------------------
   const onComposerCommandKey = (
@@ -2274,6 +2335,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onSelectComposerItem(selectedItem);
         return true;
       }
+    }
+    if (
+      key === "Tab" &&
+      !event.shiftKey &&
+      ghostSuggestion &&
+      promptRef.current.trim().length === 0
+    ) {
+      const accepted = ghostSuggestion;
+      setGhostSuggestion(null);
+      ghostGenerationIdRef.current = null;
+      const nextCursor = accepted.length;
+      promptRef.current = accepted;
+      setPrompt(accepted);
+      setComposerCursor(nextCursor);
+      setComposerTrigger(detectComposerTrigger(accepted, nextCursor));
+      queueMicrotask(() => {
+        composerEditorRef.current?.focusAt(nextCursor);
+      });
+      return true;
     }
     if (
       key === "Enter" &&
@@ -3512,6 +3592,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 largePasteEnabled={!isComposerApprovalState && pendingUserInputs.length === 0}
                 skills={selectedProviderStatus?.skills ?? []}
+                ghostSuggestion={
+                  !isComposerApprovalState && !activePendingProgress && prompt.trim().length === 0
+                    ? ghostSuggestion
+                    : null
+                }
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                 onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                 onAddLargePaste={(paste) => addComposerDraftLargePaste(composerDraftTarget, paste)}
