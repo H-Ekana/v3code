@@ -142,6 +142,7 @@ import {
   resolveSidebarV2RowSurfaceClassName,
   resolveSidebarV2Status,
   resolveWorkingStartedAt,
+  SIDEBAR_THREAD_DRAG_ACTIVATION_CONSTRAINT,
   shouldNavigateAfterProjectRemoval,
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebarV2,
@@ -2811,10 +2812,9 @@ export default function SidebarV2() {
   const [draggingThreadKey, setDraggingThreadKey] = useState<string | null>(null);
   const dragSensors = useSensors(
     useSensor(PointerSensor, {
-      // Press-and-hold to pick a card up. A plain distance threshold would make
-      // every sloppy click start a drag on a list whose rows are all clickable;
-      // the tolerance still lets a twitchy hold fall through to a normal click.
-      activationConstraint: { delay: 180, tolerance: 6 },
+      // A click still opens the thread; deliberate pointer travel picks it up
+      // immediately, matching the app's other sortable surfaces.
+      activationConstraint: SIDEBAR_THREAD_DRAG_ACTIVATION_CONSTRAINT,
     }),
   );
   const activeThreadKeys = useMemo(

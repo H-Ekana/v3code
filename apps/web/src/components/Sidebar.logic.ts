@@ -691,6 +691,9 @@ export function moveThreadInManualOrder(
   return next;
 }
 
+/** Preserve click activation until intentional pointer travel starts a reorder. */
+export const SIDEBAR_THREAD_DRAG_ACTIVATION_CONSTRAINT = { distance: 6 } as const;
+
 type SettledTimestampInput = Pick<
   SidebarThreadSummary,
   "settledAt" | "latestUserMessageAt" | "latestTurn" | "updatedAt"
