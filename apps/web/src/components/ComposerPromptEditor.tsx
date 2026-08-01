@@ -1023,6 +1023,11 @@ interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  /**
+   * Grayed-out next-prompt suggestion shown when the draft is empty.
+   * Not part of the controlled value until the user accepts it (Tab).
+   */
+  ghostSuggestion?: string | null;
   className?: string;
   onRemoveTerminalContext: (contextId: string) => void;
   onAddLargePaste: (paste: LargePasteDraft) => void;
@@ -1715,6 +1720,7 @@ function ComposerPromptEditorInner({
   skills,
   disabled,
   placeholder,
+  ghostSuggestion = null,
   className,
   onRemoveTerminalContext,
   onAddLargePaste,
@@ -1981,7 +1987,15 @@ function ComposerPromptEditorInner({
             />
           }
           placeholder={
-            terminalContexts.length > 0 || largePastes.length > 0 ? null : (
+            terminalContexts.length > 0 || largePastes.length > 0 ? null : ghostSuggestion ? (
+              <div
+                data-composer-ghost-suggestion="true"
+                className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/45 sm:text-[14px]"
+              >
+                <span>{ghostSuggestion}</span>
+                <span className="ml-2 text-[12px] text-muted-foreground/35">Tab to use</span>
+              </div>
+            ) : (
               <div
                 data-composer-placeholder="true"
                 className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/55 sm:text-[14px]"
@@ -2024,6 +2038,7 @@ export function ComposerPromptEditor({
   skills,
   disabled,
   placeholder,
+  ghostSuggestion = null,
   className,
   onRemoveTerminalContext,
   onAddLargePaste,
@@ -2073,6 +2088,7 @@ export function ComposerPromptEditor({
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
+        ghostSuggestion={ghostSuggestion}
         onRemoveTerminalContext={onRemoveTerminalContext}
         onAddLargePaste={onAddLargePaste}
         onRemoveLargePaste={onRemoveLargePaste}

@@ -15,11 +15,13 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildPromptSuggestionPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizePromptSuggestion,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 import {
@@ -54,7 +56,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generatePromptSuggestion";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -259,10 +262,37 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generatePromptSuggestion: TextGeneration.TextGeneration["Service"]["generatePromptSuggestion"] =
+    Effect.fn("CursorTextGeneration.generatePromptSuggestion")(function* (input) {
+      const { prompt, outputSchema } = buildPromptSuggestionPrompt({
+        conversation: input.conversation,
+      });
+
+      const generated = yield* runCursorJson({
+        operation: "generatePromptSuggestion",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+
+      const sanitized = sanitizePromptSuggestion(generated.suggestion);
+      if (sanitized === null && generated.suggestion.trim().length > 0) {
+        yield* Effect.logDebug("Prompt suggestion rejected by the sanitizer.", {
+          raw: generated.suggestion,
+        });
+      }
+
+      return {
+        suggestion: sanitized,
+      } satisfies TextGeneration.PromptSuggestionGenerationResult;
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generatePromptSuggestion,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

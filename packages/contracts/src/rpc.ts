@@ -24,6 +24,7 @@ import {
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   GitCommandError,
+  TextGenerationError,
   VcsCreateRefInput,
   VcsCreateRefResult,
   VcsCreateWorktreeInput,
@@ -49,6 +50,16 @@ import {
   ReviewDiffPreviewInput,
   ReviewDiffPreviewResult,
 } from "./review.ts";
+import {
+  SuggestNextPromptError,
+  SuggestNextPromptInput,
+  SuggestNextPromptResult,
+} from "./promptSuggestion.ts";
+import {
+  TextGenerationUsageError,
+  TextGenerationUsageInput,
+  TextGenerationUsageResult,
+} from "./textGenerationUsage.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
   ClientOrchestrationCommand,
@@ -222,6 +233,8 @@ export const WS_METHODS = {
 
   // Server meta
   serverProbe: "server.probe",
+  threadSuggestNextPrompt: "thread.suggestNextPrompt",
+  textGenerationGetUsage: "textGeneration.getUsage",
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
@@ -280,6 +293,18 @@ export const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
   payload: Schema.Struct({}),
   success: Schema.Struct({}),
   error: EnvironmentAuthorizationError,
+});
+
+export const WsThreadSuggestNextPromptRpc = Rpc.make(WS_METHODS.threadSuggestNextPrompt, {
+  payload: SuggestNextPromptInput,
+  success: SuggestNextPromptResult,
+  error: Schema.Union([SuggestNextPromptError, EnvironmentAuthorizationError, TextGenerationError]),
+});
+
+export const WsTextGenerationGetUsageRpc = Rpc.make(WS_METHODS.textGenerationGetUsage, {
+  payload: TextGenerationUsageInput,
+  success: TextGenerationUsageResult,
+  error: Schema.Union([TextGenerationUsageError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
@@ -790,6 +815,8 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  WsThreadSuggestNextPromptRpc,
+  WsTextGenerationGetUsageRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

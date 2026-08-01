@@ -4,9 +4,14 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildPromptSuggestionPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
-import { normalizeCliError, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
+import {
+  normalizeCliError,
+  sanitizePromptSuggestion,
+  sanitizeThreadTitle,
+} from "./TextGenerationUtils.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 describe("buildCommitMessagePrompt", () => {
@@ -284,5 +289,74 @@ describe("normalizeCliError", () => {
 
     expect(result.detail).toBe("Failed to generate a commit message");
     expect(result.message).not.toContain("secret-token");
+  });
+});
+
+describe("buildPromptSuggestionPrompt", () => {
+  it("asks for user-voice next prompts and includes conversation context", () => {
+    const result = buildPromptSuggestionPrompt({
+      conversation: "USER:\nfix login\n\nASSISTANT:\nFixed the bug.",
+    });
+
+    expect(result.prompt).toContain("suggest the next user message");
+    expect(result.prompt).toContain("Return a JSON object with key: suggestion.");
+    expect(result.prompt).toContain("Prefer silence");
+    expect(result.prompt).toContain("USER:\nfix login");
+    expect(result.prompt).toContain("ASSISTANT:\nFixed the bug.");
+  });
+
+  it("states the length rule consistently with the sanitizer", () => {
+    const result = buildPromptSuggestionPrompt({ conversation: "USER:\nhi" });
+
+    // The prompt used to demand "2-12 words" while offering "yes" as a good
+    // example, and never mentioned the 80-character cap the sanitizer enforces.
+    expect(result.prompt).toContain("1-12 words, at most 80 characters");
+    expect(result.prompt).not.toContain("2-12 words");
+    expect(result.prompt).toContain("yes, no, continue, commit, ship, retry");
+  });
+});
+
+describe("sanitizePromptSuggestion", () => {
+  it("accepts short imperative user prompts", () => {
+    expect(sanitizePromptSuggestion("run the tests")).toBe("run the tests");
+    expect(sanitizePromptSuggestion("yes")).toBe("yes");
+    expect(sanitizePromptSuggestion("  commit this.  ")).toBe("commit this");
+  });
+
+  it("rejects assistant voice, questions, and fluff", () => {
+    expect(sanitizePromptSuggestion("I'll run the tests")).toBeNull();
+    expect(sanitizePromptSuggestion("want me to continue?")).toBeNull();
+    expect(sanitizePromptSuggestion("thanks")).toBeNull();
+    expect(sanitizePromptSuggestion("looks good")).toBeNull();
+    expect(sanitizePromptSuggestion("")).toBeNull();
+    expect(sanitizePromptSuggestion("no suggestion")).toBeNull();
+  });
+
+  it("rejects overly long suggestions", () => {
+    expect(sanitizePromptSuggestion("word ".repeat(20).trim())).toBeNull();
+  });
+
+  it("strips only matching wrapping delimiters", () => {
+    expect(sanitizePromptSuggestion('"run the tests"')).toBe("run the tests");
+    expect(sanitizePromptSuggestion("`run the tests`")).toBe("run the tests");
+    expect(sanitizePromptSuggestion("(run the tests)")).toBe("run the tests");
+    expect(sanitizePromptSuggestion('"(run the tests)"')).toBe("run the tests");
+  });
+
+  it("keeps an unmatched trailing bracket that is part of the suggestion", () => {
+    // Regression: an asymmetric strip turned this into "fix the retry path (again".
+    expect(sanitizePromptSuggestion("fix the retry path (again)")).toBe(
+      "fix the retry path (again)",
+    );
+  });
+
+  it("rejects single words outside the allowed set", () => {
+    expect(sanitizePromptSuggestion("continue")).toBe("continue");
+    expect(sanitizePromptSuggestion("refactor")).toBeNull();
+  });
+
+  it("collapses whitespace and keeps only the first line", () => {
+    expect(sanitizePromptSuggestion("run   the\ttests")).toBe("run the tests");
+    expect(sanitizePromptSuggestion("run the tests\nthen commit")).toBe("run the tests");
   });
 });

@@ -42,6 +42,130 @@ export function sanitizePrTitle(raw: string): string {
   return "Update project changes";
 }
 
+const PROMPT_SUGGESTION_MAX_CHARS = 80;
+const PROMPT_SUGGESTION_MAX_WORDS = 12;
+const PROMPT_SUGGESTION_ALLOWED_SINGLE_WORDS = new Set([
+  "yes",
+  "no",
+  "continue",
+  "commit",
+  "ship",
+  "retry",
+]);
+
+const PROMPT_SUGGESTION_REJECT_EXACT = new Set([
+  "no suggestion",
+  "nothing to suggest",
+  "silence",
+  "stay silent",
+  "none",
+  "n/a",
+  "na",
+]);
+
+const PROMPT_SUGGESTION_REJECT_PREFIXES = [
+  "let me",
+  "i'll",
+  "i will",
+  "i can",
+  "here's",
+  "here is",
+  "suggestion:",
+  "user:",
+  "assistant:",
+];
+
+const PROMPT_SUGGESTION_REJECT_CONTAINS = [
+  "thanks",
+  "thank you",
+  "looks good",
+  "great job",
+  "perfect",
+  "api error",
+  "prompt is too long",
+  "request timed out",
+  "invalid api key",
+];
+
+const PROMPT_SUGGESTION_WRAPPING_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['"', '"'],
+  ["'", "'"],
+  ["`", "`"],
+  ["(", ")"],
+  ["[", "]"],
+];
+
+/**
+ * Remove wrapping delimiters, but only when the first and last characters form
+ * a matching pair. Repeats so `"(run the tests)"` fully unwraps.
+ */
+function stripWrappingPair(input: string): string {
+  let value = input.trim();
+  let stripped = true;
+  while (stripped && value.length >= 2) {
+    stripped = false;
+    for (const [open, close] of PROMPT_SUGGESTION_WRAPPING_PAIRS) {
+      if (value.startsWith(open) && value.endsWith(close)) {
+        value = value.slice(open.length, value.length - close.length).trim();
+        stripped = true;
+        break;
+      }
+    }
+  }
+  return value;
+}
+
+/**
+ * Normalize / reject model output for composer ghost next-prompt suggestions.
+ * Returns null when silence is better.
+ */
+export function sanitizePromptSuggestion(raw: string): string | null {
+  let value = raw.trim();
+  if (value.length === 0) return null;
+
+  // Strip wrapping quotes / brackets the model sometimes adds. Only strip a
+  // MATCHING pair, so a suggestion that legitimately ends in a bracket
+  // ("fix the retry path (again)") does not lose its closing character.
+  value = stripWrappingPair(value);
+  value = value.replace(/^suggestion:\s*/i, "").trim();
+  if (value.length === 0) return null;
+
+  // Single line only.
+  value = value.split(/\r?\n/g)[0]?.trim() ?? "";
+  if (value.length === 0) return null;
+
+  // Drop trailing period (keep other punctuation if rare).
+  value = value.replace(/[.]+$/g, "").trim();
+  if (value.length === 0) return null;
+
+  if (value.length > PROMPT_SUGGESTION_MAX_CHARS) {
+    return null;
+  }
+
+  const lower = value.toLowerCase();
+  if (PROMPT_SUGGESTION_REJECT_EXACT.has(lower)) return null;
+  if (value.includes("?") || value.endsWith("?")) return null;
+  if (/^[-*+]\s/.test(value) || /^\d+[.)]\s/.test(value)) return null;
+  if (/\*\*|__|`/.test(value)) return null;
+
+  for (const prefix of PROMPT_SUGGESTION_REJECT_PREFIXES) {
+    if (lower.startsWith(prefix)) return null;
+  }
+  for (const needle of PROMPT_SUGGESTION_REJECT_CONTAINS) {
+    if (lower.includes(needle)) return null;
+  }
+
+  const words = value.split(/\s+/).filter((part) => part.length > 0);
+  if (words.length === 0) return null;
+  if (words.length === 1 && !PROMPT_SUGGESTION_ALLOWED_SINGLE_WORDS.has(words[0]!.toLowerCase())) {
+    return null;
+  }
+  if (words.length > PROMPT_SUGGESTION_MAX_WORDS) return null;
+
+  // Collapse internal whitespace.
+  return words.join(" ");
+}
+
 /** Normalise a raw thread title to a compact single-line sidebar-safe label. */
 export function sanitizeThreadTitle(raw: string): string {
   const normalized = raw

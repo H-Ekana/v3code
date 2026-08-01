@@ -114,6 +114,8 @@ import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+import { TextGenerationUsageDialog } from "./TextGenerationUsageDialog";
+import { usePrimaryEnvironmentId } from "../../state/environments";
 import {
   canOneClickUpdateProviderCandidate,
   collectProviderUpdateCandidates,
@@ -1126,6 +1128,8 @@ export function AppearanceSettingsPanel() {
 export function GeneralSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
+  const [isUsageDialogOpen, setIsUsageDialogOpen] = useState(false);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
@@ -1602,6 +1606,41 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          title="Generate ghost prompts"
+          description="After a turn finishes, suggest your next message as grayed-out text in an empty composer; press Tab to use it. Off by default because each suggestion costs an extra text generation call."
+          resetAction={
+            settings.promptSuggestionsEnabled !==
+            DEFAULT_UNIFIED_SETTINGS.promptSuggestionsEnabled ? (
+              <SettingResetButton
+                label="ghost prompts"
+                onClick={() =>
+                  updateSettings({
+                    promptSuggestionsEnabled: DEFAULT_UNIFIED_SETTINGS.promptSuggestionsEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.promptSuggestionsEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ promptSuggestionsEnabled: Boolean(checked) })
+              }
+              aria-label="Generate ghost prompts"
+            />
+          }
+        />
+
+        {primaryEnvironmentId ? (
+          <TextGenerationUsageDialog
+            open={isUsageDialogOpen}
+            onOpenChange={setIsUsageDialogOpen}
+            environmentId={primaryEnvironmentId}
+          />
+        ) : null}
+
+        <SettingsRow
           title="Text generation model"
           description="Default model for generated text like thread titles and source control content. Source control settings can override it with a dedicated source control writer model."
           resetAction={
@@ -1619,6 +1658,16 @@ export function GeneralSettingsPanel() {
           }
           control={
             <div className="flex flex-wrap items-center justify-end gap-1.5">
+              {primaryEnvironmentId ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  onClick={() => setIsUsageDialogOpen(true)}
+                >
+                  View detailed usage
+                </Button>
+              ) : null}
               <ProviderModelPicker
                 activeInstanceId={textGenInstanceId}
                 model={textGenModel}

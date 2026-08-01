@@ -38,6 +38,7 @@ import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as GitHubCli from "./sourceControl/GitHubCli.ts";
 import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
+import * as TextGenerationUsageStore from "./promptSuggestion/usageStore.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
@@ -253,6 +254,7 @@ const GitManagerLayerLive = GitManager.layer.pipe(
   Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(TextGeneration.layer),
+  Layer.provideMerge(TextGenerationUsageStore.layer),
 );
 
 const GitLayerLive = Layer.empty.pipe(

@@ -73,6 +73,22 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface PromptSuggestionGenerationInput {
+  cwd: string;
+  /** Recent user/assistant turns as plain text context. */
+  conversation: string;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export interface PromptSuggestionGenerationResult {
+  /**
+   * Suggested next user prompt, or null when silence is better
+   * (model returned empty / rejected by sanitizer).
+   */
+  suggestion: string | null;
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -80,6 +96,9 @@ export interface TextGenerationService {
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
+  generatePromptSuggestion(
+    input: PromptSuggestionGenerationInput,
+  ): Promise<PromptSuggestionGenerationResult>;
 }
 
 /**
@@ -113,6 +132,14 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /**
+     * Suggest a short next user prompt after a turn finishes
+     * (ghost-text in the composer).
+     */
+    readonly generatePromptSuggestion: (
+      input: PromptSuggestionGenerationInput,
+    ) => Effect.Effect<PromptSuggestionGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -123,7 +150,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generatePromptSuggestion";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -162,6 +190,10 @@ export const makeTextGenerationFromRegistry = (
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+      ),
+    generatePromptSuggestion: (input) =>
+      resolveInstance(registry, "generatePromptSuggestion", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generatePromptSuggestion(input)),
       ),
   });
 

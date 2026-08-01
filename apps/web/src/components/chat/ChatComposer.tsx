@@ -88,6 +88,13 @@ import {
   shouldUseCompactComposerFooter,
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
+import { promptSuggestionEnvironment } from "../../state/promptSuggestion";
+import { useAtomCommand } from "../../state/use-atom-command";
+import {
+  resolveVisibleGhostSuggestion,
+  shouldAcceptGhostSuggestion,
+  shouldRequestPromptSuggestion,
+} from "./composerPromptSuggestion";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
@@ -844,6 +851,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const setComposerDraftGhostSuggestion = useComposerDraftStore(
+    (store) => store.setGhostSuggestion,
+  );
   const addComposerDraftLargePaste = useComposerDraftStore((store) => store.addLargePaste);
   const setComposerDraftLargePastes = useComposerDraftStore((store) => store.setLargePastes);
   const removeComposerDraftLargePaste = useComposerDraftStore((store) => store.removeLargePaste);
@@ -1146,6 +1156,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const isMobileViewport = useMediaQuery("max-sm");
   const isComposerCollapsedMobile =
     isMobileViewport && !forceExpandedOnMobile && !isComposerFocused;
+  // Held per thread in the draft store (like the prompt and attachments) so a
+  // generation that was already paid for survives switching threads.
+  const ghostSuggestion = composerDraft.ghostSuggestion;
+  const setGhostSuggestion = useCallback(
+    (next: string | null) => {
+      setComposerDraftGhostSuggestion(composerDraftTarget, next);
+    },
+    [composerDraftTarget, setComposerDraftGhostSuggestion],
+  );
+  const previousPhaseRef = useRef(phase);
+  // The thread `previousPhaseRef` was recorded for. A phase edge is only a real
+  // "turn settled" signal when it happened on the thread we are still looking
+  // at — otherwise navigating away from a running thread onto an idle one reads
+  // as a settle and burns a generation on a thread that never ran.
+  const previousPhaseThreadRef = useRef<string | null>(activeThreadId ?? null);
+  const requestSuggestNextPrompt = useAtomCommand(promptSuggestionEnvironment.suggestNextPrompt, {
+    label: "composer:suggest-next-prompt",
+    reportFailure: false,
+  });
 
   // ------------------------------------------------------------------
   // Refs
@@ -1898,6 +1927,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       promptRef.current = nextPrompt;
       setPrompt(nextPrompt);
+      // Typing does NOT discard the suggestion — it only hides it (see the
+      // `ghostSuggestion` prop below). Clearing the draft back to empty brings
+      // the same suggestion back rather than costing another generation.
       if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
         setComposerDraftTerminalContexts(
           composerDraftTarget,
@@ -2247,6 +2279,58 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, []);
 
   // ------------------------------------------------------------------
+  // Ghost next-prompt suggestion (after a turn settles)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const previousPhase = previousPhaseRef.current;
+    const previousPhaseThread = previousPhaseThreadRef.current;
+    const currentThread = activeThreadId ?? null;
+    previousPhaseRef.current = phase;
+    previousPhaseThreadRef.current = currentThread;
+
+    if (phase === "running") {
+      setGhostSuggestion(null);
+      return;
+    }
+
+    if (
+      !shouldRequestPromptSuggestion({
+        previousPhase,
+        previousPhaseThreadId: previousPhaseThread,
+        phase,
+        threadId: currentThread,
+        environmentId: environmentId ?? null,
+        draft: promptRef.current,
+        approvalActive: isComposerApprovalState,
+      })
+    ) {
+      return;
+    }
+    if (!activeThreadId || !environmentId) return;
+
+    let cancelled = false;
+    void requestSuggestNextPrompt({
+      environmentId,
+      input: { threadId: activeThreadId },
+    }).then((result) => {
+      if (cancelled) return;
+      if (result._tag !== "Success") return;
+      if (promptRef.current.trim().length > 0) return;
+      const suggestion = result.value.suggestion?.trim() ?? "";
+      setGhostSuggestion(suggestion.length > 0 ? suggestion : null);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThreadId, environmentId, isComposerApprovalState, phase, requestSuggestNextPrompt]);
+
+  // NOTE: no clear-on-thread-switch effect. The ghost is stored per thread, so
+  // switching away and back shows the same suggestion instead of discarding a
+  // generation the user already paid for. It is cleared when that thread starts
+  // a new turn (above) or when the user sends a message.
+
+  // ------------------------------------------------------------------
   // Callbacks: command key
   // ------------------------------------------------------------------
   const onComposerCommandKey = (
@@ -2274,6 +2358,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onSelectComposerItem(selectedItem);
         return true;
       }
+    }
+    if (
+      shouldAcceptGhostSuggestion({
+        key,
+        shiftKey: event.shiftKey,
+        menuIsActive,
+        ghostSuggestion,
+        draft: promptRef.current,
+      })
+    ) {
+      const accepted = ghostSuggestion as string;
+      // Kept, not cleared: accepting then erasing the draft restores the ghost.
+      const nextCursor = accepted.length;
+      promptRef.current = accepted;
+      setPrompt(accepted);
+      setComposerCursor(nextCursor);
+      setComposerTrigger(detectComposerTrigger(accepted, nextCursor));
+      queueMicrotask(() => {
+        composerEditorRef.current?.focusAt(nextCursor);
+      });
+      return true;
     }
     if (
       key === "Enter" &&
@@ -3512,6 +3617,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 largePasteEnabled={!isComposerApprovalState && pendingUserInputs.length === 0}
                 skills={selectedProviderStatus?.skills ?? []}
+                ghostSuggestion={resolveVisibleGhostSuggestion({
+                  ghostSuggestion,
+                  draft: prompt,
+                  approvalActive: isComposerApprovalState,
+                  pendingProgressActive: Boolean(activePendingProgress),
+                })}
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                 onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                 onAddLargePaste={(paste) => addComposerDraftLargePaste(composerDraftTarget, paste)}
