@@ -5,10 +5,17 @@ import * as NodeTimersPromises from "node:timers/promises";
 
 const defaultTcpHosts = ["127.0.0.1", "localhost", "::1"];
 
-async function fileExists(filePath) {
+export async function resourceFileIsReady(
+  filePath,
+  minimumMtimeMs,
+  { access = NodeFSP.access, stat = NodeFSP.stat } = {},
+) {
   try {
-    await NodeFSP.access(filePath);
-    return true;
+    await access(filePath);
+    if (minimumMtimeMs === undefined) {
+      return true;
+    }
+    return (await stat(filePath)).mtimeMs >= minimumMtimeMs;
   } catch {
     return false;
   }
@@ -43,11 +50,21 @@ function tcpPortIsReady({ host, port, connectTimeoutMs = 500 }) {
   });
 }
 
-async function resolvePendingResources({ baseDir, files, tcpPort, tcpHosts, connectTimeoutMs }) {
+async function resolvePendingResources({
+  baseDir,
+  files,
+  minimumFileMtimeMs,
+  tcpPort,
+  tcpHosts,
+  connectTimeoutMs,
+}) {
   const pendingFiles = [];
 
   for (const relativeFilePath of files) {
-    const ready = await fileExists(NodePath.resolve(baseDir, relativeFilePath));
+    const ready = await resourceFileIsReady(
+      NodePath.resolve(baseDir, relativeFilePath),
+      minimumFileMtimeMs,
+    );
     if (!ready) {
       pendingFiles.push(relativeFilePath);
     }
@@ -79,6 +96,7 @@ export async function waitForResources({
   tcpHost,
   tcpPort,
   connectTimeoutMs = 500,
+  minimumFileMtimeMs,
 }) {
   if (!Number.isInteger(tcpPort) || tcpPort <= 0) {
     throw new TypeError("waitForResources requires a positive integer tcpPort");
@@ -91,6 +109,7 @@ export async function waitForResources({
     const { pendingFiles, tcpReady } = await resolvePendingResources({
       baseDir,
       files,
+      minimumFileMtimeMs,
       tcpPort,
       tcpHosts,
       connectTimeoutMs,
