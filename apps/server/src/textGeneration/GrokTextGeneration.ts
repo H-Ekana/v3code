@@ -268,8 +268,15 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         modelSelection: input.modelSelection,
       });
 
+      const sanitized = sanitizePromptSuggestion(generated.suggestion);
+      if (sanitized === null && generated.suggestion.trim().length > 0) {
+        yield* Effect.logDebug("Prompt suggestion rejected by the sanitizer.", {
+          raw: generated.suggestion,
+        });
+      }
+
       return {
-        suggestion: sanitizePromptSuggestion(generated.suggestion),
+        suggestion: sanitized,
       } satisfies TextGeneration.PromptSuggestionGenerationResult;
     });
 

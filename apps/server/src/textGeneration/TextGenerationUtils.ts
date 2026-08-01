@@ -87,6 +87,34 @@ const PROMPT_SUGGESTION_REJECT_CONTAINS = [
   "invalid api key",
 ];
 
+const PROMPT_SUGGESTION_WRAPPING_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ['"', '"'],
+  ["'", "'"],
+  ["`", "`"],
+  ["(", ")"],
+  ["[", "]"],
+];
+
+/**
+ * Remove wrapping delimiters, but only when the first and last characters form
+ * a matching pair. Repeats so `"(run the tests)"` fully unwraps.
+ */
+function stripWrappingPair(input: string): string {
+  let value = input.trim();
+  let stripped = true;
+  while (stripped && value.length >= 2) {
+    stripped = false;
+    for (const [open, close] of PROMPT_SUGGESTION_WRAPPING_PAIRS) {
+      if (value.startsWith(open) && value.endsWith(close)) {
+        value = value.slice(open.length, value.length - close.length).trim();
+        stripped = true;
+        break;
+      }
+    }
+  }
+  return value;
+}
+
 /**
  * Normalize / reject model output for composer ghost next-prompt suggestions.
  * Returns null when silence is better.
@@ -95,8 +123,10 @@ export function sanitizePromptSuggestion(raw: string): string | null {
   let value = raw.trim();
   if (value.length === 0) return null;
 
-  // Strip wrapping quotes / brackets the model sometimes adds.
-  value = value.replace(/^[[('"`]+|[\)\]'"`]+$/g, "").trim();
+  // Strip wrapping quotes / brackets the model sometimes adds. Only strip a
+  // MATCHING pair, so a suggestion that legitimately ends in a bracket
+  // ("fix the retry path (again)") does not lose its closing character.
+  value = stripWrappingPair(value);
   value = value.replace(/^suggestion:\s*/i, "").trim();
   if (value.length === 0) return null;
 

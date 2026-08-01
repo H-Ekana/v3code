@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -17,6 +18,8 @@ import { expandHomePath } from "../pathExpansion.ts";
 import { codexExecLaunchArgs, resolveCodexLaunchArgs } from "../provider/Layers/codexLaunchArgs.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import * as TextGeneration from "./TextGeneration.ts";
+import { recordUsageIfAvailable } from "../promptSuggestion/usageStore.ts";
+import { parseCodexUsage } from "./codexUsage.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -190,6 +193,12 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         [
           "exec",
           ...codexExecLaunchArgs(launchArgs),
+          // JSONL events on stdout carry the turn's real token usage. The
+          // result itself still comes from --output-last-message, so this only
+          // changes text we previously used for error detail.
+          "--json",
+          // No session/rollout files: these side jobs must not pollute the
+          // user's Codex history (or any tool that totals it).
           "--ephemeral",
           "--skip-git-repo-check",
           "-s",
@@ -240,6 +249,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         ],
         { concurrency: "unbounded" },
       );
+
+      yield* recordUsageIfAvailable({
+        instanceId: modelSelection.instanceId,
+        model: modelSelection.model,
+        operation,
+        succeeded: exitCode === 0,
+        at: DateTime.formatIso(yield* DateTime.now),
+        ...parseCodexUsage(stdout),
+      });
 
       if (exitCode !== 0) {
         const stderrDetail = stderr.trim();
@@ -421,8 +439,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         modelSelection: input.modelSelection,
       });
 
+      const sanitized = sanitizePromptSuggestion(generated.suggestion);
+      if (sanitized === null && generated.suggestion.trim().length > 0) {
+        yield* Effect.logDebug("Prompt suggestion rejected by the sanitizer.", {
+          raw: generated.suggestion,
+        });
+      }
+
       return {
-        suggestion: sanitizePromptSuggestion(generated.suggestion),
+        suggestion: sanitized,
       } satisfies TextGeneration.PromptSuggestionGenerationResult;
     });
 

@@ -252,11 +252,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
 
   const acquireSharedServer = (input: {
     readonly binaryPath: string;
-    readonly operation:
-      | "generateCommitMessage"
-      | "generatePrContent"
-      | "generateBranchName"
-      | "generateThreadTitle";
+    readonly operation: OpenCodeTextGenerationOperation;
   }) =>
     sharedServerMutex.withPermit(
       Effect.gen(function* () {
@@ -631,9 +627,14 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         modelSelection: input.modelSelection,
       });
 
-      return {
-        suggestion: sanitizePromptSuggestion(generated.suggestion),
-      };
+      const sanitized = sanitizePromptSuggestion(generated.suggestion);
+      if (sanitized === null && generated.suggestion.trim().length > 0) {
+        yield* Effect.logDebug("Prompt suggestion rejected by the sanitizer.", {
+          raw: generated.suggestion,
+        });
+      }
+
+      return { suggestion: sanitized };
     });
 
   return {

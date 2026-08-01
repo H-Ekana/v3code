@@ -377,9 +377,14 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         modelSelection: input.modelSelection,
       });
 
-      return {
-        suggestion: sanitizePromptSuggestion(generated.suggestion),
-      };
+      const sanitized = sanitizePromptSuggestion(generated.suggestion);
+      if (sanitized === null && generated.suggestion.trim().length > 0) {
+        yield* Effect.logDebug("Prompt suggestion rejected by the sanitizer.", {
+          raw: generated.suggestion,
+        });
+      }
+
+      return { suggestion: sanitized };
     });
 
   return {

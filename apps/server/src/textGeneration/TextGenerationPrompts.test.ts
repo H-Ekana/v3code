@@ -304,6 +304,16 @@ describe("buildPromptSuggestionPrompt", () => {
     expect(result.prompt).toContain("USER:\nfix login");
     expect(result.prompt).toContain("ASSISTANT:\nFixed the bug.");
   });
+
+  it("states the length rule consistently with the sanitizer", () => {
+    const result = buildPromptSuggestionPrompt({ conversation: "USER:\nhi" });
+
+    // The prompt used to demand "2-12 words" while offering "yes" as a good
+    // example, and never mentioned the 80-character cap the sanitizer enforces.
+    expect(result.prompt).toContain("1-12 words, at most 80 characters");
+    expect(result.prompt).not.toContain("2-12 words");
+    expect(result.prompt).toContain("yes, no, continue, commit, ship, retry");
+  });
 });
 
 describe("sanitizePromptSuggestion", () => {
@@ -324,5 +334,29 @@ describe("sanitizePromptSuggestion", () => {
 
   it("rejects overly long suggestions", () => {
     expect(sanitizePromptSuggestion("word ".repeat(20).trim())).toBeNull();
+  });
+
+  it("strips only matching wrapping delimiters", () => {
+    expect(sanitizePromptSuggestion('"run the tests"')).toBe("run the tests");
+    expect(sanitizePromptSuggestion("`run the tests`")).toBe("run the tests");
+    expect(sanitizePromptSuggestion("(run the tests)")).toBe("run the tests");
+    expect(sanitizePromptSuggestion('"(run the tests)"')).toBe("run the tests");
+  });
+
+  it("keeps an unmatched trailing bracket that is part of the suggestion", () => {
+    // Regression: an asymmetric strip turned this into "fix the retry path (again".
+    expect(sanitizePromptSuggestion("fix the retry path (again)")).toBe(
+      "fix the retry path (again)",
+    );
+  });
+
+  it("rejects single words outside the allowed set", () => {
+    expect(sanitizePromptSuggestion("continue")).toBe("continue");
+    expect(sanitizePromptSuggestion("refactor")).toBeNull();
+  });
+
+  it("collapses whitespace and keeps only the first line", () => {
+    expect(sanitizePromptSuggestion("run   the\ttests")).toBe("run the tests");
+    expect(sanitizePromptSuggestion("run the tests\nthen commit")).toBe("run the tests");
   });
 });

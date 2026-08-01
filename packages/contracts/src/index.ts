@@ -23,6 +23,7 @@ export * from "./t3ProjectFile.ts";
 export * from "./threadAgents.ts";
 export * from "./agentTranscript.ts";
 export * from "./promptSuggestion.ts";
+export * from "./textGenerationUsage.ts";
 export * from "./editor.ts";
 export * from "./project.ts";
 export * from "./filesystem.ts";

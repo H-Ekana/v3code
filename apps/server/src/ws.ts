@@ -83,6 +83,7 @@ import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { readAgentTranscript } from "./provider/AgentTranscriptReader.ts";
 import { suggestNextPrompt } from "./promptSuggestion/suggestNextPrompt.ts";
+import { TextGenerationUsageStore } from "./promptSuggestion/usageStore.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -1367,6 +1368,25 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.textGenerationGetUsage]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.textGenerationGetUsage,
+            Effect.serviceOption(TextGenerationUsageStore).pipe(
+              Effect.flatMap((store) =>
+                store._tag === "Some"
+                  ? store.value.read(input.window)
+                  : Effect.succeed({
+                      window: input.window,
+                      entries: [],
+                      totalEstimatedCostUsd: null,
+                      hasUnpricedUsage: false,
+                      hasUnreportedTokens: false,
+                      since: null,
+                    }),
+              ),
+            ),
+            { "rpc.aggregate": "server" },
+          ),
         [WS_METHODS.agentGetTranscript]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentGetTranscript,

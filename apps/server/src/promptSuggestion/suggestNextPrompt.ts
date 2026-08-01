@@ -14,49 +14,82 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 
-const MAX_CONTEXT_CHARS = 12_000;
-const MAX_MESSAGES = 12;
+/**
+ * The signal for "what would the user type next" lives almost entirely in the
+ * tail of the assistant's last message — that is where an agent puts its offer
+ * ("Want me to run them?") or its handoff ("left it uncommitted"). Sending the
+ * whole recent transcript cost thousands of tokens per settled turn to produce
+ * a handful of words, so we send only:
+ *
+ *   - the last user message (intent + tone to match), tightly capped
+ *   - the closing paragraphs of the last assistant message
+ */
+const MAX_ASSISTANT_TAIL_PARAGRAPHS = 2;
+const MAX_ASSISTANT_TAIL_CHARS = 1_200;
+const MAX_USER_MESSAGE_CHARS = 500;
 
-function formatConversationContext(
+/** Last N paragraphs of a message, capped, keeping the END of the text. */
+function takeClosingParagraphs(text: string, paragraphs: number, maxChars: number): string {
+  const blocks = text
+    .split(/\n\s*\n/g)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+
+  let tail = blocks.slice(-paragraphs).join("\n\n");
+  if (tail.length === 0) tail = text.trim();
+  if (tail.length <= maxChars) return tail;
+
+  // Over budget: keep the end, then drop a partial leading line.
+  const clipped = tail.slice(tail.length - maxChars);
+  const firstBreak = clipped.indexOf("\n");
+  return (firstBreak >= 0 ? clipped.slice(firstBreak + 1) : clipped).trim();
+}
+
+/** Keep the end of a user message — the ask usually lands last. */
+function takeMessageTail(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  return trimmed.length <= maxChars ? trimmed : trimmed.slice(trimmed.length - maxChars).trim();
+}
+
+export function formatConversationContext(
   messages: ReadonlyArray<{
     readonly role: "user" | "assistant" | "system";
     readonly text: string;
     readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
   }>,
 ): string {
-  const relevant = messages
-    .filter((message) => message.role === "user" || message.role === "assistant")
-    .slice(-MAX_MESSAGES);
+  const relevant = messages.filter(
+    (message) => message.role === "user" || message.role === "assistant",
+  );
 
-  let context = "";
-  for (const message of relevant) {
-    const text = message.text.trim();
-    const attachmentSummary = (message.attachments ?? [])
+  const lastAssistant = relevant.findLast((message) => message.role === "assistant");
+  const lastUser = relevant.findLast((message) => message.role === "user");
+
+  const sections: string[] = [];
+
+  if (lastUser) {
+    const attachmentSummary = (lastUser.attachments ?? [])
       .map((attachment) => attachment.name)
       .join(", ");
     const contents = [
-      ...(text.length > 0 ? [text] : []),
+      ...(lastUser.text.trim().length > 0
+        ? [takeMessageTail(lastUser.text, MAX_USER_MESSAGE_CHARS)]
+        : []),
       ...(attachmentSummary.length > 0 ? [`[Attachments: ${attachmentSummary}]`] : []),
     ].join("\n");
-    if (contents.length === 0) continue;
-
-    const section = `${message.role.toUpperCase()}:\n${contents}`;
-    const separator = context.length > 0 ? "\n\n" : "";
-    const next = `${context}${separator}${section}`;
-    if (next.length > MAX_CONTEXT_CHARS) {
-      // Prefer the end of the conversation when over budget.
-      const overflow = next.length - MAX_CONTEXT_CHARS;
-      context = next.slice(overflow);
-      if (!context.startsWith("USER:") && !context.startsWith("ASSISTANT:")) {
-        const cut = context.indexOf("\n\n");
-        context = cut >= 0 ? context.slice(cut + 2) : context;
-      }
-      continue;
-    }
-    context = next;
+    if (contents.length > 0) sections.push(`USER:\n${contents}`);
   }
 
-  return context.trim();
+  if (lastAssistant && lastAssistant.text.trim().length > 0) {
+    const tail = takeClosingParagraphs(
+      lastAssistant.text,
+      MAX_ASSISTANT_TAIL_PARAGRAPHS,
+      MAX_ASSISTANT_TAIL_CHARS,
+    );
+    if (tail.length > 0) sections.push(`ASSISTANT (end of reply):\n${tail}`);
+  }
+
+  return sections.join("\n\n").trim();
 }
 
 export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
@@ -67,7 +100,31 @@ export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
 
+  // Correlation id only (see the contract): generated once and reused by every
+  // exit below. A UUID failure must not fail the RPC, so it falls back.
+  const generationId = yield* crypto.randomUUIDv4.pipe(
+    Effect.orElseSucceed(() => "prompt-suggestion"),
+  );
+
   const threadId = input.threadId as ThreadId;
+
+  // Settings failures fail closed like every other soft failure here: the
+  // composer simply shows no ghost. They are not part of the RPC error union.
+  const settings = yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => null));
+
+  // Opt-in feature, OFF by default — checked before any other work so a user
+  // who has not enabled it spends nothing at all.
+  if (settings?.promptSuggestionsEnabled !== true) {
+    yield* Effect.logInfo("No next-prompt suggestion.", {
+      reason: "prompt-suggestions-disabled",
+      threadId,
+    });
+    return {
+      suggestion: null,
+      generationId,
+    } satisfies SuggestNextPromptResult;
+  }
+
   const threadOption = yield* projection.getThreadDetailById(threadId).pipe(
     Effect.mapError(
       () =>
@@ -78,26 +135,36 @@ export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
   );
 
   if (Option.isNone(threadOption)) {
+    yield* Effect.logInfo("No next-prompt suggestion.", { reason: "thread-not-found", threadId });
     return {
       suggestion: null,
-      generationId: crypto.randomUUID(),
+      generationId,
     } satisfies SuggestNextPromptResult;
   }
   const thread = threadOption.value;
 
   // Only suggest when the main session is idle — not mid-turn.
   if (thread.session?.status === "running") {
+    yield* Effect.logInfo("No next-prompt suggestion.", {
+      reason: "session-still-running",
+      threadId,
+    });
     return {
       suggestion: null,
-      generationId: crypto.randomUUID(),
+      generationId,
     } satisfies SuggestNextPromptResult;
   }
 
   const conversation = formatConversationContext(thread.messages);
   if (conversation.length === 0) {
+    yield* Effect.logInfo("No next-prompt suggestion.", {
+      reason: "empty-conversation",
+      threadId,
+      messageCount: thread.messages.length,
+    });
     return {
       suggestion: null,
-      generationId: crypto.randomUUID(),
+      generationId,
     } satisfies SuggestNextPromptResult;
   }
 
@@ -117,11 +184,15 @@ export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
       projects: project ? [project] : [],
     }) ?? process.cwd();
 
-  const { textGenerationModelSelection: modelSelection } = yield* serverSettings.getSettings;
+  const modelSelection = settings?.textGenerationModelSelection;
   if (!modelSelection?.instanceId || !modelSelection.model) {
+    yield* Effect.logInfo("No next-prompt suggestion.", {
+      reason: "text-generation-model-not-configured",
+      threadId,
+    });
     return {
       suggestion: null,
-      generationId: crypto.randomUUID(),
+      generationId,
     } satisfies SuggestNextPromptResult;
   }
 
@@ -132,15 +203,31 @@ export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
       modelSelection: modelSelection as ModelSelection,
     })
     .pipe(
-      Effect.catch(() =>
-        Effect.succeed({
-          suggestion: null as string | null,
+      Effect.tapError((cause) =>
+        Effect.logWarning("Next-prompt suggestion generation failed.", {
+          reason: "generation-failed",
+          threadId,
+          cause,
         }),
       ),
+      Effect.orElseSucceed(() => ({ suggestion: null as string | null })),
     );
+
+  if (generated.suggestion === null) {
+    yield* Effect.logInfo("No next-prompt suggestion.", {
+      reason: "model-returned-nothing-or-sanitizer-rejected",
+      threadId,
+      model: modelSelection.model,
+    });
+  } else {
+    yield* Effect.logInfo("Next-prompt suggestion ready.", {
+      threadId,
+      suggestion: generated.suggestion,
+    });
+  }
 
   return {
     suggestion: generated.suggestion,
-    generationId: crypto.randomUUID(),
+    generationId,
   } satisfies SuggestNextPromptResult;
 });

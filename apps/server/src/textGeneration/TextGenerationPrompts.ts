@@ -291,7 +291,8 @@ export function buildPromptSuggestionPrompt(input: PromptSuggestionPromptInput) 
     "The suggestion must be exactly what the USER would type next into the composer — not what the assistant would say.",
     "",
     "Rules:",
-    '- suggestion is either a short next user prompt (2-12 words) OR an empty string "" when nothing is obvious',
+    '- suggestion is either a short next user prompt (1-12 words, at most 80 characters) OR an empty string "" when nothing is obvious',
+    "- A single-word reply is good when it fits: yes, no, continue, commit, ship, retry",
     "- Prefer silence (empty string) over a weak or generic guess",
     "- Match the user's tone and level of directness",
     "- Be specific to this conversation (not generic advice)",
@@ -312,8 +313,8 @@ export function buildPromptSuggestionPrompt(input: PromptSuggestionPromptInput) 
     "- continue",
     "- implement the plan",
     "",
-    "Recent conversation (oldest first):",
-    limitSection(input.conversation, 12_000),
+    "The user's last message, then the end of the assistant's reply:",
+    limitSection(input.conversation, 4_000),
   ].join("\n");
 
   const outputSchema = Schema.Struct({

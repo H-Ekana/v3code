@@ -1897,3 +1897,54 @@ describe("createDebouncedStorage", () => {
     expect(base.setItem).toHaveBeenCalledWith("key", "v2");
   });
 });
+
+describe("composerDraftStore ghost suggestion", () => {
+  const threadId = ThreadId.make("thread-ghost-a");
+  const otherThreadId = ThreadId.make("thread-ghost-b");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const otherThreadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId);
+
+  beforeEach(() => {
+    removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+    useComposerDraftStore.setState({
+      draftsByThreadKey: {},
+      draftThreadsByThreadKey: {},
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+      stickyModelSelectionByProvider: {},
+      stickyActiveProvider: null,
+    });
+  });
+
+  afterEach(() => {
+    removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+  });
+
+  it("keeps a ghost suggestion per thread across thread switches", () => {
+    const store = useComposerDraftStore.getState();
+    store.setGhostSuggestion(threadRef, "run the tests");
+    store.setGhostSuggestion(otherThreadRef, "commit this");
+
+    const next = useComposerDraftStore.getState();
+    expect(next.getComposerDraft(threadRef)?.ghostSuggestion).toBe("run the tests");
+    expect(next.getComposerDraft(otherThreadRef)?.ghostSuggestion).toBe("commit this");
+  });
+
+  it("survives alongside an empty prompt so switching away does not discard it", () => {
+    const store = useComposerDraftStore.getState();
+    store.setGhostSuggestion(threadRef, "run the tests");
+
+    // An empty prompt must not garbage-collect a draft that still holds a ghost.
+    expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.prompt).toBe("");
+    expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.ghostSuggestion).toBe(
+      "run the tests",
+    );
+  });
+
+  it("clears the ghost without stranding an empty draft", () => {
+    const store = useComposerDraftStore.getState();
+    store.setGhostSuggestion(threadRef, "run the tests");
+    store.setGhostSuggestion(threadRef, null);
+
+    expect(useComposerDraftStore.getState().getComposerDraft(threadRef)).toBeNull();
+  });
+});

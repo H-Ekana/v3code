@@ -55,6 +55,11 @@ import {
   SuggestNextPromptInput,
   SuggestNextPromptResult,
 } from "./promptSuggestion.ts";
+import {
+  TextGenerationUsageError,
+  TextGenerationUsageInput,
+  TextGenerationUsageResult,
+} from "./textGenerationUsage.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
   ClientOrchestrationCommand,
@@ -254,6 +259,7 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   agentGetTranscript: "agent.getTranscript",
   threadSuggestNextPrompt: "thread.suggestNextPrompt",
+  textGenerationGetUsage: "textGeneration.getUsage",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -305,6 +311,12 @@ export const WsThreadSuggestNextPromptRpc = Rpc.make(WS_METHODS.threadSuggestNex
   payload: SuggestNextPromptInput,
   success: SuggestNextPromptResult,
   error: Schema.Union([SuggestNextPromptError, EnvironmentAuthorizationError, TextGenerationError]),
+});
+
+export const WsTextGenerationGetUsageRpc = Rpc.make(WS_METHODS.textGenerationGetUsage, {
+  payload: TextGenerationUsageInput,
+  success: TextGenerationUsageResult,
+  error: Schema.Union([TextGenerationUsageError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
@@ -817,6 +829,7 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 export const WsRpcGroup = RpcGroup.make(
   WsAgentGetTranscriptRpc,
   WsThreadSuggestNextPromptRpc,
+  WsTextGenerationGetUsageRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
