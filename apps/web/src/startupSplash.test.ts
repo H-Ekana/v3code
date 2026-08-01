@@ -24,12 +24,26 @@ import {
 } from "./startupSplash";
 
 describe("startup splash", () => {
+  it("bypasses a completed splash on reload and waits for a revealed desktop paint", () => {
+    expect(bootShellHtml).toContain('window.sessionStorage.getItem(sessionKey) === "true"');
+    expect(bootShellHtml).not.toContain("isDesktopLaunch");
+    expect(startupSplashSource).toContain(
+      'window.sessionStorage.setItem(STARTUP_SPLASH_SESSION_KEY, "true")',
+    );
+    expect(startupSplashSource).toContain("void waitForNextPaint().then(markVisualReady)");
+    expect(startupSplashSource).toContain(
+      'import.meta.env.VITE_T3CODE_SKIP_STARTUP_SPLASH === "1"',
+    );
+  });
+
   it("holds the cold-launch splash before running the exit choreography", () => {
-    expect(STARTUP_SPLASH_HOLD_MS).toBe(1_600);
-    expect(STARTUP_SPLASH_EXIT_MS).toBe(2_500);
-    expect(STARTUP_SPLASH_REDUCED_EXIT_MS).toBe(300);
-    expect(resolveStartupSplashExitDuration(false)).toBe(2_500);
-    expect(resolveStartupSplashExitDuration(true)).toBe(300);
+    expect(STARTUP_SPLASH_HOLD_MS).toBe(1_900);
+    expect(STARTUP_SPLASH_EXIT_MS).toBe(1_600);
+    expect(STARTUP_SPLASH_REDUCED_EXIT_MS).toBe(220);
+    expect(resolveStartupSplashExitDuration(false)).toBe(1_600);
+    expect(resolveStartupSplashExitDuration(true)).toBe(220);
+    expect(STARTUP_SPLASH_HOLD_MS + STARTUP_SPLASH_EXIT_MS).toBeGreaterThanOrEqual(3_000);
+    expect(STARTUP_METEOR_MS).toBeGreaterThanOrEqual(450);
   });
 
   it("orders the causal chain: strike, then departure, then the sky parting", () => {
@@ -123,18 +137,29 @@ describe("startup splash", () => {
 
   it("gives the cloud bands genuinely different depths", () => {
     const mid = resolveCloudBandMotion("v3-splash-cloud-layer v3-splash-clouds-mid");
-    const near = resolveCloudBandMotion(
+    const left = resolveCloudBandMotion(
+      "v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-left",
+    );
+    const center = resolveCloudBandMotion(
       "v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-center",
+    );
+    const right = resolveCloudBandMotion(
+      "v3-splash-cloud-layer v3-splash-clouds-foreground v3-splash-clouds-foreground-right",
     );
 
     // Depth is read from RELATIVE velocity. Near-identical motion across layers reads as one
     // flat sheet no matter how many layers there are.
     const midVelocity = Number.parseFloat(mid.y) / mid.durationMs;
-    const nearVelocity = Number.parseFloat(near.y) / near.durationMs;
-    expect(nearVelocity / midVelocity).toBeGreaterThan(2);
+    for (const near of [left, center, right]) {
+      const nearVelocity = Number.parseFloat(near.y) / near.durationMs;
+      expect(nearVelocity / midVelocity).toBeGreaterThan(2);
+      expect(near.scale).toBeGreaterThan(mid.scale);
+    }
 
-    // Scale gradient is an independent depth cue: the nearer band approaches the viewer.
-    expect(near.scale).toBeGreaterThan(mid.scale);
+    // Each masked region clears on its own path instead of moving as one flat sheet.
+    expect(new Set([left.x, center.x, right.x]).size).toBe(3);
+    expect(new Set([left.delayMs, center.delayMs, right.delayMs]).size).toBe(3);
+    expect(new Set([left.durationMs, center.durationMs, right.durationMs]).size).toBe(3);
   });
 
   it("keeps the logo flight inside the exit window", () => {
@@ -251,7 +276,7 @@ describe("startup splash", () => {
     expect(STARTUP_SPLASH_FAILSAFE_MS).toBeGreaterThan(
       STARTUP_SPLASH_HOLD_MS + STARTUP_SPLASH_EXIT_MS,
     );
-    expect(STARTUP_SPLASH_FAILSAFE_MS).toBe(12_000);
+    expect(STARTUP_SPLASH_FAILSAFE_MS).toBe(8_000);
   });
 
   it("recoils downward, sweeps left, then climbs into the sidebar", () => {
@@ -275,6 +300,14 @@ describe("startup splash", () => {
     // invisible on screen. Under ~120px means the recoil has silently collapsed again.
     const recoil = Math.max(...keyframes.map((frame) => at(frame).y));
     expect(recoil).toBeGreaterThan(120);
+
+    // Momentum must leave the contact point diagonally down-left, closely following the
+    // incoming meteor vector. A tiny horizontal component makes the logo look like it simply
+    // falls before an unrelated sidebar animation takes over.
+    const impactTransfer = at(keyframes[Math.round((keyframes.length - 1) * 0.16)]!);
+    expect(impactTransfer.x).toBeLessThan(-80);
+    expect(impactTransfer.y).toBeGreaterThan(80);
+    expect(Math.abs(impactTransfer.x / impactTransfer.y)).toBeGreaterThan(0.8);
 
     // Partway in it must be well left AND still below where it started. That combination is
     // the corner of the J, and a straight diagonal cannot satisfy both at once.
@@ -326,7 +359,7 @@ describe("startup splash", () => {
     }
   });
 
-  it("carries two parallax mote fields at different depths", () => {
+  it("carries two static mote fields without promoting each group", () => {
     // Both fields exist. Two occurrences of the shared class is the cheapest proof.
     const fieldCount = bootShellHtml.match(/v3-splash-motes/g)?.length ?? 0;
     expect(fieldCount).toBeGreaterThanOrEqual(2);
@@ -353,18 +386,10 @@ describe("startup splash", () => {
     expect(nearField).toBeGreaterThan(-1);
     expect(nearField).toBeLessThan(firstForegroundCloud);
 
-    // The near field has to drift faster than the far field or there is no parallax. Compare
-    // the shortest far loop against the longest near loop; even in the worst pairing near wins.
-    const durations = (fieldSelector: RegExp) =>
-      [...bootShellHtml.matchAll(fieldSelector)].map((match) => Number(match[1]));
-    const farLoops = durations(/v3-mote-drift-far-[a-z] (\d+)s/g);
-    const nearLoops = durations(/v3-mote-drift-near-[a-z] (\d+)s/g);
-    expect(farLoops.length).toBeGreaterThan(0);
-    expect(nearLoops.length).toBeGreaterThan(0);
-    expect(Math.max(...nearLoops)).toBeLessThan(Math.min(...farLoops));
-
-    // One will-change per drifting group, never per mote — motes must not each get a layer.
-    expect(bootShellHtml).toMatch(/\.v3-splash-mote-group \{\s*will-change: transform;/);
+    // Depth now comes from paint order and the controller-driven exit. Ambient per-group
+    // transforms created five extra timelines and layers during React's busiest mount window.
+    expect(bootShellHtml).toMatch(/\.v3-splash-mote-group \{\s*animation: none;/);
+    expect(bootShellHtml).not.toMatch(/\.v3-splash-mote-group \{\s*will-change:/);
 
     // Reduced motion freezes the drift; the fields then just leave with their layers.
     expect(bootShellHtml).toMatch(
@@ -384,6 +409,9 @@ describe("startup splash", () => {
   it("connects the controller to the real application targets", () => {
     expect(mainSource).toContain("startStartupSplashTransition();");
     expect(rootRouteSource).toContain("markStartupSplashAppReady");
+    expect(rootRouteSource).not.toContain(
+      "window.requestAnimationFrame(markStartupSplashAppReady)",
+    );
     expect(sidebarChromeSource).toContain('data-startup-logo-target=""');
     expect(chatViewSource).toContain('data-startup-composer-target=""');
   });

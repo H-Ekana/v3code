@@ -28,10 +28,8 @@ describe("SplashScreen", () => {
     expect(bootShellHtml).toContain("v3-splash-card");
     expect(reactMarkup).toContain("v3-splash-card");
     expect(bootShellHtml).toMatch(/<div id="root"><\/div>\s*<div\s+id="boot-shell"/);
-    // Exactly three foreground bands and NO rim/brightened copies. State rules keyed on the
-    // exiting attribute apply in a single frame, so any second treatment of the cloud art
-    // (bright rims, saturation pumps) pops on at T0 with no transition. The clouds keep one
-    // treatment for their whole life and leave via their animated fall + fade only.
+    // The shared foreground texture is split into three masked bands so each region can move
+    // independently without loading three different assets.
     expect(
       bootShellHtml.match(/v3-splash-clouds-foreground v3-splash-clouds-foreground-/g),
     ).toHaveLength(3);
@@ -56,32 +54,39 @@ describe("SplashScreen", () => {
     expect(bootShellHtml).toContain("max-width: none");
   });
 
-  it("uses varied ambient motion with reduced-motion fallbacks", () => {
+  it("keeps the ambient scene alive within a bounded animation budget", () => {
+    const animatedStarGroups = starsSvg.match(/class="star-field star-field--/g) ?? [];
+    const animatedSparks = starsSvg.match(/class="[^"]*spark-twinkle spark-twinkle--/g) ?? [];
+    const meteorOrigins = starsSvg.match(/class="meteor-origin meteor-origin--/g) ?? [];
+    const shootingStars = starsSvg.match(/class="shooting-star shooting-star--/g) ?? [];
+
+    expect(animatedStarGroups).toHaveLength(5);
+    expect(animatedSparks).toHaveLength(6);
+    expect(meteorOrigins).toHaveLength(6);
+    expect(shootingStars).toHaveLength(6);
+    expect(starsSvg).toContain("Five field-level transforms replace the original per-star drift");
+    expect(starsSvg).toContain("@keyframes star-field-drift");
     expect(starsSvg).toContain("@keyframes star-twinkle");
-    expect(starsSvg).toContain("spark-twinkle--a");
-    expect(starsSvg).toContain("spark-twinkle--b");
-    expect(starsSvg).toContain("spark-twinkle--c");
-    expect(starsSvg).toContain("--twinkle-duration: 4s");
-    expect(starsSvg).toContain("drop-shadow(0 0 12px");
-    expect(starsSvg).toContain("@keyframes star-drift");
-    expect(starsSvg).toContain(".star-drift--a");
-    expect(starsSvg).toContain(".star-drift--e");
-    expect(starsSvg).toContain("translate: var(--drift-from)");
-    expect(starsSvg.match(/class="[^"]*star-drift star-drift--/g)).toHaveLength(33);
-    expect(starsSvg).not.toContain("@keyframes sky-pan");
-    expect(starsSvg).not.toContain("@keyframes sky-rotation");
+    expect(starsSvg).toContain("0%, 100% { opacity: .1; }");
+    expect(starsSvg).toContain("42%, 48% { opacity: 1; }");
+    for (const duration of ["2.4s", "2.8s", "3.2s"]) {
+      expect(starsSvg).toContain(duration);
+    }
+    expect(starsSvg).toContain("@keyframes meteor-origin-hide");
+    for (const key of ["a", "b", "c", "d", "e", "f"]) {
+      expect(starsSvg).toContain(`@keyframes shooting-star-${key}`);
+    }
+    for (const delay of ["0s", "-.5s", "-1s", "-1.5s", "-2s", "-2.5s"]) {
+      expect(starsSvg).toContain(`animation-delay: ${delay}`);
+    }
+    expect(starsSvg).toContain("animation-duration: 3s");
+    expect(starsSvg).not.toContain("star-drift");
+    expect(starsSvg).not.toContain("filter:");
+    expect(starsSvg).not.toContain("will-change:");
+    expect(starsSvg).toContain("@media (prefers-reduced-motion: reduce)");
     expect(starsSvg).not.toContain('class="sky-pan"');
     expect(starsSvg).not.toContain('class="sky-overscan"');
     expect(starsSvg).toContain('id="meteor-tail"');
-    expect(starsSvg).toContain("@keyframes meteor-origin-hide");
-    for (const key of ["a", "b", "c"]) {
-      expect(starsSvg).toContain(`@keyframes shooting-star-${key}`);
-    }
-    // Three. A streak stays visible for 0.13 x its cycle — 1.0-1.8s against a ~1.6s hold —
-    // so meteors stack: six read as a shower rather than a night sky. Three staggered across
-    // the hold keeps one or two on screen at a time.
-    // Retune with: node scripts/tune-splash-meteors.mjs
-    expect(starsSvg.match(/class="shooting-star shooting-star--/g)).toHaveLength(3);
     expect(bootShellHtml).toContain("@keyframes v3-cloud-mid-drift");
     expect(bootShellHtml).toContain("@keyframes v3-cloud-foreground-left-drift");
     expect(bootShellHtml).toContain("@keyframes v3-cloud-foreground-center-drift");
@@ -90,18 +95,21 @@ describe("SplashScreen", () => {
     expect(bootShellHtml).toContain("v3-splash-clouds-foreground-left");
     expect(bootShellHtml).toContain("v3-splash-clouds-foreground-center");
     expect(bootShellHtml).toContain("v3-splash-clouds-foreground-right");
-    expect(bootShellHtml).toContain("12s cubic-bezier");
-    expect(bootShellHtml).toContain("15s cubic-bezier");
-    expect(bootShellHtml).toContain("18s cubic-bezier");
-    expect(bootShellHtml).toContain("14s cubic-bezier");
-    expect(bootShellHtml).toContain("translate3d(-3.2%, 7px, 0)");
-    expect(bootShellHtml).toContain("translate3d(3.1%, 1px, 0)");
-    expect(bootShellHtml).toContain("translate3d(1.6%, 5px, 0)");
-    expect(bootShellHtml).toContain("translate3d(-1.3%, 1px, 0)");
-    expect(bootShellHtml).toContain("translate3d(-0.8%, 3px, 0)");
-    expect(bootShellHtml).toContain("translate3d(1.2%, 0, 0)");
-    expect(bootShellHtml).toContain("translate3d(1.4%, 6px, 0)");
-    expect(bootShellHtml).toContain("translate3d(-1.7%, 2px, 0)");
+    expect(bootShellHtml).toContain("v3-cloud-mid-drift 15s");
+    expect(bootShellHtml).toContain("v3-cloud-foreground-left-drift 12s");
+    expect(bootShellHtml).toContain("v3-cloud-foreground-center-drift 17s");
+    expect(bootShellHtml).toContain("v3-cloud-foreground-right-drift 13.5s");
+    expect(bootShellHtml).toContain("translate3d(-0.55%, 1.5px, 0) scale(1.004)");
+    expect(bootShellHtml).toContain("translate3d(0.6%, -1.5px, 0) scale(1.009)");
+    expect(bootShellHtml).toContain("translate3d(0.75%, 2px, 0) scale(1.006)");
+    expect(bootShellHtml).toContain("translate3d(-0.45%, 1.5px, 0) scale(1.005)");
+    expect(bootShellHtml).toContain("translate3d(0.65%, 2px, 0) scale(1.006)");
+    expect(bootShellHtml).toContain("opacity: 0.15");
+    expect(bootShellHtml).toContain("opacity: 0.25");
+    expect(bootShellHtml).toContain("saturate(0.52) brightness(0.68)");
+    expect(bootShellHtml).toContain("saturate(0.58) brightness(0.7)");
+    expect(bootShellHtml).toContain("saturate(0.52) brightness(0.58)");
+    expect(bootShellHtml).toContain("saturate(0.6) brightness(0.62)");
     expect(bootShellHtml).toContain(
       "mask-image: linear-gradient(to bottom, #000 0%, #000 38%, transparent 72%)",
     );
@@ -111,6 +119,8 @@ describe("SplashScreen", () => {
     expect(signalSvg).toContain("signal-node--4");
     expect(signalSvg).toContain("@keyframes signal-residue-fade");
     expect(signalSvg).toContain("840ms");
+    expect(signalSvg).toContain("The startup controller owns the only one-shot clock");
+    expect(signalSvg).toMatch(/\.signal-orbit-segment,[\s\S]*?animation: none;/);
     expect(signalSvg).not.toContain("<animateMotion");
     expect(signalSvg).not.toContain("<filter");
     // stroke-dashoffset is deliberately allowed: the constellation links draw themselves in
@@ -119,9 +129,7 @@ describe("SplashScreen", () => {
     expect(signalSvg).toContain('pathLength="1"');
     expect(signalSvg).toContain("@keyframes signal-link-draw");
 
-    for (const svg of [starsSvg, signalSvg]) {
-      expect(svg).toContain("@media (prefers-reduced-motion: reduce)");
-    }
+    expect(signalSvg).toContain("@media (prefers-reduced-motion: reduce)");
     expect(bootShellHtml).toContain("@media (prefers-reduced-motion: reduce)");
   });
 });

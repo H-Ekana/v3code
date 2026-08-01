@@ -5,6 +5,7 @@ import * as NodeTest from "node:test";
 import { V3_DEMO_RESPONDER_ENV } from "@t3tools/shared/v3Demo";
 import {
   createV3ElectronDevLaunch,
+  resolveV3ElectronDevFlags,
   resolveV3WorkspaceRoot,
   withWorkspaceBinOnPath,
 } from "./v3-electron-dev.mjs";
@@ -28,6 +29,9 @@ NodeTest.test("creates an isolated desktop development launch", () => {
   NodeAssert.equal(launch.environment.VITE_DEV_SERVER_URL, undefined);
   NodeAssert.equal(launch.environment.T3CODE_DISABLE_AUTO_UPDATE, "1");
   NodeAssert.equal(launch.environment.T3CODE_DESKTOP_APP_STAGE_LABEL, "Nightly");
+  NodeAssert.equal(launch.environment.T3CODE_BUNDLED_DEV, "0");
+  NodeAssert.equal(launch.environment.T3CODE_DESKTOP_OPEN_DEVTOOLS, "0");
+  NodeAssert.equal(launch.environment.VITE_T3CODE_SKIP_STARTUP_SPLASH, "0");
   NodeAssert.equal(launch.environment.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD, "1");
   NodeAssert.equal(launch.environment[V3_DEMO_RESPONDER_ENV], "1");
   NodeAssert.equal(launch.environment.VITE_V3_DEMO_AGENT_SIDEBAR, "1");
@@ -35,6 +39,28 @@ NodeTest.test("creates an isolated desktop development launch", () => {
   NodeAssert.match(launch.dataHome, /sidebar-preview$/);
   NodeAssert.equal(launch.useRealData, false);
   NodeAssert.deepEqual(launch.args.slice(0, 2), ["scripts/dev-runner.ts", "dev:desktop"]);
+});
+
+NodeTest.test("supports reversible renderer startup flags", () => {
+  const flags = resolveV3ElectronDevFlags(["--bundled-vite", "--devtools", "--skip-splash"]);
+  const launch = createV3ElectronDevLaunch(repositoryRoot, {}, flags);
+
+  NodeAssert.deepEqual(flags, {
+    bundledDev: true,
+    openDevTools: true,
+    skipSplash: true,
+  });
+  NodeAssert.equal(launch.environment.T3CODE_BUNDLED_DEV, "1");
+  NodeAssert.equal(launch.environment.T3CODE_DESKTOP_OPEN_DEVTOOLS, "1");
+  NodeAssert.equal(launch.environment.VITE_T3CODE_SKIP_STARTUP_SPLASH, "1");
+});
+
+NodeTest.test("classic Vite overrides the experimental bundled renderer", () => {
+  NodeAssert.deepEqual(resolveV3ElectronDevFlags(["--bundled-vite", "--classic-vite"]), {
+    bundledDev: false,
+    openDevTools: false,
+    skipSplash: false,
+  });
 });
 
 NodeTest.test("keeps CLI credential stores pinned to the real APPDATA", () => {

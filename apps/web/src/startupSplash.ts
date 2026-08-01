@@ -1,42 +1,43 @@
-export const STARTUP_SPLASH_HOLD_MS = 1_600;
+/** Gives the ambient sky a full beat before the hero strike begins. */
+export const STARTUP_SPLASH_HOLD_MS = 1_900;
 /**
  * The deadline after which the splash leaves whether or not the app ever said it was ready.
  *
  * Exit normally requires `markAppReady()`, which the root route calls once it commits. Any
  * boot path that never reaches that call — an error boundary, an unexpected route, a mount
  * that throws — would otherwise leave every boot layer alive forever, and those layers are
- * full-screen blurred/masked surfaces on infinite loops: invisible as a bug, permanent as a
- * cost. Twelve seconds is far past any legitimate cold start (the hold alone is 1.6s), so
+ * full-screen masked surfaces on infinite loops: invisible as a bug, permanent as a cost.
+ * Eight seconds is far past any legitimate cold start, so
  * reaching this timer always means something went wrong, and a splash that overstays is
  * strictly worse than one that leaves a beat early.
  */
-export const STARTUP_SPLASH_FAILSAFE_MS = 12_000;
+export const STARTUP_SPLASH_FAILSAFE_MS = 8_000;
 /**
  * The strike. Runs at the head of the parting rather than during the hold, so the impact is
  * locked to the moment the choreography actually begins — the gate can fire late if the app
  * is slow to commit, and a meteor scheduled against the hold would land on nothing.
  */
-export const STARTUP_METEOR_MS = 560;
+export const STARTUP_METEOR_MS = 480;
 /**
  * When the sky starts to part — after the strike, and after the mark has begun its recoil.
  * Act 3 deliberately waits: with the logo already travelling, the eye is free to follow the
  * composer instead of splitting between them.
  */
-export const STARTUP_PARTING_DELAY_MS = 900;
+export const STARTUP_PARTING_DELAY_MS = 650;
 /**
  * The parting is long because the clouds have to still be falling while the composer is
  * still rising — that overlap is the entire parallax effect. Interactivity is handed back
  * at the start of this window, not the end, so length here does not cost responsiveness.
  */
-export const STARTUP_SPLASH_EXIT_MS = 2_500;
+export const STARTUP_SPLASH_EXIT_MS = 1_600;
 /** 180ms of linear full-screen dissolve reads as a hard cut, which is its own jarring. */
-export const STARTUP_SPLASH_REDUCED_EXIT_MS = 300;
+export const STARTUP_SPLASH_REDUCED_EXIT_MS = 220;
 /** Logo flight. Long enough that the recoil and the arc read as separate beats. */
-export const STARTUP_LOGO_FLIGHT_MS = 900;
+export const STARTUP_LOGO_FLIGHT_MS = 700;
 /** Starts on impact — the strike is what launches it. */
 export const STARTUP_LOGO_FLIGHT_DELAY_MS = STARTUP_METEOR_MS;
 /** Samples along the flight path. Enough that the arc reads as a curve, not a polyline. */
-const STARTUP_LOGO_FLIGHT_SAMPLES = 32;
+const STARTUP_LOGO_FLIGHT_SAMPLES = 20;
 /**
  * Paint order back to front. The shell drops below #root during the parting while the
  * other two stay above it, which is what sandwiches rising app content between the sky.
@@ -44,16 +45,74 @@ const STARTUP_LOGO_FLIGHT_SAMPLES = 32;
 const BOOT_LAYER_IDS = ["boot-shell", "boot-foreground", "boot-logo"] as const;
 
 type Rect = Pick<DOMRect, "height" | "left" | "top" | "width">;
+export type StartupSplashExitReason = "ready" | "failsafe" | "skip";
 type StartupSplashGate = {
   readonly markAppReady: () => void;
+  readonly markVisualReady: () => void;
+  readonly skip: () => void;
 };
 type CreateStartupSplashGateOptions = {
-  readonly onExit: () => void;
+  readonly cancel?: (timerId: number) => void;
+  readonly onExit: (reason: StartupSplashExitReason) => void;
   readonly schedule?: (callback: () => void, delayMs: number) => number;
+  readonly visualReady?: boolean | undefined;
 };
 
 let activeStartupSplashGate: StartupSplashGate | null = null;
 let appReadyBeforeControllerStart = false;
+let activeStartupSplashRun = 0;
+const STARTUP_SPLASH_SESSION_KEY = "v3code:startup-splash-seen";
+
+export type StartupSplashDiagnostics = {
+  readonly runId: number;
+  readonly controllerStartedAt: number;
+  appReadyAt: number | null;
+  visualReadyAt: number | null;
+  exitStartedAt: number | null;
+  interactiveAt: number | null;
+  completedAt: number | null;
+  exitReason: StartupSplashExitReason | null;
+  animationAttempts: number;
+  animationFailures: number;
+  missingLogoTarget: boolean;
+};
+
+let startupSplashDiagnostics: StartupSplashDiagnostics | null = null;
+
+function splashNow(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+function markSplashPerformance(name: string): void {
+  try {
+    performance.mark(`v3-startup-splash:${name}`);
+  } catch {
+    // Performance marks are diagnostics only; startup must never depend on them.
+  }
+}
+
+function beginStartupSplashDiagnostics(runId: number): StartupSplashDiagnostics {
+  const diagnostics: StartupSplashDiagnostics = {
+    runId,
+    controllerStartedAt: splashNow(),
+    appReadyAt: null,
+    visualReadyAt: null,
+    exitStartedAt: null,
+    interactiveAt: null,
+    completedAt: null,
+    exitReason: null,
+    animationAttempts: 0,
+    animationFailures: 0,
+    missingLogoTarget: false,
+  };
+  startupSplashDiagnostics = diagnostics;
+  markSplashPerformance("controller-start");
+  return diagnostics;
+}
+
+export function getStartupSplashDiagnostics(): Readonly<StartupSplashDiagnostics> | null {
+  return startupSplashDiagnostics === null ? null : { ...startupSplashDiagnostics };
+}
 /**
  * Markup of every boot layer, captured before the controller mutates or removes them, so
  * the dev-only replay can rebuild an identical splash without a cold launch. Rebuilding
@@ -61,6 +120,9 @@ let appReadyBeforeControllerStart = false;
  * embedded SVG clocks, which is what makes a replay faithful to a real cold start.
  */
 let startupSplashTemplate: readonly string[] | null = null;
+let activeStartupAnimations: Animation[] = [];
+let removeStartupSkipListeners: (() => void) | null = null;
+let removeStartupDesktopRevealListener: (() => void) | null = null;
 
 function getBootLayers(): HTMLElement[] {
   return BOOT_LAYER_IDS.map((id) => document.getElementById(id)).filter(
@@ -69,32 +131,60 @@ function getBootLayers(): HTMLElement[] {
 }
 
 export function createStartupSplashGate({
+  cancel = (timerId) => globalThis.clearTimeout(timerId),
   onExit,
   schedule = (callback, delayMs) => window.setTimeout(callback, delayMs),
+  visualReady: initiallyVisualReady = true,
 }: CreateStartupSplashGateOptions): StartupSplashGate {
   let appReady = false;
+  let visualReady = initiallyVisualReady;
   let holdElapsed = false;
+  let holdScheduled = false;
   let exitStarted = false;
+  const timerIds = new Set<number>();
 
-  const tryExit = () => {
-    if (exitStarted || !appReady || !holdElapsed) {
-      return;
-    }
-    exitStarted = true;
-    onExit();
+  const cancelTimers = () => {
+    for (const timerId of timerIds) cancel(timerId);
+    timerIds.clear();
+  };
+  const scheduleTimer = (callback: () => void, delayMs: number) => {
+    let timerId = 0;
+    timerId = schedule(() => {
+      timerIds.delete(timerId);
+      callback();
+    }, delayMs);
+    timerIds.add(timerId);
   };
 
-  schedule(() => {
-    holdElapsed = true;
-    tryExit();
-  }, STARTUP_SPLASH_HOLD_MS);
+  const startExit = (reason: StartupSplashExitReason) => {
+    if (exitStarted) {
+      return;
+    }
+    if (reason === "ready" && (!appReady || !visualReady || !holdElapsed)) return;
+    exitStarted = true;
+    cancelTimers();
+    onExit(reason);
+  };
+
+  const tryExit = () => {
+    startExit("ready");
+  };
+
+  const scheduleHold = () => {
+    if (holdScheduled) return;
+    holdScheduled = true;
+    scheduleTimer(() => {
+      holdElapsed = true;
+      tryExit();
+    }, STARTUP_SPLASH_HOLD_MS);
+  };
+
+  if (visualReady) scheduleHold();
 
   // Forces the exit if readiness never arrives. `exitStarted` already makes this a no-op on
   // the normal path, so the happy path's timing is untouched.
-  schedule(() => {
-    appReady = true;
-    holdElapsed = true;
-    tryExit();
+  scheduleTimer(() => {
+    startExit("failsafe");
   }, STARTUP_SPLASH_FAILSAFE_MS);
 
   return {
@@ -102,11 +192,24 @@ export function createStartupSplashGate({
       appReady = true;
       tryExit();
     },
+    markVisualReady: () => {
+      if (visualReady) return;
+      visualReady = true;
+      scheduleHold();
+      tryExit();
+    },
+    skip: () => {
+      startExit("skip");
+    },
   };
 }
 
 export function markStartupSplashAppReady(): void {
   appReadyBeforeControllerStart = true;
+  if (startupSplashDiagnostics?.appReadyAt === null) {
+    startupSplashDiagnostics.appReadyAt = splashNow();
+    markSplashPerformance("app-ready");
+  }
   activeStartupSplashGate?.markAppReady();
 }
 
@@ -185,13 +288,16 @@ export function buildStartupLogoFlightKeyframes(source: Rect, target: Rect): Key
   const deltaY = targetCenterY - sourceCenterY;
   const targetScale = Math.min(target.width / source.width, target.height / source.height);
 
-  // The meteor arrives from upper right, so its impact drives the mark down and a little
-  // left. This is a real px excursion, not a control-point hint.
+  // The meteor arrives from upper right, so its impact transfers momentum down-left. Keep
+  // the two components comparable: a mostly vertical recoil reads as the logo dropping under
+  // its own weight instead of being knocked loose by the strike.
   const recoilY = Math.max(
     STARTUP_LOGO_RECOIL_MIN_PX,
     Math.abs(deltaY) * STARTUP_LOGO_RECOIL_DEPTH,
   );
-  const recoilX = deltaX * 0.07;
+  const recoilDirectionX = Math.sign(deltaX || -1);
+  const recoilX =
+    recoilDirectionX * Math.min(recoilY * 1.05, Math.max(72, Math.abs(deltaX) * 0.32));
 
   // Recovery arc: leaves the low point heading left, then turns upward late, so the climb
   // into the sidebar is the final gesture rather than the whole gesture.
@@ -216,9 +322,10 @@ export function buildStartupLogoFlightKeyframes(source: Rect, target: Rect): Key
       travelled = 0;
     } else {
       const local = (offset - STARTUP_LOGO_RECOIL_FRACTION) / (1 - STARTUP_LOGO_RECOIL_FRACTION);
-      // Exponent below 1 would front-load; above ~2 would stall. 1.7 spreads the horizontal
-      // distance closely enough to even that the arc reads as an arc.
-      const eased = 1 - (1 - local) ** 1.7;
+      // Smoothstep delays the long recovery just enough for the impact impulse to register,
+      // then accelerates through the sweep and decelerates into the sidebar target. This keeps
+      // the back half from collapsing into a near-vertical settle.
+      const eased = local * local * (3 - 2 * local);
       x = cubicBezierPoint(recoilX, controlOneX, controlTwoX, deltaX, eased);
       y = cubicBezierPoint(recoilY, controlOneY, controlTwoY, deltaY, eased);
       travelled = eased;
@@ -258,20 +365,54 @@ function delay(durationMs: number): Promise<void> {
   });
 }
 
+function waitForNextPaint(maxWaitMs = 160): Promise<void> {
+  return Promise.race([
+    new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    }),
+    delay(maxWaitMs),
+  ]);
+}
+
+async function prepareStartupSplashVisuals(layers: readonly HTMLElement[]): Promise<void> {
+  const images = layers.flatMap((layer) => [...layer.querySelectorAll<HTMLImageElement>("img")]);
+  const decode = Promise.allSettled(
+    images.map((image) => {
+      if (typeof image.decode !== "function") return Promise.resolve();
+      return image.decode();
+    }),
+  );
+
+  // Decode should normally be warm because index.html preloads the art. Never let a corrupt
+  // decorative asset keep Electron's real window hidden indefinitely.
+  await Promise.race([decode, delay(900)]);
+  await waitForNextPaint();
+}
+
 function animateElement(
   element: Element | null,
   keyframes: Keyframe[],
   options: KeyframeAnimationOptions,
 ): Animation | null {
+  if (startupSplashDiagnostics !== null) {
+    startupSplashDiagnostics.animationAttempts += 1;
+  }
   if (!(element instanceof HTMLElement || element instanceof SVGElement)) {
+    if (startupSplashDiagnostics !== null) startupSplashDiagnostics.animationFailures += 1;
     return null;
   }
   if (typeof element.animate !== "function") {
+    if (startupSplashDiagnostics !== null) startupSplashDiagnostics.animationFailures += 1;
     return null;
   }
   try {
-    return element.animate(keyframes, options);
+    const animation = element.animate(keyframes, options);
+    activeStartupAnimations.push(animation);
+    return animation;
   } catch {
+    if (startupSplashDiagnostics !== null) startupSplashDiagnostics.animationFailures += 1;
     return null;
   }
 }
@@ -303,37 +444,37 @@ export function resolveCloudBandMotion(className: string): CloudBandMotion {
       y: "34vh",
       scale: 1.04,
       delayMs: 0,
-      durationMs: 1_320,
+      durationMs: 760,
       easing: "cubic-bezier(0.3, 0, 0.5, 1)",
     };
   }
   if (className.includes("v3-splash-clouds-foreground-left")) {
     return {
-      x: "-9vw",
-      y: "86vh",
-      scale: 1.16,
-      delayMs: 40,
-      durationMs: 1_200,
+      x: "-4.5vw",
+      y: "84vh",
+      scale: 1.15,
+      delayMs: 30,
+      durationMs: 760,
       easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
     };
   }
   if (className.includes("v3-splash-clouds-foreground-right")) {
     return {
-      x: "9vw",
-      y: "88vh",
+      x: "4.5vw",
+      y: "86vh",
       scale: 1.16,
-      delayMs: 90,
-      durationMs: 1_230,
+      delayMs: 60,
+      durationMs: 740,
       easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
     };
   }
-  // Foreground centre: the nearest band, and the one the composer rises through.
+  // The center band is closest to the viewer and clears last beneath the rising composer.
   return {
     x: "0",
     y: "96vh",
     scale: 1.2,
-    delayMs: 20,
-    durationMs: 1_150,
+    delayMs: 40,
+    durationMs: 700,
     easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
   };
 }
@@ -358,7 +499,13 @@ function cancelStartupAnimations(element: HTMLElement | null): void {
   }
 }
 
-function releaseApp(root: HTMLElement, logoTarget: HTMLElement | null): void {
+function releaseApp(root: HTMLElement, logoTarget: HTMLElement | null, runId: number): void {
+  if (
+    runId !== activeStartupSplashRun ||
+    (startupSplashDiagnostics !== null && startupSplashDiagnostics.completedAt !== null)
+  ) {
+    return;
+  }
   cancelStartupAnimations(logoTarget);
   logoTarget?.style.removeProperty("opacity");
   root.inert = false;
@@ -369,16 +516,52 @@ function releaseApp(root: HTMLElement, logoTarget: HTMLElement | null): void {
     layer.remove();
   }
   document.documentElement.dataset.startupSplash = "complete";
+  removeStartupSkipListeners?.();
+  removeStartupSkipListeners = null;
+  removeStartupDesktopRevealListener?.();
+  removeStartupDesktopRevealListener = null;
+  activeStartupAnimations = [];
+  try {
+    window.sessionStorage.setItem(STARTUP_SPLASH_SESSION_KEY, "true");
+  } catch {
+    // Storage policy is best effort and never controls whether the app is released.
+  }
+  if (startupSplashDiagnostics !== null) {
+    startupSplashDiagnostics.completedAt = splashNow();
+  }
+  markSplashPerformance("complete");
   activeStartupSplashGate = null;
 }
 
-async function runStartupSplashExit(root: HTMLElement): Promise<void> {
+async function runStartupSplashExit(root: HTMLElement, runId: number): Promise<void> {
+  activeStartupAnimations = [];
   const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const exitDuration = resolveStartupSplashExitDuration(prefersReducedMotion);
   const splashLogo = document.querySelector<HTMLElement>(".v3-splash-logo");
   const logoTarget = document.querySelector<HTMLElement>("[data-startup-logo-target]");
   const sourceRect = splashLogo?.getBoundingClientRect() ?? null;
   const targetRect = logoTarget?.getBoundingClientRect() ?? null;
+  const clouds = [...document.querySelectorAll<HTMLElement>(".v3-splash-cloud-layer")];
+  const cloudSnapshots = clouds.map((cloud) => ({
+    cloud,
+    opacity: window.getComputedStyle(cloud).opacity,
+    transform: window.getComputedStyle(cloud).transform,
+  }));
+  const galaxies = document.querySelector<HTMLElement>(".v3-splash-galaxies");
+  const stars = document.querySelector<HTMLElement>(".v3-splash-stars");
+  const signal = document.querySelector<HTMLElement>(".v3-splash-signal");
+  const farMotes = document.querySelector<HTMLElement>(".v3-splash-motes-far");
+  const nearMotes = document.querySelector<HTMLElement>(".v3-splash-motes-near");
+  const initialOpacity = new Map<Element, string>();
+  for (const element of [galaxies, stars, signal, farMotes, nearMotes]) {
+    if (element !== null) initialOpacity.set(element, window.getComputedStyle(element).opacity);
+  }
+
+  if (startupSplashDiagnostics !== null) {
+    startupSplashDiagnostics.exitStartedAt = splashNow();
+    startupSplashDiagnostics.missingLogoTarget = logoTarget === null || targetRect === null;
+  }
+  markSplashPerformance("exit-start");
 
   // Clear anything a previous run (or a dev replay) left pinned on the mark before the CSS
   // hold rule and the new handoff animation are supposed to take over.
@@ -395,6 +578,10 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
   // are permanently `pointer-events: none`, so nothing is swallowed.
   root.inert = false;
   root.removeAttribute("aria-hidden");
+  if (startupSplashDiagnostics !== null) {
+    startupSplashDiagnostics.interactiveAt = splashNow();
+  }
+  markSplashPerformance("interactive");
 
   if (prefersReducedMotion) {
     for (const layer of getBootLayers()) {
@@ -421,8 +608,8 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
       document.querySelector<HTMLElement>(".v3-splash-impact"),
       buildImpactBloomKeyframes(),
       {
-        delay: STARTUP_METEOR_MS - 40,
-        duration: 460,
+        delay: STARTUP_METEOR_MS - 30,
+        duration: 260,
         easing: "cubic-bezier(0.16, 1, 0.3, 1)",
         fill: "forwards",
       },
@@ -446,7 +633,7 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
         ],
         {
           delay: STARTUP_LOGO_FLIGHT_DELAY_MS,
-          duration: 520,
+          duration: 320,
           easing: "cubic-bezier(0.16, 1, 0.3, 1)",
           fill: "forwards",
         },
@@ -464,30 +651,28 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
     const handoffDelay = STARTUP_LOGO_FLIGHT_DELAY_MS + STARTUP_LOGO_FLIGHT_MS;
     animateElement(splashLogo, [{ opacity: 1 }, { opacity: 0 }], {
       delay: handoffDelay,
-      duration: 70,
+      duration: 50,
       easing: "linear",
       fill: "forwards",
     });
     animateElement(logoTarget, [{ opacity: 0 }, { opacity: 1 }], {
       delay: handoffDelay,
-      duration: 70,
+      duration: 50,
       easing: "linear",
       fill: "forwards",
     });
 
     // Act 3: the sky parts.
     // Spans both the shell (midground) and the foreground layer.
-    const clouds = document.querySelectorAll<HTMLElement>(".v3-splash-cloud-layer");
-    clouds.forEach((cloud) => {
-      const cloudStyle = window.getComputedStyle(cloud);
+    cloudSnapshots.forEach(({ cloud, opacity, transform }) => {
       const motion = resolveCloudBandMotion(cloud.className);
       animateElement(
         cloud,
         [
-          { offset: 0, opacity: cloudStyle.opacity, transform: cloudStyle.transform },
+          { offset: 0, opacity, transform },
           // Hold opacity through most of the fall. Fading as they drop is what made the
           // clouds read as "dissolving" instead of "falling past" whatever is rising.
-          { offset: 0.68, opacity: cloudStyle.opacity },
+          { offset: 0.68, opacity },
           { offset: 1, opacity: 0, transform: getCloudExitTransform(motion) },
         ],
         {
@@ -499,55 +684,52 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
       );
     });
 
-    const galaxies = document.querySelector<HTMLElement>(".v3-splash-galaxies");
     animateElement(
       galaxies,
       [
         {
-          opacity: galaxies ? window.getComputedStyle(galaxies).opacity : "0",
+          opacity: galaxies ? initialOpacity.get(galaxies) : "0",
           transform: "scale(1)",
         },
         { opacity: 0, transform: "translate3d(-0.6vw, -0.4vh, 0) scale(1.02)" },
       ],
       {
         delay: STARTUP_PARTING_DELAY_MS,
-        duration: 1_150,
+        duration: 720,
         easing: "cubic-bezier(0.16, 1, 0.3, 1)",
         fill: "forwards",
       },
     );
 
-    const stars = document.querySelector<HTMLElement>(".v3-splash-stars");
     animateElement(
       stars,
       [
         {
-          opacity: stars ? window.getComputedStyle(stars).opacity : "0",
+          opacity: stars ? initialOpacity.get(stars) : "0",
           transform: "scale(1)",
         },
         { opacity: 0, transform: "translate3d(-1.2vw, -0.8vh, 0) scale(1.035)" },
       ],
       {
         delay: STARTUP_PARTING_DELAY_MS,
-        duration: 1_050,
+        duration: 680,
         easing: "cubic-bezier(0.16, 1, 0.3, 1)",
         fill: "forwards",
       },
     );
 
-    const signal = document.querySelector<HTMLElement>(".v3-splash-signal");
     animateElement(
       signal,
       [
         {
-          opacity: signal ? window.getComputedStyle(signal).opacity : "0",
+          opacity: signal ? initialOpacity.get(signal) : "0",
           transform: "scale(1)",
         },
         { opacity: 0, transform: "scale(1.08)" },
       ],
       {
         delay: STARTUP_PARTING_DELAY_MS,
-        duration: 900,
+        duration: 600,
         easing: "cubic-bezier(0.16, 1, 0.3, 1)",
         fill: "forwards",
       },
@@ -559,52 +741,68 @@ async function runStartupSplashExit(root: HTMLElement): Promise<void> {
     // falling past the rising app rather than dissolving in place — the same trick the clouds
     // use. These fields live inside the boot layers (not ancestors of the app), so animating
     // their opacity here is safe.
-    const farMotes = document.querySelector<HTMLElement>(".v3-splash-motes-far");
     animateElement(
       farMotes,
       [
         {
           offset: 0,
-          opacity: farMotes ? window.getComputedStyle(farMotes).opacity : "1",
+          opacity: farMotes ? initialOpacity.get(farMotes) : "1",
           transform: "translate3d(0, 0, 0)",
         },
-        { offset: 0.6, opacity: farMotes ? window.getComputedStyle(farMotes).opacity : "1" },
+        { offset: 0.6, opacity: farMotes ? initialOpacity.get(farMotes) : "1" },
         { offset: 1, opacity: 0, transform: "translate3d(0, 30vh, 0)" },
       ],
       {
         delay: STARTUP_PARTING_DELAY_MS,
-        duration: 1_200,
+        duration: 760,
         easing: "cubic-bezier(0.3, 0, 0.5, 1)",
         fill: "forwards",
       },
     );
 
-    const nearMotes = document.querySelector<HTMLElement>(".v3-splash-motes-near");
     animateElement(
       nearMotes,
       [
         {
           offset: 0,
-          opacity: nearMotes ? window.getComputedStyle(nearMotes).opacity : "1",
+          opacity: nearMotes ? initialOpacity.get(nearMotes) : "1",
           transform: "translate3d(0, 0, 0)",
         },
-        { offset: 0.6, opacity: nearMotes ? window.getComputedStyle(nearMotes).opacity : "1" },
+        { offset: 0.6, opacity: nearMotes ? initialOpacity.get(nearMotes) : "1" },
         { offset: 1, opacity: 0, transform: "translate3d(0, 80vh, 0)" },
       ],
       {
         delay: STARTUP_PARTING_DELAY_MS + 20,
-        duration: 900,
+        duration: 650,
         easing: "cubic-bezier(0.45, 0, 0.75, 0.6)",
         fill: "forwards",
       },
     );
   }
 
-  await delay(exitDuration);
-  releaseApp(root, logoTarget);
+  await waitForNextPaint();
+  const startupCssAnimations = [
+    ...root.getAnimations({ subtree: true }),
+    ...getBootLayers().flatMap((layer) => layer.getAnimations({ subtree: true })),
+  ].filter(
+    (animation) =>
+      "animationName" in animation &&
+      typeof animation.animationName === "string" &&
+      animation.animationName.startsWith("v3-startup-"),
+  );
+  const completions = [...activeStartupAnimations, ...startupCssAnimations].map((animation) =>
+    animation.finished.catch(() => undefined),
+  );
+  await Promise.race([Promise.allSettled(completions), delay(exitDuration + 120)]);
+  releaseApp(root, logoTarget, runId);
 }
 
-function armStartupSplash(root: HTMLElement): StartupSplashGate {
+function armStartupSplash(
+  root: HTMLElement,
+  layers: readonly HTMLElement[],
+  runId: number,
+  { replay = false }: { readonly replay?: boolean } = {},
+): StartupSplashGate {
   root.inert = true;
   root.setAttribute("aria-hidden", "true");
 
@@ -613,13 +811,89 @@ function armStartupSplash(root: HTMLElement): StartupSplashGate {
   // place would pin the sidebar logo visible for the whole hold on any replay.
   cancelStartupAnimations(document.querySelector<HTMLElement>("[data-startup-logo-target]"));
 
-  return createStartupSplashGate({
-    onExit: () => {
-      void runStartupSplashExit(root).catch(() => {
-        releaseApp(root, document.querySelector<HTMLElement>("[data-startup-logo-target]"));
+  let gate: StartupSplashGate;
+  const markVisualReady = () => {
+    if (
+      runId !== activeStartupSplashRun ||
+      (startupSplashDiagnostics !== null && startupSplashDiagnostics.completedAt !== null)
+    ) {
+      return;
+    }
+    if (startupSplashDiagnostics?.visualReadyAt === null) {
+      startupSplashDiagnostics.visualReadyAt = splashNow();
+      markSplashPerformance("visual-ready");
+    }
+    gate.markVisualReady();
+  };
+
+  gate = createStartupSplashGate({
+    visualReady: false,
+    onExit: (reason) => {
+      if (startupSplashDiagnostics !== null) startupSplashDiagnostics.exitReason = reason;
+      if (reason === "skip") {
+        window.desktopBridge?.notifyStartupSplashReady?.();
+        releaseApp(root, document.querySelector<HTMLElement>("[data-startup-logo-target]"), runId);
+        return;
+      }
+      void runStartupSplashExit(root, runId).catch(() => {
+        if (startupSplashDiagnostics !== null) startupSplashDiagnostics.animationFailures += 1;
+        releaseApp(root, document.querySelector<HTMLElement>("[data-startup-logo-target]"), runId);
       });
     },
   });
+
+  const skip = () => {
+    if (document.documentElement.dataset.startupSplash === "exiting") {
+      releaseApp(root, document.querySelector<HTMLElement>("[data-startup-logo-target]"), runId);
+      return;
+    }
+    gate.skip();
+  };
+  const onPointerDown = () => skip();
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (["Alt", "Control", "Meta", "Shift"].includes(event.key)) return;
+    skip();
+  };
+  document.addEventListener("pointerdown", onPointerDown, true);
+  document.addEventListener("keydown", onKeyDown, true);
+  removeStartupSkipListeners = () => {
+    document.removeEventListener("pointerdown", onPointerDown, true);
+    document.removeEventListener("keydown", onKeyDown, true);
+  };
+
+  const bridge = window.desktopBridge;
+  const usesDesktopHandshake =
+    !replay &&
+    bridge?.notifyStartupSplashReady !== undefined &&
+    bridge.onStartupSplashRevealed !== undefined;
+  if (usesDesktopHandshake) {
+    removeStartupDesktopRevealListener =
+      bridge.onStartupSplashRevealed?.(() => {
+        removeStartupDesktopRevealListener?.();
+        removeStartupDesktopRevealListener = null;
+        // Electron's `show()` resolves before the OS necessarily presents a frame. Give the
+        // revealed window two paint opportunities so the static splash is visible before its
+        // controller-owned exit clock begins.
+        void waitForNextPaint().then(markVisualReady);
+      }) ?? null;
+  }
+
+  void prepareStartupSplashVisuals(layers).then(() => {
+    if (
+      runId !== activeStartupSplashRun ||
+      (startupSplashDiagnostics !== null && startupSplashDiagnostics.completedAt !== null)
+    ) {
+      return;
+    }
+    if (usesDesktopHandshake) {
+      bridge.notifyStartupSplashReady?.();
+      return;
+    }
+    bridge?.notifyStartupSplashReady?.();
+    markVisualReady();
+  });
+
+  return gate;
 }
 
 export function startStartupSplashTransition(): void {
@@ -634,11 +908,15 @@ export function startStartupSplashTransition(): void {
   // leaves the replay available even though this splash never plays.
   startupSplashTemplate ??= layers.map((layer) => layer.outerHTML);
 
-  if (document.documentElement.dataset.startupSplash === "bypass") {
+  if (
+    document.documentElement.dataset.startupSplash === "bypass" ||
+    import.meta.env.VITE_T3CODE_SKIP_STARTUP_SPLASH === "1"
+  ) {
     for (const layer of layers) {
       layer.remove();
     }
     document.documentElement.dataset.startupSplash = "complete";
+    void waitForNextPaint().then(() => window.desktopBridge?.notifyStartupSplashReady?.());
     return;
   }
 
@@ -647,9 +925,11 @@ export function startStartupSplashTransition(): void {
   }
   document.documentElement.dataset.startupSplashController = "started";
 
-  activeStartupSplashGate = armStartupSplash(root);
+  const runId = ++activeStartupSplashRun;
+  beginStartupSplashDiagnostics(runId);
+  activeStartupSplashGate = armStartupSplash(root, layers, runId);
   if (appReadyBeforeControllerStart) {
-    activeStartupSplashGate.markAppReady();
+    markStartupSplashAppReady();
   }
 }
 
@@ -688,6 +968,11 @@ export function replayStartupSplash(): void {
 
   document.documentElement.dataset.startupSplash = "holding";
 
-  activeStartupSplashGate = armStartupSplash(root);
+  const runId = ++activeStartupSplashRun;
+  const layers = getBootLayers();
+  const diagnostics = beginStartupSplashDiagnostics(runId);
+  diagnostics.appReadyAt = splashNow();
+  markSplashPerformance("app-ready");
+  activeStartupSplashGate = armStartupSplash(root, layers, runId, { replay: true });
   activeStartupSplashGate.markAppReady();
 }

@@ -1010,6 +1010,10 @@ export interface DesktopBridge {
   onMenuAction: (listener: (action: string) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
+  /** Reports that the renderer's static startup splash frame is ready to be revealed. */
+  notifyStartupSplashReady?: () => void;
+  /** Runs after the desktop window has been revealed, establishing animation time zero. */
+  onStartupSplashRevealed?: (listener: () => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
