@@ -13,6 +13,13 @@ export interface PendingApprovalCardProps {
   ) => Promise<unknown>;
 }
 
+const REQUEST_KIND_LABELS: Record<PendingApproval["requestKind"], string> = {
+  command: "Command",
+  "file-read": "File read",
+  "file-change": "File change",
+  other: "Approval",
+};
+
 export function PendingApprovalCard(props: PendingApprovalCardProps) {
   return (
     <View className="gap-2.5 rounded-[20px] border border-neutral-200 bg-neutral-100/80 p-4 dark:border-white/6 dark:bg-neutral-900/80">
@@ -20,7 +27,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
         Approval needed
       </Text>
       <Text className="font-t3-bold text-lg text-neutral-950 dark:text-neutral-50">
-        {props.approval.requestKind}
+        {REQUEST_KIND_LABELS[props.approval.requestKind]}
       </Text>
       {props.approval.detail ? (
         <Text className="font-sans text-sm leading-normal text-neutral-600 dark:text-neutral-400">

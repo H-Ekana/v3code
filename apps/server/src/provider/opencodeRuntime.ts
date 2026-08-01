@@ -325,13 +325,31 @@ export function toOpenCodeFileParts(input: {
   return parts;
 }
 
+/**
+ * Permission kinds that only observe the workspace: search, enumeration and
+ * in-workspace reads. Supervised is documented as "ask before commands and
+ * file changes", so gating a `grep` behind an approval card is over-asking —
+ * and OpenCode fires these alongside the real request, so every parallel
+ * search became its own blocking card. Access outside the workspace still
+ * prompts, via the `external_directory` rule below.
+ */
+const OPENCODE_OBSERVE_ONLY_PERMISSIONS = ["read", "grep", "glob", "list"] as const;
+
 export function buildOpenCodePermissionRules(runtimeMode: RuntimeMode): PermissionRuleset {
   if (runtimeMode === "full-access") {
     return [{ permission: "*", pattern: "*", action: "allow" }];
   }
 
   return [
+    // Fail closed. `PermissionRule.permission` is an open string upstream, so
+    // the named rules below can never be exhaustive: a kind OpenCode adds
+    // later must ask rather than slip through unprompted.
     { permission: "*", pattern: "*", action: "ask" },
+    ...OPENCODE_OBSERVE_ONLY_PERMISSIONS.map((permission) => ({
+      permission,
+      pattern: "*",
+      action: "allow" as const,
+    })),
     { permission: "bash", pattern: "*", action: "ask" },
     { permission: "edit", pattern: "*", action: "ask" },
     { permission: "webfetch", pattern: "*", action: "ask" },

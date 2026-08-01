@@ -14,7 +14,16 @@ import * as Order from "effect/Order";
 
 export interface PendingApproval {
   readonly requestId: ApprovalRequestId;
-  readonly requestKind: "command" | "file-read" | "file-change";
+  /**
+   * "other" is the fallback for a request whose provider payload carries no
+   * recognized kind. Providers expose open-ended permission vocabularies
+   * (OpenCode's `permission` is a bare string), so an unrecognized kind is
+   * routine — and still fully actionable. It must never disqualify a request
+   * from being shown: the server counts every open approval in
+   * `pendingApprovalCount` and blocks settle/snooze until one resolves, so a
+   * request the UI declines to render is a thread the user cannot unblock.
+   */
+  readonly requestKind: "command" | "file-read" | "file-change" | "other";
   readonly createdAt: string;
   readonly detail?: string;
 }
@@ -1261,10 +1270,12 @@ export function derivePendingApprovals(
         : requestKindFromRequestType(payload?.requestType);
     const detail = typeof payload?.detail === "string" ? payload.detail : undefined;
 
-    if (activity.kind === "approval.requested" && requestId && requestKind) {
+    // An unrecognized kind still gets a card: `requestKind` picks the copy,
+    // it does not decide whether the request exists.
+    if (activity.kind === "approval.requested" && requestId) {
       openByRequestId.set(requestId, {
         requestId,
-        requestKind,
+        requestKind: requestKind ?? "other",
         createdAt: activity.createdAt,
         ...(detail ? { detail } : {}),
       });

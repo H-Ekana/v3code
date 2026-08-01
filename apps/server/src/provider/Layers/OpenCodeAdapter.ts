@@ -321,11 +321,18 @@ function mapPermissionToRequestType(
   switch (permission) {
     case "bash":
       return "command_execution_approval";
+    // Search and enumeration read the workspace the same way `read` does, so
+    // they carry the file-read shape when a ruleset still asks for them.
     case "read":
+    case "grep":
+    case "glob":
+    case "list":
       return "file_read_approval";
     case "edit":
       return "file_change_approval";
     default:
+      // `permission` is an open string upstream. "unknown" is a real, still
+      // actionable request — clients must render it, not drop it.
       return "unknown";
   }
 }

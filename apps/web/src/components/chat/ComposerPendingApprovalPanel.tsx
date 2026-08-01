@@ -15,13 +15,17 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       ? "Command approval requested"
       : approval.requestKind === "file-read"
         ? "File-read approval requested"
-        : "File-change approval requested";
+        : approval.requestKind === "file-change"
+          ? "File-change approval requested"
+          : "Approval requested";
   const detailLabel =
     approval.requestKind === "command"
       ? "Command"
       : approval.requestKind === "file-read"
         ? "File to read"
-        : "File change";
+        : approval.requestKind === "file-change"
+          ? "File change"
+          : "Request";
 
   return (
     <div className="bg-warning/[0.025] px-4 py-3.5 sm:px-5 sm:py-4">

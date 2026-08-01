@@ -6,6 +6,8 @@ import {
   applyGrokAcpModelSelection,
   buildGrokAcpSpawnInput,
   resolveGrokAcpBaseModelId,
+  runtimeModeToGrokPermissionMode,
+  runtimeModeToGrokSessionMeta,
 } from "./GrokAcpSupport.ts";
 
 describe("resolveGrokAcpBaseModelId", () => {
@@ -13,6 +15,31 @@ describe("resolveGrokAcpBaseModelId", () => {
     expect(resolveGrokAcpBaseModelId(undefined)).toBe("grok-build");
     expect(resolveGrokAcpBaseModelId("   ")).toBe("grok-build");
     expect(resolveGrokAcpBaseModelId("  grok-test-custom-model  ")).toBe("grok-test-custom-model");
+  });
+});
+
+describe("runtimeModeToGrokPermissionMode", () => {
+  it("maps Auto to Grok classifier auto; does not force always-approve for Full access", () => {
+    expect(runtimeModeToGrokPermissionMode("auto")).toBe("auto");
+    expect(runtimeModeToGrokPermissionMode("auto-accept-edits")).toBe("acceptEdits");
+    expect(runtimeModeToGrokPermissionMode("approval-required")).toBe("default");
+    // Full access must not pass bypassPermissions — that is always-approve at spawn.
+    expect(runtimeModeToGrokPermissionMode("full-access")).toBeUndefined();
+  });
+});
+
+describe("runtimeModeToGrokSessionMeta", () => {
+  it("enables autoMode only for Auto; never sets yoloMode for Full access", () => {
+    expect(runtimeModeToGrokSessionMeta("auto")).toEqual({ autoMode: true, yoloMode: false });
+    expect(runtimeModeToGrokSessionMeta("full-access")).toBeUndefined();
+    expect(runtimeModeToGrokSessionMeta("approval-required")).toEqual({
+      autoMode: false,
+      yoloMode: false,
+    });
+    expect(runtimeModeToGrokSessionMeta("auto-accept-edits")).toEqual({
+      autoMode: false,
+      yoloMode: false,
+    });
   });
 });
 
@@ -32,6 +59,35 @@ describe("buildGrokAcpSpawnInput", () => {
         GROK_OAUTH2_REFERRER: "t3code",
       },
     });
+  });
+
+  it("passes --permission-mode before the agent subcommand for Auto", () => {
+    const spawn = buildGrokAcpSpawnInput(
+      { binaryPath: "/usr/local/bin/grok" },
+      "/tmp/project",
+      undefined,
+      "auto",
+    );
+
+    expect(spawn.args).toEqual(["--permission-mode", "auto", "agent", "stdio"]);
+  });
+
+  it("maps Auto and Supervised flags; Full access keeps bare agent stdio", () => {
+    expect(
+      buildGrokAcpSpawnInput({ binaryPath: "grok" }, "/tmp", undefined, "approval-required").args,
+    ).toEqual(["--permission-mode", "default", "agent", "stdio"]);
+    expect(
+      buildGrokAcpSpawnInput({ binaryPath: "grok" }, "/tmp", undefined, "auto-accept-edits").args,
+    ).toEqual(["--permission-mode", "acceptEdits", "agent", "stdio"]);
+    expect(buildGrokAcpSpawnInput({ binaryPath: "grok" }, "/tmp", undefined, "auto").args).toEqual([
+      "--permission-mode",
+      "auto",
+      "agent",
+      "stdio",
+    ]);
+    expect(
+      buildGrokAcpSpawnInput({ binaryPath: "grok" }, "/tmp", undefined, "full-access").args,
+    ).toEqual(["agent", "stdio"]);
   });
 });
 

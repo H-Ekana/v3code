@@ -12,7 +12,7 @@ describe("Auto mode copy", () => {
   it("keeps the visible Auto label and the short AI-review description", () => {
     expect(runtimeModeConfig.auto.label).toBe("Auto");
     expect(runtimeModeConfig.auto.compactDescription).toContain("AI-reviewed");
-    expect(runtimeModeConfig.auto.description).toContain("AI reviewer");
+    expect(runtimeModeConfig.auto.description.toLowerCase()).toContain("ai-reviewed");
   });
 
   it("states the safety difference between Auto and Full access in words", () => {
@@ -21,15 +21,14 @@ describe("Auto mode copy", () => {
 
     // Auto still stops for risky work; Full access never does. The copy has to
     // carry that, not the glow.
-    expect(auto.toLowerCase()).toContain("still stops to ask");
+    expect(auto.toLowerCase()).toContain("still asks");
     expect(auto.toLowerCase()).toContain("risky");
-    expect(fullAccess.toLowerCase()).toContain("no review");
+    expect(fullAccess.toLowerCase()).toContain("no prompts");
     expect(fullAccess.toLowerCase()).toContain("destructive");
-    expect(fullAccess.toLowerCase()).toContain("nothing stops to ask");
     expect(auto).not.toBe(fullAccess);
   });
 
-  it("exposes every runtime mode with a compact description", () => {
+  it("keeps every mode description short enough for a narrow picker", () => {
     expect(runtimeModeOptions).toEqual([
       "approval-required",
       "auto-accept-edits",
@@ -37,7 +36,10 @@ describe("Auto mode copy", () => {
       "full-access",
     ]);
     for (const mode of runtimeModeOptions) {
-      expect(runtimeModeConfig[mode].compactDescription.length).toBeGreaterThan(0);
+      const option = runtimeModeConfig[mode];
+      expect(option.compactDescription.length).toBeGreaterThan(0);
+      expect(option.description.length).toBeLessThanOrEqual(48);
+      expect(option.description.split("\n")).toHaveLength(1);
     }
   });
 });
