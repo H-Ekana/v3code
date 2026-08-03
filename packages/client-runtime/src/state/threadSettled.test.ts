@@ -179,6 +179,66 @@ describe("effectiveSettled", () => {
     }
   });
 
+  it("keeps a thread active when the change request closed before its work", () => {
+    // A long-lived branch (dev/staging/release-*) keeps matching the PR it was
+    // last promoted through, so every later thread on that branch inherits a
+    // merged PR. Settling on it would settle work the merge cannot describe.
+    const shell = makeShell({ activityAt: "2026-04-09T23:59:59.999Z" });
+    for (const changeRequestState of ["merged", "closed"] as const) {
+      expect(
+        effectiveSettled(shell, {
+          now: NOW,
+          autoSettleAfterDays: null,
+          changeRequestState,
+          changeRequestStateAt: "2026-04-08T00:00:00.000Z",
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("settles when the change request closed after the thread's last activity", () => {
+    const shell = makeShell({ activityAt: "2026-04-09T00:00:00.000Z" });
+    for (const changeRequestState of ["merged", "closed"] as const) {
+      expect(
+        effectiveSettled(shell, {
+          now: NOW,
+          autoSettleAfterDays: null,
+          changeRequestState,
+          changeRequestStateAt: "2026-04-09T12:00:00.000Z",
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("keeps an empty thread active when its branch's change request already closed", () => {
+    // The bug's opening move: a thread created on a long-lived branch, with no
+    // activity yet, inheriting the branch's last merged PR. Nothing has landed
+    // here, so it must not be born settled.
+    expect(
+      effectiveSettled(makeShell({ activityAt: null }), {
+        now: NOW,
+        autoSettleAfterDays: null,
+        changeRequestState: "merged",
+        changeRequestStateAt: "2026-04-08T00:00:00.000Z",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps settling on merge when the outcome time is unknown or unparseable", () => {
+    // Providers that do not report a merge time keep the previous behaviour.
+    const shell = makeShell({ activityAt: "2026-04-09T23:59:59.999Z" });
+    for (const changeRequestStateAt of [null, "not-a-date"]) {
+      expect(
+        effectiveSettled(shell, {
+          now: NOW,
+          autoSettleAfterDays: null,
+          changeRequestState: "merged",
+          changeRequestStateAt,
+        }),
+      ).toBe(true);
+    }
+  });
+
   it("keeps an explicitly un-settled merged-PR thread active", () => {
     const shell = makeShell({
       settledOverride: "active",

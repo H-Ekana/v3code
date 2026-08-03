@@ -34,6 +34,7 @@ import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/
 import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2Enabled } from "../threads/use-thread-list-v2-enabled";
 import { environmentServerConfigsAtom } from "../../state/server";
+import type { ThreadChangeRequestState } from "../../state/thread-pr-presentation";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import {
   PendingTaskListRow,
@@ -480,12 +481,16 @@ export function HomeScreen(props: HomeScreenProps) {
   // PR states stream in per-row (rows own the VCS subscriptions); a merged or
   // closed PR auto-settles its thread on the next partition (mirrors web).
   const [changeRequestStateByKey, setChangeRequestStateByKey] = useState<
-    ReadonlyMap<string, "open" | "closed" | "merged">
+    ReadonlyMap<string, ThreadChangeRequestState>
   >(() => new Map());
   const handleChangeRequestState = useCallback(
-    (threadKey: string, state: "open" | "closed" | "merged" | null) => {
+    (threadKey: string, state: ThreadChangeRequestState | null) => {
       setChangeRequestStateByKey((current) => {
-        if ((current.get(threadKey) ?? null) === state) return current;
+        const existing = current.get(threadKey) ?? null;
+        if (existing === null && state === null) return current;
+        if (existing !== null && state !== null) {
+          if (existing.state === state.state && existing.at === state.at) return current;
+        }
         const next = new Map(current);
         if (state === null) {
           next.delete(threadKey);

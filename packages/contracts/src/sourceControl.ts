@@ -30,6 +30,11 @@ export const ChangeRequest = Schema.Struct({
   headRefName: TrimmedNonEmptyString,
   state: ChangeRequestState,
   updatedAt: Schema.Option(Schema.DateTimeUtc),
+  /** When the change request reached its terminal state (merged/closed), ISO
+      8601. Null while open, or when the provider does not report it. Consumers
+      use it to tell a just-merged change request from merge history that
+      predates the work they are looking at. */
+  stateChangedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   isCrossRepository: Schema.optional(Schema.Boolean),
   headRepositoryNameWithOwner: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   headRepositoryOwnerLogin: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),

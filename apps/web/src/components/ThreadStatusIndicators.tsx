@@ -48,6 +48,14 @@ export interface TerminalStatusIndicator {
 
 export type ThreadPr = VcsStatusResult["pr"];
 
+/** A thread row's change-request outcome, reported up for settle
+    classification: the state plus when it became terminal (null while open,
+    or when the provider does not report it). */
+export interface ThreadChangeRequestState {
+  readonly state: NonNullable<ThreadPr>["state"];
+  readonly at: string | null;
+}
+
 export function settledPrHoverColorClass(state: NonNullable<ThreadPr>["state"]): string {
   switch (state) {
     case "open":
@@ -123,8 +131,22 @@ export function PrStatusTooltipContent({ status }: { status: PrStatusIndicator }
   );
 }
 
+/**
+ * The change request this thread is working through, or null.
+ *
+ * Branch-name equality alone is not identity. A long-lived branch (dev,
+ * develop, staging, release/*) is not deleted when its PR merges, so the
+ * branch keeps matching that PR forever — and every thread later opened on
+ * the branch would inherit a PR it had nothing to do with, badge and all.
+ *
+ * A terminal (merged/closed) change request therefore only belongs to a
+ * thread that existed while it was still open. A thread created after the
+ * outcome cannot have contributed to it. Open change requests need no such
+ * check: work on the branch now is work on that change request.
+ */
 export function resolveThreadPr(input: {
   threadBranch: string | null;
+  threadCreatedAt?: string | null;
   gitStatus: VcsStatusResult | null;
 }): ThreadPr | null {
   const { threadBranch, gitStatus } = input;
@@ -136,7 +158,30 @@ export function resolveThreadPr(input: {
     return null;
   }
 
-  return gitStatus.pr ?? null;
+  const pr = gitStatus.pr ?? null;
+  if (pr === null || pr.state === "open") {
+    return pr;
+  }
+  return changeRequestOutlivedThreadStart(pr.stateChangedAt ?? null, input.threadCreatedAt ?? null)
+    ? pr
+    : null;
+}
+
+/**
+ * Whether a terminal change request was still open when the thread started.
+ * Either timestamp missing (older servers, providers that do not report a
+ * merge time) answers true, keeping the previous behaviour rather than
+ * dropping a badge on data we cannot order.
+ */
+function changeRequestOutlivedThreadStart(
+  stateChangedAt: string | null,
+  threadCreatedAt: string | null,
+): boolean {
+  if (stateChangedAt === null || threadCreatedAt === null) return true;
+  const stateChangedAtMs = Date.parse(stateChangedAt);
+  const threadCreatedAtMs = Date.parse(threadCreatedAt);
+  if (Number.isNaN(stateChangedAtMs) || Number.isNaN(threadCreatedAtMs)) return true;
+  return stateChangedAtMs > threadCreatedAtMs;
 }
 
 export function terminalStatusFromRunningIds(
@@ -297,6 +342,7 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   );
   const pr = resolveThreadPr({
     threadBranch: thread.branch,
+    threadCreatedAt: thread.createdAt,
     gitStatus: gitStatus.data,
   });
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);

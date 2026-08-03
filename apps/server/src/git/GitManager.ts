@@ -131,6 +131,8 @@ interface OpenPrInfo {
 interface PullRequestInfo extends OpenPrInfo, PullRequestHeadRemoteInfo {
   state: "open" | "closed" | "merged";
   updatedAt: Option.Option<DateTime.Utc>;
+  /** ISO 8601 merge/close time; null while open or when the provider omits it. */
+  stateChangedAt: string | null;
 }
 
 const pullRequestUpdatedAtDescOrder: Order.Order<PullRequestInfo> = Order.mapInput(
@@ -364,6 +366,7 @@ function toPullRequestInfo(summary: ChangeRequest): PullRequestInfo {
     headRefName: summary.headRefName,
     state: summary.state ?? "open",
     updatedAt: summary.updatedAt,
+    stateChangedAt: summary.stateChangedAt ?? null,
     ...(summary.isCrossRepository !== undefined
       ? { isCrossRepository: summary.isCrossRepository }
       : {}),
@@ -517,6 +520,7 @@ function toStatusPr(pr: PullRequestInfo): {
   baseRef: string;
   headRef: string;
   state: "open" | "closed" | "merged";
+  stateChangedAt: string | null;
 } {
   return {
     number: pr.number,
@@ -525,6 +529,7 @@ function toStatusPr(pr: PullRequestInfo): {
     baseRef: pr.baseRefName,
     headRef: pr.headRefName,
     state: pr.state,
+    stateChangedAt: pr.stateChangedAt,
   };
 }
 
@@ -1007,6 +1012,11 @@ export const make = Effect.gen(function* () {
         if (details.isDefaultBranch && latest.state !== "open") {
           return { pr: null, headContext };
         }
+        // This result describes the CHECKOUT, not any one thread: a long-lived
+        // branch keeps matching the PR it was last promoted through, and that
+        // is a true statement about the branch. Deciding whether that PR is
+        // also THIS thread's PR needs the thread, so it happens client-side
+        // (resolveThreadPr / effectiveSettled) where the thread is known.
         return { pr: toStatusPr(latest), headContext };
       }),
       Effect.tap(({ pr, headContext }) =>
@@ -1219,6 +1229,7 @@ export const make = Effect.gen(function* () {
           headRefName: firstPullRequest.headRefName,
           state: "open",
           updatedAt: Option.none(),
+          stateChangedAt: null,
         } satisfies PullRequestInfo;
       }
     }

@@ -197,6 +197,8 @@ const VcsStatusChangeRequest = Schema.Struct({
   baseRef: TrimmedNonEmptyStringSchema,
   headRef: TrimmedNonEmptyStringSchema,
   state: VcsStatusChangeRequestState,
+  /** ISO 8601 merge/close time; null while open or when unreported. */
+  stateChangedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
 });
 
 const VcsStatusLocalShape = {

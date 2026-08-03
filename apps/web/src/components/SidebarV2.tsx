@@ -155,6 +155,7 @@ import {
   settledPrHoverColorClass,
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
+  type ThreadChangeRequestState,
 } from "./ThreadStatusIndicators";
 import {
   resolveSnoozePresets,
@@ -510,7 +511,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   onUnsettle: (threadRef: ScopedThreadRef) => void;
   onSnooze: (threadRef: ScopedThreadRef, preset: SnoozePreset) => void;
   onUnsnooze: (threadRef: ScopedThreadRef) => void;
-  onChangeRequestState: (threadKey: string, state: "open" | "closed" | "merged" | null) => void;
+  onChangeRequestState: (threadKey: string, state: ThreadChangeRequestState | null) => void;
 }) {
   const {
     isRenaming,
@@ -651,16 +652,20 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   });
   const pr = resolveThreadPr({
     threadBranch: thread.branch,
+    threadCreatedAt: thread.createdAt,
     gitStatus: gitStatus.data,
   });
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const settledPrHoverClass = pr ? settledPrHoverColorClass(pr.state) : undefined;
   // Report the PR state up: the parent partitions rows with effectiveSettled,
-  // and a merged/closed PR auto-settles a thread — data only rows have.
+  // and a merged/closed PR auto-settles a thread — data only rows have. The
+  // merge/close time rides along so the parent can tell an outcome that landed
+  // this thread's work from one that predates the thread entirely.
   const prState = pr?.state ?? null;
+  const prStateAt = pr?.stateChangedAt ?? null;
   useEffect(() => {
-    onChangeRequestState(threadKey, prState);
-  }, [onChangeRequestState, prState, threadKey]);
+    onChangeRequestState(threadKey, prState === null ? null : { state: prState, at: prStateAt });
+  }, [onChangeRequestState, prState, prStateAt, threadKey]);
 
   const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
   const providerEntry = props.providerEntryByInstanceId.get(modelInstanceId) ?? null;
@@ -1460,12 +1465,16 @@ export default function SidebarV2() {
   // PR states stream in per-row (rows own the VCS subscriptions); a merged or
   // closed PR auto-settles its thread on the next partition.
   const [changeRequestStateByKey, setChangeRequestStateByKey] = useState<
-    ReadonlyMap<string, "open" | "closed" | "merged">
+    ReadonlyMap<string, ThreadChangeRequestState>
   >(() => new Map());
   const handleChangeRequestState = useCallback(
-    (threadKey: string, state: "open" | "closed" | "merged" | null) => {
+    (threadKey: string, state: ThreadChangeRequestState | null) => {
       setChangeRequestStateByKey((current) => {
-        if ((current.get(threadKey) ?? null) === state) return current;
+        const existing = current.get(threadKey) ?? null;
+        if (existing === null && state === null) return current;
+        if (existing !== null && state !== null) {
+          if (existing.state === state.state && existing.at === state.at) return current;
+        }
         const next = new Map(current);
         if (state === null) {
           next.delete(threadKey);
@@ -1739,7 +1748,9 @@ export default function SidebarV2() {
       const supportsSnooze =
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSnooze === true;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      const changeRequestState = changeRequestStateByKey.get(threadKey) ?? null;
+      const changeRequest = changeRequestStateByKey.get(threadKey) ?? null;
+      const changeRequestState = changeRequest?.state ?? null;
+      const changeRequestStateAt = changeRequest?.at ?? null;
       // A just-acknowledged single settle is HELD in its active slot while its
       // ring laps in place. The store already classifies the thread as settled,
       // but the row must not regroup — and so must not FLIP down into the shelf
@@ -1754,7 +1765,12 @@ export default function SidebarV2() {
         snoozed.push(thread);
       } else if (
         supportsSettlement &&
-        effectiveSettled(thread, { now, autoSettleAfterDays, changeRequestState })
+        effectiveSettled(thread, {
+          now,
+          autoSettleAfterDays,
+          changeRequestState,
+          changeRequestStateAt,
+        })
       ) {
         settled.push(thread);
       } else {

@@ -26,6 +26,7 @@ import { relativeTime } from "../../lib/time";
 import { useThemeColor } from "../../lib/useThemeColor";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useThreadPr } from "../../state/use-thread-pr";
+import type { ThreadChangeRequestState } from "../../state/thread-pr-presentation";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import {
   resolveThreadListV2SnoozeMenuSelection,
@@ -313,7 +314,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       merged/closed work (mirrors web's onChangeRequestState). */
   readonly onChangeRequestState?: (
     threadKey: string,
-    state: "open" | "closed" | "merged" | null,
+    state: ThreadChangeRequestState | null,
   ) => void;
   readonly projectCwd?: string | null;
   readonly searchMatch?: EnvironmentThreadSearchMatch;
@@ -339,10 +340,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
 
   const pr = useThreadPr(thread, props.projectCwd ?? props.project?.workspaceRoot ?? null);
   const prState = pr?.state ?? null;
+  const prStateAt = pr?.stateChangedAt ?? null;
   const threadKey = `${thread.environmentId}:${thread.id}`;
   useEffect(() => {
-    onChangeRequestState?.(threadKey, prState);
-  }, [onChangeRequestState, prState, threadKey]);
+    onChangeRequestState?.(threadKey, prState === null ? null : { state: prState, at: prStateAt });
+  }, [onChangeRequestState, prState, prStateAt, threadKey]);
 
   const screenColor = useThemeColor("--color-screen");
   const drawerColor = useThemeColor("--color-drawer");

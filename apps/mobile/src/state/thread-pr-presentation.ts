@@ -3,9 +3,19 @@ import { resolveChangeRequestPresentation } from "@t3tools/shared/sourceControl"
 
 export type ThreadPr = NonNullable<VcsStatusResult["pr"]>;
 
+/** A row's change-request outcome, reported up for settle classification:
+    the state plus when it became terminal (null while open, or unreported). */
+export interface ThreadChangeRequestState {
+  readonly state: ThreadPr["state"];
+  readonly at: string | null;
+}
+
 export interface ThreadPrPresentation {
   readonly number: number;
   readonly state: ThreadPr["state"];
+  /** ISO 8601 merge/close time; null while open or when unreported. Drives
+      settle classification, not presentation. */
+  readonly stateChangedAt: string | null;
   readonly url: string;
   /** Compact pull request number label, e.g. "3774". */
   readonly label: string;
@@ -28,6 +38,7 @@ export function presentThreadPr(
   return {
     number: pr.number,
     state: pr.state,
+    stateChangedAt: pr.stateChangedAt ?? null,
     url: pr.url,
     label: String(pr.number),
     accessibilityLabel: `#${pr.number} ${presentation.longName} ${pr.state}`,

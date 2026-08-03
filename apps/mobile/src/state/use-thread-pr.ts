@@ -37,5 +37,24 @@ export function useThreadPr(
   if (!status.pr) {
     return null;
   }
+  // Branch-name equality is not identity (mirrors web's resolveThreadPr): a
+  // long-lived branch keeps matching the change request it was promoted
+  // through, so a thread opened after that outcome must not inherit it.
+  if (!changeRequestOutlivedThreadStart(status.pr.stateChangedAt ?? null, thread.createdAt)) {
+    return null;
+  }
   return presentThreadPr(status.pr, status.sourceControlProvider);
+}
+
+function changeRequestOutlivedThreadStart(
+  stateChangedAt: string | null,
+  threadCreatedAt: string | null,
+): boolean {
+  // Open change requests carry no outcome time and always belong to current
+  // work on the branch; unknown timestamps keep the previous behaviour.
+  if (stateChangedAt === null || threadCreatedAt === null) return true;
+  const stateChangedAtMs = Date.parse(stateChangedAt);
+  const threadCreatedAtMs = Date.parse(threadCreatedAt);
+  if (Number.isNaN(stateChangedAtMs) || Number.isNaN(threadCreatedAtMs)) return true;
+  return stateChangedAtMs > threadCreatedAtMs;
 }

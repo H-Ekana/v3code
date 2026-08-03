@@ -4311,6 +4311,7 @@ function ChatViewContent(props: ChatViewProps) {
   const autoSettleAfterDays = useClientSettings((settings) => settings.sidebarAutoSettleAfterDays);
   const activeThreadPr = resolveThreadPr({
     threadBranch: activeThread?.branch ?? null,
+    threadCreatedAt: activeThread?.createdAt ?? null,
     gitStatus: gitStatusQuery.data ?? null,
   });
   const supportsSettlement = serverConfig?.environment.capabilities.threadSettlement === true;
@@ -4338,9 +4339,11 @@ function ChatViewContent(props: ChatViewProps) {
       now: `${nowMinute}:00.000Z`,
       autoSettleAfterDays,
       changeRequestState: activeThreadPr?.state ?? null,
+      changeRequestStateAt: activeThreadPr?.stateChangedAt ?? null,
     });
   }, [
     activeThreadPr?.state,
+    activeThreadPr?.stateChangedAt,
     activeThreadShell,
     autoSettleAfterDays,
     nowMinute,

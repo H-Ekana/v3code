@@ -226,12 +226,38 @@ export function threadWokeAt(
  * un-settles on real activity (user message, session start, approval/
  * user-input request), so an override never goes stale silently.
  */
+/**
+ * True when the change request reached its terminal state strictly before the
+ * thread's last activity — i.e. it is prior history, not this thread's
+ * outcome. An unknown/unparseable timestamp answers false, preserving the
+ * settle-on-merge behaviour for providers that do not report one.
+ */
+function changeRequestOutcomePrecedesActivity(
+  shell: OrchestrationThreadShell,
+  changeRequestStateAt: string | null,
+): boolean {
+  if (changeRequestStateAt === null) return false;
+  const outcomeAtMs = Date.parse(changeRequestStateAt);
+  if (Number.isNaN(outcomeAtMs)) return false;
+
+  const lastActivityAt = threadLastActivityAt(shell);
+  // No activity to compare against: nothing has landed in this thread, so a
+  // change request that already closed is prior history — not its outcome.
+  if (lastActivityAt === null) return true;
+  const lastActivityAtMs = Date.parse(lastActivityAt);
+  if (Number.isNaN(lastActivityAtMs)) return false;
+
+  return outcomeAtMs < lastActivityAtMs;
+}
+
 export function effectiveSettled(
   shell: OrchestrationThreadShell,
   options: {
     readonly now: string;
     readonly autoSettleAfterDays: number | null;
     readonly changeRequestState?: ChangeRequestStateLike | null;
+    /** ISO 8601 merge/close time of that change request, when known. */
+    readonly changeRequestStateAt?: string | null;
   },
 ): boolean {
   // Blocked work must remain visible even when a user explicitly settled it.
@@ -258,7 +284,14 @@ export function effectiveSettled(
   // until real activity clears it server-side.
   if (shell.settledOverride === "active") return false;
   if (options.changeRequestState === "merged" || options.changeRequestState === "closed") {
-    return true;
+    // Settling on a merged/closed change request means "the work this thread
+    // was doing has landed". That only holds when the outcome came AFTER the
+    // thread's last activity. On a long-lived branch the branch's previous PR
+    // stays matched forever, so without this ordering check every new thread
+    // on that branch is born settled by a PR that closed before it existed.
+    if (!changeRequestOutcomePrecedesActivity(shell, options.changeRequestStateAt ?? null)) {
+      return true;
+    }
   }
   if (options.autoSettleAfterDays === null) return false;
 

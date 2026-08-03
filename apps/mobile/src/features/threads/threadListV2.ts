@@ -11,6 +11,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
+import type { ThreadChangeRequestState } from "../../state/thread-pr-presentation";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 
 export { snoozeWakeLabel };
@@ -301,7 +302,7 @@ export function buildThreadListV2Items(input: {
   readonly searchQuery: string;
   readonly matchedThreadKeys?: ReadonlySet<string>;
   /** Per-row PR state reported up by visible rows ("env:threadId" keys). */
-  readonly changeRequestStateByKey?: ReadonlyMap<string, "open" | "closed" | "merged">;
+  readonly changeRequestStateByKey?: ReadonlyMap<string, ThreadChangeRequestState>;
   /** Environments whose server supports thread.settle/unsettle. Threads on
       other environments never classify as settled — the user could neither
       un-settle nor pin them. Absent = no gating (tests). */
@@ -358,8 +359,10 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
-    const changeRequestState =
+    const changeRequest =
       input.changeRequestStateByKey?.get(`${thread.environmentId}:${thread.id}`) ?? null;
+    const changeRequestState = changeRequest?.state ?? null;
+    const changeRequestStateAt = changeRequest?.at ?? null;
     // Visibility parity with web: a snoozed thread leaves the list until it
     // wakes (or raises its hand — effectiveSnoozed refuses blocked/failed
     // work). Snooze outranks settled classification, same as web.
@@ -376,7 +379,12 @@ export function buildThreadListV2Items(input: {
     }
     if (
       supportsSettlement &&
-      effectiveSettled(thread, { now, autoSettleAfterDays, changeRequestState })
+      effectiveSettled(thread, {
+        now,
+        autoSettleAfterDays,
+        changeRequestState,
+        changeRequestStateAt,
+      })
     ) {
       settled.push(thread);
     } else {

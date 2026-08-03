@@ -15,6 +15,9 @@ export interface NormalizedGitHubPullRequestRecord {
   readonly headRefName: string;
   readonly state: "open" | "closed" | "merged";
   readonly updatedAt: Option.Option<DateTime.Utc>;
+  /** mergedAt (or closedAt for a closed-unmerged PR), verbatim ISO 8601.
+      Null while open, or when gh omitted the field. */
+  readonly stateChangedAt: string | null;
   readonly isCrossRepository?: boolean;
   readonly headRepositoryNameWithOwner?: string | null;
   readonly headRepositoryOwnerLogin?: string | null;
@@ -28,6 +31,7 @@ const GitHubPullRequestSchema = Schema.Struct({
   headRefName: TrimmedNonEmptyString,
   state: Schema.optional(Schema.NullOr(Schema.String)),
   mergedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  closedAt: Schema.optional(Schema.NullOr(Schema.String)),
   updatedAt: Schema.optional(Schema.OptionFromNullOr(Schema.DateTimeUtcFromString)),
   isCrossRepository: Schema.optional(Schema.Boolean),
   // gh < 2.47 exports headRepository as {id, name} only; nameWithOwner was
@@ -72,6 +76,16 @@ function normalizeGitHubPullRequestState(input: {
   return "open";
 }
 
+/** The moment a PR left "open". Merged wins over closed: a merged PR carries
+    both timestamps and the merge is the meaningful one. */
+function normalizeGitHubPullRequestStateChangedAt(
+  raw: Schema.Schema.Type<typeof GitHubPullRequestSchema>,
+  state: "open" | "closed" | "merged",
+): string | null {
+  if (state === "open") return null;
+  return trimOptionalString(raw.mergedAt) ?? trimOptionalString(raw.closedAt);
+}
+
 function normalizeGitHubPullRequestRecord(
   raw: Schema.Schema.Type<typeof GitHubPullRequestSchema>,
 ): NormalizedGitHubPullRequestRecord {
@@ -86,14 +100,17 @@ function normalizeGitHubPullRequestRecord(
       ? `${headRepositoryOwnerLogin}/${headRepositoryName}`
       : null);
 
+  const state = normalizeGitHubPullRequestState(raw);
+
   return {
     number: raw.number,
     title: raw.title,
     url: raw.url,
     baseRefName: raw.baseRefName,
     headRefName: raw.headRefName,
-    state: normalizeGitHubPullRequestState(raw),
+    state,
     updatedAt: raw.updatedAt ?? Option.none(),
+    stateChangedAt: normalizeGitHubPullRequestStateChangedAt(raw, state),
     ...(typeof raw.isCrossRepository === "boolean"
       ? { isCrossRepository: raw.isCrossRepository }
       : {}),

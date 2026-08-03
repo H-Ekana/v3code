@@ -731,6 +731,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         baseRef: "main",
         headRef: "feature/status-open-pr",
         state: "open",
+        stateChangedAt: null,
       });
     }),
   );
@@ -770,6 +771,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         baseRef: "main",
         headRef: "feature/status-trimmed-pr",
         state: "open",
+        stateChangedAt: null,
       });
     }),
   );
@@ -822,6 +824,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         baseRef: "main",
         headRef: "feature/status-valid-pr-entry",
         state: "open",
+        stateChangedAt: null,
       });
     }),
   );
@@ -872,6 +875,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         baseRef: "main",
         headRef: "feature/status-lowercase-state",
         state: "merged",
+        stateChangedAt: null,
       });
     }),
   );
@@ -1068,9 +1072,10 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           baseRef: "main",
           headRef: "statemachine",
           state: "open",
+          stateChangedAt: null,
         });
         expect(ghCalls).toContain(
-          "pr list --head jasonLaster:statemachine --state all --limit 20 --json number,title,url,baseRefName,headRefName,state,mergedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner",
+          "pr list --head jasonLaster:statemachine --state all --limit 20 --json number,title,url,baseRefName,headRefName,state,mergedAt,closedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner",
         );
       }),
     20_000,
@@ -1176,6 +1181,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           baseRef: "main",
           headRef: "effect-atom",
           state: "open",
+          stateChangedAt: null,
         });
         expect(ghCalls.some((call) => call.includes("pr list --head upstream/effect-atom "))).toBe(
           false,
@@ -1227,7 +1233,45 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         baseRef: "main",
         headRef: "feature/status-merged-pr",
         state: "merged",
+        stateChangedAt: "2026-01-30T10:00:00Z",
       });
+    }),
+  );
+
+  it.effect("status reports the branch's merged PR with the time it merged", () =>
+    Effect.gen(function* () {
+      // Branch-level truth: a long-lived branch keeps matching the PR it was
+      // promoted through, and status says so. Whether that PR belongs to any
+      // given thread is decided client-side, where the thread is known.
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "dev"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            // @effect-diagnostics-next-line preferSchemaOverJson:off
+            JSON.stringify([
+              {
+                number: 45,
+                title: "release: promote dev",
+                url: "https://github.com/pingdotgg/codething-mvp/pull/45",
+                baseRefName: "main",
+                headRefName: "dev",
+                state: "MERGED",
+                mergedAt: "2026-01-30T10:00:00Z",
+                updatedAt: "2026-01-30T10:00:00Z",
+              },
+            ]),
+          ],
+        },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      expect(status.refName).toBe("dev");
+      expect(status.pr?.number).toBe(45);
+      expect(status.pr?.state).toBe("merged");
+      expect(status.pr?.stateChangedAt).toBe("2026-01-30T10:00:00Z");
     }),
   );
 
@@ -1306,6 +1350,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         baseRef: "main",
         headRef: "feature/status-open-over-merged",
         state: "open",
+        stateChangedAt: null,
       });
     }),
   );
@@ -2639,6 +2684,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
             headRefName: "statemachine",
             state: "open",
             updatedAt: Option.none(),
+            stateChangedAt: null,
             isCrossRepository: false,
             headRepositoryNameWithOwner: "pingdotgg/codething-mvp",
             headRepositoryOwnerLogin: "pingdotgg",
@@ -2657,6 +2703,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
             headRefName: "statemachine",
             state: "open",
             updatedAt: Option.none(),
+            stateChangedAt: null,
             isCrossRepository: true,
             headRepositoryNameWithOwner: "pingdotgg/codething-mvp",
             headRepositoryOwnerLogin: "pingdotgg",
@@ -2686,6 +2733,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
             headRefName: "t3code/git-audit-stability",
             state: "open",
             updatedAt: Option.none(),
+            stateChangedAt: null,
             isCrossRepository: true,
             headRepositoryNameWithOwner: "justsomelegs/t3code",
             headRepositoryOwnerLogin: "justsomelegs",
