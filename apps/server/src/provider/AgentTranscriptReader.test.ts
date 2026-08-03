@@ -4,6 +4,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type AgentTranscriptItem,
+  type AgentTranscriptResult,
   type OrchestrationThread,
   type ProviderSession,
   type ThreadAgentKind,
@@ -87,8 +89,26 @@ function makeSession(): ProviderSession {
   };
 }
 
+function claudeItems(result: AgentTranscriptResult): ReadonlyArray<AgentTranscriptItem> {
+  return result.status === "available" ? result.items : [];
+}
+
+function readClaude(
+  messages: ReadonlyArray<unknown>,
+  request: Partial<Parameters<typeof readAgentTranscript>[0]> = {},
+) {
+  return readAgentTranscript(
+    { threadId, sourceProvider: claudeProvider, agentId: "agent-1", ...request },
+    {
+      getThread: () => Effect.succeed(Option.some(makeThread(makeAgent()))),
+      listSessions: () => Effect.succeed([makeSession()]),
+      getClaudeSubagentMessages: async () => messages as never,
+    },
+  );
+}
+
 describe("readAgentTranscript", () => {
-  it.effect("reads a bounded Claude page and exposes text blocks without thinking blocks", () =>
+  it.effect("preserves interleaved Claude thinking, text, and tool blocks in order", () =>
     Effect.gen(function* () {
       const getMessages = vi.fn(async () => [
         {
@@ -96,6 +116,7 @@ describe("readAgentTranscript", () => {
           uuid: "message-1",
           session_id: "parent-session-1",
           parent_tool_use_id: "tool-1",
+          timestamp: "2026-08-01T00:00:05.000Z",
           message: {
             content: [
               { type: "thinking", thinking: "private reasoning" },
@@ -106,13 +127,7 @@ describe("readAgentTranscript", () => {
       ]);
 
       const result = yield* readAgentTranscript(
-        {
-          threadId,
-          sourceProvider: claudeProvider,
-          agentId: "agent-1",
-          cursor: 4,
-          limit: 10,
-        },
+        { threadId, sourceProvider: claudeProvider, agentId: "agent-1", cursor: 4, limit: 10 },
         {
           getThread: () => Effect.succeed(Option.some(makeThread(makeAgent()))),
           listSessions: () => Effect.succeed([makeSession()]),
@@ -127,18 +142,135 @@ describe("readAgentTranscript", () => {
       });
       expect(result).toEqual({
         status: "available",
-        items: [{ id: "message-1", kind: "message", role: "assistant", text: "Visible answer" }],
+        items: [
+          {
+            id: "message-1:0",
+            kind: "work",
+            category: "thinking",
+            label: "Thinking",
+            status: "completed",
+            at: "2026-08-01T00:00:05.000Z",
+            detail: "private reasoning",
+          },
+          {
+            id: "message-1:1",
+            kind: "message",
+            role: "assistant",
+            text: "Visible answer",
+            at: "2026-08-01T00:00:05.001Z",
+          },
+        ],
         complete: true,
         revision: 7,
       });
-      const firstItem = result.status === "available" ? result.items[0] : undefined;
-      expect(firstItem?.kind === "message" ? firstItem.text : undefined).not.toContain(
-        "private reasoning",
-      );
     }),
   );
 
-  it.effect("paginates by provider message offset even when a message has no visible text", () =>
+  it.effect("collapses a Claude tool call and its result into one item", () =>
+    Effect.gen(function* () {
+      const result = yield* readClaude([
+        {
+          type: "assistant",
+          uuid: "call",
+          session_id: "parent-session-1",
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_1",
+                name: "Bash",
+                input: { command: "pnpm test", description: "Run tests" },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          uuid: "result",
+          session_id: "parent-session-1",
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_1", content: "2 failed", is_error: true },
+            ],
+          },
+        },
+      ]);
+
+      expect(claudeItems(result)).toMatchObject([
+        {
+          id: "call:0",
+          kind: "work",
+          category: "command",
+          label: "Bash",
+          status: "failed",
+          toolCallId: "toolu_1",
+          toolName: "Bash",
+          itemType: "command_execution",
+          command: "pnpm test",
+          detail: "Run tests",
+          outcome: "2 failed",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("keeps a tool result whose call landed on an earlier page", () =>
+    Effect.gen(function* () {
+      const result = yield* readClaude([
+        {
+          type: "user",
+          uuid: "orphan",
+          session_id: "parent-session-1",
+          parent_tool_use_id: null,
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "toolu_missing", content: "output" }],
+          },
+        },
+      ]);
+
+      expect(claudeItems(result)).toMatchObject([
+        {
+          kind: "work",
+          label: "Tool result",
+          status: "completed",
+          toolCallId: "toolu_missing",
+          outcome: "output",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("demotes injected skill bodies and strips system reminders", () =>
+    Effect.gen(function* () {
+      const result = yield* readClaude([
+        {
+          type: "user",
+          uuid: "injected",
+          session_id: "parent-session-1",
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              {
+                type: "text",
+                text: "codex-cli-runtime\ntrue\nBase directory for this skill: C:/skills\n# Codex Runtime",
+              },
+              { type: "text", text: "<system-reminder>ignore me</system-reminder>" },
+              { type: "text", text: "<system-reminder>noise</system-reminder>\nReal question" },
+            ],
+          },
+        },
+      ]);
+
+      expect(claudeItems(result)).toMatchObject([
+        { kind: "work", category: "other", label: "Loaded skill codex-cli-runtime" },
+        { kind: "message", role: "user", text: "Real question" },
+      ]);
+    }),
+  );
+
+  it.effect("paginates by provider message offset", () =>
     Effect.gen(function* () {
       const result = yield* readAgentTranscript(
         { threadId, sourceProvider: claudeProvider, agentId: "agent-1", limit: 2 },
@@ -148,7 +280,7 @@ describe("readAgentTranscript", () => {
           getClaudeSubagentMessages: async () => [
             {
               type: "assistant",
-              uuid: "hidden",
+              uuid: "first",
               session_id: "parent-session-1",
               parent_tool_use_id: null,
               message: { content: [{ type: "thinking", thinking: "hidden" }] },
@@ -171,13 +303,11 @@ describe("readAgentTranscript", () => {
         },
       );
 
-      expect(result).toEqual({
-        status: "available",
-        items: [{ id: "visible", kind: "message", role: "user", text: "Prompt" }],
-        nextCursor: 2,
-        complete: false,
-        revision: 7,
-      });
+      expect(result).toMatchObject({ nextCursor: 2, complete: false, revision: 7 });
+      expect(claudeItems(result)).toMatchObject([
+        { id: "first:0", kind: "work", category: "thinking" },
+        { id: "visible:0", kind: "message", role: "user", text: "Prompt" },
+      ]);
     }),
   );
 
@@ -225,30 +355,39 @@ describe("readAgentTranscript", () => {
       );
 
       expect(readCodexAgentThread).toHaveBeenCalledWith(threadId, "agent-1");
-      expect(result).toEqual({
-        status: "available",
-        items: [
-          { id: "user-1", kind: "message", role: "user", text: "Review this code" },
-          {
-            id: "command-1",
-            kind: "work",
-            category: "command",
-            label: "Searched the codebase",
-            status: "completed",
-            detail: "rg -n TODO src",
-            outcome: "src/a.ts:1: TODO",
-          },
-          {
-            id: "assistant-1",
-            kind: "message",
-            role: "assistant",
-            text: "I found one item.",
-            phase: "final",
-          },
-        ],
-        complete: true,
-        revision: 7,
-      });
+      expect(result).toMatchObject({ status: "available", complete: true, revision: 7 });
+      expect(claudeItems(result)).toMatchObject([
+        { id: "user-1", kind: "message", role: "user", text: "Review this code" },
+        {
+          id: "reasoning-1",
+          kind: "work",
+          category: "thinking",
+          label: "Thinking",
+          detail: "Private reasoning",
+        },
+        {
+          id: "command-1",
+          kind: "work",
+          category: "command",
+          label: "Searched the codebase",
+          status: "completed",
+          toolCallId: "command-1",
+          itemType: "command_execution",
+          command: "rg -n TODO src",
+          detail: "rg -n TODO src",
+          outcome: "src/a.ts:1: TODO",
+        },
+        {
+          id: "assistant-1",
+          kind: "message",
+          role: "assistant",
+          text: "I found one item.",
+          phase: "final",
+        },
+      ]);
+      // Ordering is carried by `at`, not array position, once the client sorts.
+      const stamps = claudeItems(result).map((item) => item.at);
+      expect(stamps).toEqual([...stamps].sort());
     }),
   );
 

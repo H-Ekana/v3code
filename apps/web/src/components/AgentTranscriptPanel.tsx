@@ -14,13 +14,9 @@ import {
   CircleIcon,
   Clock3Icon,
   CopyIcon,
-  FilePenLineIcon,
   GitCompareArrowsIcon,
   MessageSquarePlusIcon,
-  SearchIcon,
-  TerminalIcon,
   TriangleAlertIcon,
-  WrenchIcon,
 } from "lucide-react";
 
 import {
@@ -37,6 +33,7 @@ import { formatElapsed } from "../session-logic";
 import { Badge } from "./ui/badge";
 import { ScrollArea } from "./ui/scroll-area";
 import ChatMarkdown from "./ChatMarkdown";
+import { AgentTranscriptConversation } from "./chat/AgentTranscriptConversation";
 
 interface AgentTranscriptPanelProps {
   agent: ThreadAgentSnapshot | null;
@@ -133,48 +130,6 @@ export function compactTechnicalActivity(
 }
 
 type WorkItem = Extract<import("@t3tools/contracts").AgentTranscriptItem, { kind: "work" }>;
-
-function WorkStep({ item }: { item: WorkItem }) {
-  const Icon =
-    item.category === "command"
-      ? TerminalIcon
-      : item.category === "files"
-        ? FilePenLineIcon
-        : item.category === "search"
-          ? SearchIcon
-          : WrenchIcon;
-  return (
-    <details className="group rounded-md border border-border/60 bg-muted/15 open:bg-muted/25">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs [&::-webkit-details-marker]:hidden">
-        <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
-        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-medium text-foreground/85">{item.label}</span>
-        <span
-          className={cn(
-            "shrink-0 text-[11px]",
-            item.status === "failed" ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {item.status === "running" ? "Running" : item.status === "failed" ? "Failed" : "Done"}
-        </span>
-      </summary>
-      {item.detail || item.outcome ? (
-        <div className="space-y-2 border-t border-border/50 px-3 py-2.5 pl-8">
-          {item.detail ? (
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-muted-foreground">
-              {item.detail}
-            </pre>
-          ) : null}
-          {item.outcome ? (
-            <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-2 font-mono text-xs leading-5 text-muted-foreground">
-              {item.outcome}
-            </pre>
-          ) : null}
-        </div>
-      ) : null}
-    </details>
-  );
-}
 
 function isTerminalStatus(status: ThreadAgentSnapshot["status"]): boolean {
   return status === "completed" || status === "failed" || status === "stopped" || status === "idle";
@@ -401,6 +356,15 @@ export default function AgentTranscriptPanel({
   const hasFileChanges = conversationItems.some(
     (item) => item.kind === "work" && item.category === "files",
   );
+  /**
+   * The final answer already headlines the panel in the outcome card, so it is
+   * dropped from the transcript rather than rendered twice. Everything leading
+   * up to it stays, which is what the conversation is for.
+   */
+  const timelineItems =
+    finalMessage && outcomeText === finalMessage.text
+      ? conversationItems.filter((item) => item.id !== finalMessage.id)
+      : conversationItems;
 
   return (
     <ScrollArea className="h-full min-h-0" viewportRef={viewportRef}>
@@ -525,64 +489,12 @@ export default function AgentTranscriptPanel({
                 The conversation is temporarily unavailable. Technical activity can still be viewed
                 below.
               </p>
-            ) : transcript.data?.status === "available" && conversationItems.length > 0 ? (
-              <ol className="space-y-3">
-                {conversationItems.map((item) =>
-                  item.kind === "work" ? (
-                    <li key={item.id} className="pl-5">
-                      <WorkStep item={item} />
-                    </li>
-                  ) : (
-                    (() => {
-                      const isFinal = item.role === "assistant" && item.id === finalMessage?.id;
-                      return (
-                        <li
-                          key={item.id}
-                          className={cn(
-                            "flex",
-                            item.role === "user" ? "justify-end" : "justify-start",
-                          )}
-                        >
-                          <div
-                            className={cn(
-                              "max-w-[80%]",
-                              item.role === "user"
-                                ? "rounded-2xl border border-primary/12 bg-accent p-3 text-foreground"
-                                : isFinal
-                                  ? "w-full"
-                                  : "px-1 py-0.5",
-                            )}
-                          >
-                            {isFinal ? (
-                              <div className="flex items-center gap-2 rounded-md border border-primary/15 bg-primary/[0.035] px-3 py-2 text-xs text-muted-foreground">
-                                <CheckCircle2Icon className="size-3.5 text-primary" />
-                                <span className="font-medium text-foreground">Final result</span>
-                                <span>Shown in the summary above</span>
-                              </div>
-                            ) : item.role !== "user" ? (
-                              <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                                <span>{agentName}</span>
-                              </div>
-                            ) : null}
-                            {!isFinal ? (
-                              <ChatMarkdown
-                                text={item.text}
-                                cwd={markdownCwd}
-                                threadRef={threadRef}
-                                lineBreaks={item.role === "user"}
-                                className={cn(
-                                  "break-words",
-                                  item.role === "user" ? "text-foreground" : "text-foreground/90",
-                                )}
-                              />
-                            ) : null}
-                          </div>
-                        </li>
-                      );
-                    })()
-                  ),
-                )}
-              </ol>
+            ) : transcript.data?.status === "available" && timelineItems.length > 0 ? (
+              <AgentTranscriptConversation
+                items={timelineItems}
+                threadRef={threadRef}
+                markdownCwd={markdownCwd}
+              />
             ) : transcript.data?.status === "available" ? (
               <p className="rounded-md border border-dashed border-border px-3 py-5 text-center text-xs text-muted-foreground">
                 The provider returned no visible messages for this agent.
@@ -603,7 +515,7 @@ export default function AgentTranscriptPanel({
                   className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-border/70 px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/60"
                 >
                   <ArrowDownIcon className="size-3.5" />
-                  {transcript.isPending ? "Loading moreºw^~)Þv" : "Load more activity"}
+                  {transcript.isPending ? "Loading more…" : "Load more activity"}
                 </button>
               </div>
             ) : null}

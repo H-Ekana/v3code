@@ -6,17 +6,21 @@ import {
   type AgentTranscriptRequest,
   type AgentTranscriptResult,
   type AgentTranscriptUnavailableReason,
+  type AgentTranscriptWorkCategory,
   NonNegativeInt,
   THREAD_AGENTS_ACTIVITY_KIND,
   ThreadAgentSnapshot,
+  type ToolLifecycleItemType,
   type OrchestrationThread,
   type ProviderSession,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { ProviderThreadSnapshot } from "./Services/ProviderAdapter.ts";
+import { classifyToolItemType } from "./toolItemType.ts";
 
 const RosterPayload = Schema.Struct({
   agents: Schema.Array(Schema.Unknown),
@@ -30,17 +34,58 @@ const TextContentBlock = Schema.Struct({
   type: Schema.Literal("text"),
   text: Schema.String,
 });
+const ThinkingContentBlock = Schema.Struct({
+  type: Schema.Literal("thinking"),
+  thinking: Schema.String,
+});
+const ToolUseContentBlock = Schema.Struct({
+  type: Schema.Literal("tool_use"),
+  id: Schema.String,
+  name: Schema.String,
+  input: Schema.optional(Schema.Unknown),
+});
+const ToolResultContentBlock = Schema.Struct({
+  type: Schema.Literal("tool_result"),
+  tool_use_id: Schema.String,
+  content: Schema.optional(Schema.Unknown),
+  is_error: Schema.optional(Schema.Boolean),
+});
 
 const decodeRosterPayload = Schema.decodeUnknownOption(RosterPayload);
 const decodeAgent = Schema.decodeUnknownOption(ThreadAgentSnapshot);
 const decodeResumeCursor = Schema.decodeUnknownOption(ResumeCursor);
 const decodeMessageBody = Schema.decodeUnknownOption(TranscriptMessageBody);
 const decodeTextContentBlock = Schema.decodeUnknownOption(TextContentBlock);
+const decodeThinkingContentBlock = Schema.decodeUnknownOption(ThinkingContentBlock);
+const decodeToolUseContentBlock = Schema.decodeUnknownOption(ToolUseContentBlock);
+const decodeToolResultContentBlock = Schema.decodeUnknownOption(ToolResultContentBlock);
 
 type TranscriptMessage = Pick<
   SessionMessage,
   "type" | "uuid" | "session_id" | "message" | "parent_tool_use_id"
->;
+> & {
+  /**
+   * Present on every persisted session record but absent from the SDK's
+   * declared `SessionMessage` shape, so it is read defensively; the sequencer
+   * falls back to synthetic ordering when it is missing.
+   */
+  readonly timestamp?: string;
+};
+
+function workCategoryForItemType(itemType: ToolLifecycleItemType): AgentTranscriptWorkCategory {
+  switch (itemType) {
+    case "command_execution":
+      return "command";
+    case "file_change":
+      return "files";
+    case "web_search":
+      return "search";
+    case "collab_agent_tool_call":
+      return "delegation";
+    default:
+      return "tool";
+  }
+}
 
 export interface AgentTranscriptReaderDependencies {
   readonly getThread: (
@@ -93,39 +138,191 @@ function findRosterAgent(thread: OrchestrationThread, agentId: string): RosterAg
   return undefined;
 }
 
-function visibleText(message: TranscriptMessage): string | undefined {
-  const body = decodeMessageBody(message.message);
-  if (Option.isNone(body)) return undefined;
-  if (typeof body.value.content === "string") {
-    const text = body.value.content.trim();
-    return text.length > 0 ? text : undefined;
-  }
+/**
+ * Harness scaffolding the provider persists as ordinary transcript turns.
+ *
+ * The main chat never sees these — the provider stream does not forward them —
+ * but the sub-agent transcript is re-read from the raw session log, where they
+ * sit alongside real conversation. Rendering them verbatim buries the actual
+ * exchange under multi-page instruction dumps, so they are demoted to compact
+ * work rows instead of being shown as things the agent said.
+ */
+const SKILL_INJECTION_MARKER = "Base directory for this skill:";
+const SYSTEM_REMINDER_PATTERN = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 
-  const text = body.value.content.flatMap((candidate) => {
-    const block = decodeTextContentBlock(candidate);
-    if (Option.isNone(block)) return [];
-    const value = block.value.text.trim();
-    return value.length > 0 ? [value] : [];
+function stripSystemReminders(value: string): string {
+  return value.replace(SYSTEM_REMINDER_PATTERN, "").trim();
+}
+
+/** The injected skill body leads with the skill slug on its own line. */
+function skillInjectionName(value: string): string | undefined {
+  if (!value.includes(SKILL_INJECTION_MARKER)) return undefined;
+  const first = value.split("\n", 1)[0]?.trim();
+  return first !== undefined && first.length > 0 && first.length <= 80 ? first : undefined;
+}
+
+/**
+ * Emits a strictly increasing timestamp per item.
+ *
+ * The client sorts an interleaved transcript by `at` exactly as the main
+ * timeline sorts by `createdAt`, so equal or missing stamps would let a tool
+ * result float above the call that produced it. Real provider timestamps are
+ * preferred; anything non-monotonic is nudged forward rather than trusted.
+ */
+function makeSequencer(): (candidate: unknown) => string {
+  let lastMs = 0;
+  return (candidate) => {
+    const parsed = typeof candidate === "string" ? Date.parse(candidate) : Number.NaN;
+    const ms = Number.isFinite(parsed) && parsed > lastMs ? parsed : lastMs + 1;
+    lastMs = ms;
+    return DateTime.formatIso(DateTime.makeUnsafe(ms));
+  };
+}
+
+function toolResultText(content: unknown): string | undefined {
+  if (typeof content === "string") return bounded(content);
+  if (!Array.isArray(content)) return undefined;
+  const parts = content.flatMap((candidate) => {
+    const item = record(candidate);
+    const value = item?.type === "text" ? text(item.text) : undefined;
+    return value ? [value] : [];
   });
-  return text.length > 0 ? text.join("\n\n") : undefined;
+  return parts.length > 0 ? bounded(parts.join("\n\n")) : undefined;
+}
+
+/** Pulls the fields the shared renderer treats specially, so tool cards read like the main chat. */
+function toolInputFacets(
+  itemType: ToolLifecycleItemType,
+  input: unknown,
+): {
+  readonly command?: string;
+  readonly changedFiles?: ReadonlyArray<string>;
+  readonly detail?: string;
+} {
+  const args = record(input);
+  if (!args) return {};
+  const command = text(args.command);
+  const filePath = text(args.file_path) ?? text(args.path) ?? text(args.notebook_path);
+  if (itemType === "command_execution" && command) {
+    return { command, ...(text(args.description) ? { detail: text(args.description)! } : {}) };
+  }
+  if (filePath) {
+    const detail = jsonDetail(input);
+    return { changedFiles: [filePath], ...(detail ? { detail } : {}) };
+  }
+  const detail = jsonDetail(input);
+  return detail ? { detail } : {};
 }
 
 export function normalizeClaudeTranscriptMessages(
   messages: ReadonlyArray<TranscriptMessage>,
 ): ReadonlyArray<AgentTranscriptItem> {
-  return messages.flatMap((message) => {
-    const text = visibleText(message);
-    return text
-      ? [
-          {
-            id: message.uuid,
-            kind: "message",
-            role: message.type,
-            text,
-          } satisfies AgentTranscriptItem,
-        ]
-      : [];
-  });
+  const items: Array<AgentTranscriptItem> = [];
+  /** Output index of each pending tool call, so its result collapses into it. */
+  const toolIndexByUseId = new Map<string, number>();
+  const nextAt = makeSequencer();
+
+  for (const message of messages) {
+    const body = decodeMessageBody(message.message);
+    if (Option.isNone(body)) continue;
+    const blocks =
+      typeof body.value.content === "string"
+        ? [{ type: "text", text: body.value.content }]
+        : body.value.content;
+
+    let blockIndex = 0;
+    for (const candidate of blocks) {
+      const id = `${message.uuid}:${blockIndex}`;
+      blockIndex += 1;
+      // Stamped per block, not per message: several blocks share one record's
+      // timestamp, and the client sorts on `at` alone.
+      const at = nextAt(message.timestamp);
+
+      const textBlock = decodeTextContentBlock(candidate);
+      if (Option.isSome(textBlock)) {
+        const value = stripSystemReminders(textBlock.value.text);
+        if (value.length === 0) continue;
+        const skillName = skillInjectionName(value);
+        if (skillName) {
+          items.push({
+            id,
+            kind: "work",
+            category: "other",
+            label: `Loaded skill ${skillName}`,
+            status: "completed",
+            at,
+            ...(bounded(value) ? { detail: bounded(value)! } : {}),
+          });
+          continue;
+        }
+        items.push({ id, kind: "message", role: message.type, text: value, at });
+        continue;
+      }
+
+      const thinkingBlock = decodeThinkingContentBlock(candidate);
+      if (Option.isSome(thinkingBlock)) {
+        const value = thinkingBlock.value.thinking.trim();
+        if (value.length === 0) continue;
+        items.push({
+          id,
+          kind: "work",
+          category: "thinking",
+          label: "Thinking",
+          status: "completed",
+          at,
+          ...(bounded(value) ? { detail: bounded(value)! } : {}),
+        });
+        continue;
+      }
+
+      const toolUseBlock = decodeToolUseContentBlock(candidate);
+      if (Option.isSome(toolUseBlock)) {
+        const { id: toolUseId, name, input } = toolUseBlock.value;
+        const itemType = classifyToolItemType(name);
+        toolIndexByUseId.set(toolUseId, items.length);
+        items.push({
+          id,
+          kind: "work",
+          category: workCategoryForItemType(itemType),
+          label: name,
+          status: "running",
+          at,
+          toolCallId: toolUseId,
+          toolName: name,
+          itemType,
+          ...toolInputFacets(itemType, input),
+        });
+        continue;
+      }
+
+      const toolResultBlock = decodeToolResultContentBlock(candidate);
+      if (Option.isSome(toolResultBlock)) {
+        const { tool_use_id: toolUseId, content, is_error: isError } = toolResultBlock.value;
+        const outcome = toolResultText(content);
+        const status = isError === true ? "failed" : "completed";
+        const pendingIndex = toolIndexByUseId.get(toolUseId);
+        const pending = pendingIndex === undefined ? undefined : items[pendingIndex];
+        if (pendingIndex !== undefined && pending?.kind === "work") {
+          items[pendingIndex] = { ...pending, status, ...(outcome ? { outcome } : {}) };
+          toolIndexByUseId.delete(toolUseId);
+          continue;
+        }
+        // The call landed on an earlier page; keep the result rather than drop it.
+        items.push({
+          id,
+          kind: "work",
+          category: "other",
+          label: "Tool result",
+          status,
+          at,
+          toolCallId: toolUseId,
+          ...(outcome ? { outcome } : {}),
+        });
+      }
+    }
+  }
+
+  return items;
 }
 
 type UnknownRecord = Readonly<Record<string, unknown>>;
@@ -140,7 +337,15 @@ function text(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function bounded(value: unknown, limit = 4_000): string | undefined {
+/**
+ * This reader is the fidelity path for sub-agent detail, so the bound is set to
+ * keep a realistic tool payload intact rather than to keep rows short — the
+ * renderer collapses long bodies behind a disclosure. It still exists because a
+ * page of 100 items crosses the wire in one response.
+ */
+const TRANSCRIPT_DETAIL_LIMIT = 10_000;
+
+function bounded(value: unknown, limit = TRANSCRIPT_DETAIL_LIMIT): string | undefined {
   const visible = text(value);
   if (!visible) return undefined;
   return visible.length <= limit ? visible : `${visible.slice(0, limit)}\n…`;
@@ -169,19 +374,49 @@ function jsonDetail(value: unknown): string | undefined {
   }
 }
 
+/** Codex exposes reasoning as provider-authored summaries; raw chain-of-thought is encrypted. */
+function codexReasoningText(item: UnknownRecord): string | undefined {
+  const summary = item.summary;
+  if (Array.isArray(summary)) {
+    const parts = summary.flatMap((entry) => {
+      const value = text(entry) ?? text(record(entry)?.text);
+      return value ? [value] : [];
+    });
+    return parts.length > 0 ? bounded(parts.join("\n\n")) : undefined;
+  }
+  return bounded(item.text);
+}
+
+function codexFileChangeDetail(
+  changes: ReadonlyArray<UnknownRecord | undefined>,
+): string | undefined {
+  const parts = changes.flatMap((change) => {
+    if (!change) return [];
+    const path = text(change.path);
+    if (!path) return [];
+    const kind = text(change.kind) ?? text(change.type);
+    const diff = text(change.diff) ?? text(change.unifiedDiff);
+    const heading = kind ? `${kind}: ${path}` : path;
+    return [diff ? `${heading}\n${diff}` : heading];
+  });
+  return parts.length > 0 ? bounded(parts.join("\n\n")) : undefined;
+}
+
 export function normalizeCodexTranscriptItems(
   turns: ProviderThreadSnapshot["turns"],
 ): ReadonlyArray<AgentTranscriptItem> {
+  const nextAt = makeSequencer();
   return turns.flatMap((turn) =>
     turn.items.flatMap((candidate): ReadonlyArray<AgentTranscriptItem> => {
       const item = record(candidate);
       const id = text(item?.id);
       const type = item?.type;
       if (!item || !id || typeof type !== "string") return [];
+      const at = nextAt(item.createdAt ?? item.timestamp);
 
       if (type === "userMessage") {
         const value = userInputText(item.content);
-        return value ? [{ id, kind: "message", role: "user", text: value } as const] : [];
+        return value ? [{ id, kind: "message", role: "user", text: value, at } as const] : [];
       }
       if (type === "agentMessage") {
         const value = text(item.text);
@@ -192,6 +427,7 @@ export function normalizeCodexTranscriptItems(
                 kind: "message",
                 role: "assistant",
                 text: value,
+                at,
                 ...(item.phase === "final_answer"
                   ? { phase: "final" as const }
                   : item.phase === "commentary"
@@ -201,8 +437,26 @@ export function normalizeCodexTranscriptItems(
             ]
           : [];
       }
-      // Reasoning content is intentionally not exposed as transcript content.
-      if (type === "reasoning" || type === "hookPrompt" || type === "subAgentActivity") return [];
+      if (type === "hookPrompt" || type === "subAgentActivity") return [];
+      if (type === "reasoning") {
+        // Surfaced as thinking so a Codex sub-agent reads like a Claude one.
+        // These are the provider's own summaries — the raw reasoning is
+        // encrypted upstream and is not recoverable here.
+        const value = codexReasoningText(item);
+        return value
+          ? [
+              {
+                id,
+                kind: "work",
+                category: "thinking",
+                label: "Thinking",
+                status: "completed",
+                at,
+                detail: value,
+              } as const,
+            ]
+          : [];
+      }
       if (type === "commandExecution") {
         const actions = Array.isArray(item.commandActions) ? item.commandActions.map(record) : [];
         const firstAction = actions.find(Boolean);
@@ -214,15 +468,21 @@ export function normalizeCodexTranscriptItems(
               : firstAction?.type === "search"
                 ? "Searched the codebase"
                 : "Ran a command";
+        const exitCode = typeof item.exitCode === "number" ? item.exitCode : undefined;
+        const output = bounded(item.aggregatedOutput);
         return [
           {
             id,
             kind: "work",
             category: "command",
             label: actionLabel,
-            status: workStatus(item.status),
-            ...(bounded(item.command) ? { detail: bounded(item.command) } : {}),
-            ...(bounded(item.aggregatedOutput) ? { outcome: bounded(item.aggregatedOutput) } : {}),
+            status: exitCode !== undefined && exitCode !== 0 ? "failed" : workStatus(item.status),
+            at,
+            toolCallId: id,
+            itemType: "command_execution",
+            ...(bounded(item.command) ? { command: bounded(item.command)! } : {}),
+            ...(bounded(item.command) ? { detail: bounded(item.command)! } : {}),
+            ...(output ? { outcome: output } : {}),
           } as const,
         ];
       }
@@ -231,6 +491,7 @@ export function normalizeCodexTranscriptItems(
         const paths = changes.flatMap((change) =>
           text(change?.path) ? [text(change?.path)!] : [],
         );
+        const detail = codexFileChangeDetail(changes);
         return [
           {
             id,
@@ -238,7 +499,11 @@ export function normalizeCodexTranscriptItems(
             category: "files",
             label: `Changed ${paths.length || changes.length} ${paths.length === 1 ? "file" : "files"}`,
             status: workStatus(item.status),
-            ...(paths.length > 0 ? { detail: paths.join("\n") } : {}),
+            at,
+            toolCallId: id,
+            itemType: "file_change",
+            ...(paths.length > 0 ? { changedFiles: paths } : {}),
+            ...(detail ? { detail } : {}),
           } as const,
         ];
       }
@@ -246,6 +511,8 @@ export function normalizeCodexTranscriptItems(
         const tool = text(item.tool) ?? "tool";
         const server = type === "mcpToolCall" ? text(item.server) : text(item.namespace);
         const error = record(item.error);
+        const failure = bounded(error?.message) ?? bounded(item.error);
+        const outcome = failure ?? jsonDetail(item.result);
         return [
           {
             id,
@@ -253,8 +520,12 @@ export function normalizeCodexTranscriptItems(
             category: "tool",
             label: `Used ${server ? `${server} · ` : ""}${tool}`,
             status: workStatus(item.status),
-            ...(jsonDetail(item.arguments) ? { detail: jsonDetail(item.arguments) } : {}),
-            ...(bounded(error?.message) ? { outcome: bounded(error?.message) } : {}),
+            at,
+            toolCallId: id,
+            toolName: tool,
+            itemType: type === "mcpToolCall" ? "mcp_tool_call" : "dynamic_tool_call",
+            ...(jsonDetail(item.arguments) ? { detail: jsonDetail(item.arguments)! } : {}),
+            ...(outcome ? { outcome } : {}),
           } as const,
         ];
       }
@@ -268,6 +539,9 @@ export function normalizeCodexTranscriptItems(
                 category: "search",
                 label: `Searched for “${query}”`,
                 status: "completed",
+                at,
+                toolCallId: id,
+                itemType: "web_search",
               } as const,
             ]
           : [];
@@ -287,7 +561,10 @@ export function normalizeCodexTranscriptItems(
             category: "delegation",
             label: labels[String(item.tool)] ?? "Coordinated agents",
             status: workStatus(item.status),
-            ...(bounded(item.prompt) ? { detail: bounded(item.prompt) } : {}),
+            at,
+            toolCallId: id,
+            itemType: "collab_agent_tool_call",
+            ...(bounded(item.prompt) ? { detail: bounded(item.prompt)! } : {}),
           } as const,
         ];
       }
@@ -301,6 +578,7 @@ export function normalizeCodexTranscriptItems(
                 category: "other",
                 label: "Updated the plan",
                 status: "completed",
+                at,
                 detail: value,
               } as const,
             ]
@@ -408,7 +686,8 @@ export const readAgentTranscript = Effect.fn("readAgentTranscript")(function* (
 
   const offset = input.cursor ?? 0;
   const limit = input.limit ?? AGENT_TRANSCRIPT_DEFAULT_LIMIT;
-  const reader = dependencies.getClaudeSubagentMessages ?? getSubagentMessages;
+  const reader: NonNullable<AgentTranscriptReaderDependencies["getClaudeSubagentMessages"]> =
+    dependencies.getClaudeSubagentMessages ?? getSubagentMessages;
   const raw = yield* Effect.tryPromise({
     try: () =>
       reader(parentSessionId, String(input.agentId), {
