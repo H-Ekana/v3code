@@ -2570,7 +2570,34 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (!isDraftThreadPromoting(existing)) {
               return state;
             }
-            return removeDraftThreadReferences(state, threadKey);
+            // A ghost next-prompt suggestion is written against the draft after
+            // it is sent (once the turn settles), so it lives under the draft
+            // key. The promoted thread's composer reads the thread key, so hand
+            // the suggestion over before the draft-keyed state is torn down —
+            // otherwise it is orphaned and the ghost never displays on the
+            // thread the user actually ends up viewing.
+            const promotedThreadKey = existing?.promotedTo
+              ? scopedThreadKey(existing.promotedTo)
+              : null;
+            const ghostSuggestion = state.draftsByThreadKey[threadKey]?.ghostSuggestion ?? null;
+            const cleared = removeDraftThreadReferences(state, threadKey);
+            if (
+              ghostSuggestion === null ||
+              promotedThreadKey === null ||
+              promotedThreadKey === threadKey ||
+              cleared.draftsByThreadKey[promotedThreadKey]?.ghostSuggestion != null
+            ) {
+              return cleared;
+            }
+            const promotedDraft =
+              cleared.draftsByThreadKey[promotedThreadKey] ?? createEmptyThreadDraft();
+            return {
+              ...cleared,
+              draftsByThreadKey: {
+                ...cleared.draftsByThreadKey,
+                [promotedThreadKey]: { ...promotedDraft, ghostSuggestion },
+              },
+            };
           });
         },
         clearDraftThread: (threadRef) => {

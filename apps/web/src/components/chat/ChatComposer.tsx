@@ -19,6 +19,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { V3_DEMO_RESPONDER_INSTANCE_ID } from "@t3tools/shared/v3Demo";
@@ -1171,6 +1172,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // at — otherwise navigating away from a running thread onto an idle one reads
   // as a settle and burns a generation on a thread that never ran.
   const previousPhaseThreadRef = useRef<string | null>(activeThreadId ?? null);
+  // Monotonic request id per thread. The async suggestion request is guarded by
+  // this instead of the effect lifecycle: the generation CLI takes seconds, and
+  // guarding with an effect-cleanup boolean discarded a suggestion we already
+  // paid for whenever an unrelated dependency changed mid-flight — most often a
+  // second phase transition as the session tears down (ready → disconnected),
+  // which re-ran the effect and cancelled the request without issuing a
+  // replacement, so the ghost never appeared. A completed request now applies
+  // unless a NEWER request for the same thread (or a new turn) has superseded it.
+  const suggestionRequestIdByThreadRef = useRef<Map<string, number>>(new Map());
   const requestSuggestNextPrompt = useAtomCommand(promptSuggestionEnvironment.suggestNextPrompt, {
     label: "composer:suggest-next-prompt",
     reportFailure: false,
@@ -2289,6 +2299,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     previousPhaseThreadRef.current = currentThread;
 
     if (phase === "running") {
+      // A new turn started: bump this thread's request id so any in-flight
+      // request resolves into a no-op instead of repainting a ghost over the
+      // running turn, then clear the current suggestion.
+      if (currentThread) {
+        const idByThread = suggestionRequestIdByThreadRef.current;
+        idByThread.set(currentThread, (idByThread.get(currentThread) ?? 0) + 1);
+      }
       setGhostSuggestion(null);
       return;
     }
@@ -2308,21 +2325,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     if (!activeThreadId || !environmentId) return;
 
-    let cancelled = false;
+    const requestThreadId = activeThreadId;
+    // Key the suggestion by the real thread rather than the composer's current
+    // draft target. The request is fired from a new thread's first turn while
+    // the target is still the pre-send `DraftId`; by the time it resolves the
+    // draft may already have been promoted and its draft-keyed state torn down.
+    // Writing against the thread ref lands the ghost on the thread key once
+    // promotion has finalized (and is redirected onto the draft key, then
+    // migrated across on finalize, while promotion is still pending) — either
+    // way it reaches the thread the composer actually reads.
+    const requestThreadRef = scopeThreadRef(environmentId, requestThreadId);
+    const idByThread = suggestionRequestIdByThreadRef.current;
+    const requestId = (idByThread.get(requestThreadId) ?? 0) + 1;
+    idByThread.set(requestThreadId, requestId);
     void requestSuggestNextPrompt({
       environmentId,
       input: { threadId: activeThreadId },
     }).then((result) => {
-      if (cancelled) return;
+      // Only the latest request for this thread may apply, so a superseded
+      // request cannot repaint a stale suggestion.
+      if (suggestionRequestIdByThreadRef.current.get(requestThreadId) !== requestId) return;
       if (result._tag !== "Success") return;
       if (promptRef.current.trim().length > 0) return;
       const suggestion = result.value.suggestion?.trim() ?? "";
-      setGhostSuggestion(suggestion.length > 0 ? suggestion : null);
+      setComposerDraftGhostSuggestion(requestThreadRef, suggestion.length > 0 ? suggestion : null);
     });
-
-    return () => {
-      cancelled = true;
-    };
   }, [activeThreadId, environmentId, isComposerApprovalState, phase, requestSuggestNextPrompt]);
 
   // NOTE: no clear-on-thread-switch effect. The ghost is stored per thread, so

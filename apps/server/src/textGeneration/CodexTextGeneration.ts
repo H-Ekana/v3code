@@ -40,6 +40,31 @@ import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
 
 const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
+/**
+ * Ghost suggestions are ambient UX: a late one is worse than none, because the
+ * user has already moved on. Measured end-to-end cost of a lean run is ~7s, so
+ * this is a fast-fail ceiling rather than a budget — `suggestNextPrompt`
+ * already degrades to "no ghost" on failure.
+ */
+const CODEX_PROMPT_SUGGESTION_TIMEOUT_MS = 15_000;
+/**
+ * Extra `--config` overrides for one-shot generations that only need the model,
+ * never the workspace.
+ *
+ * Measured on a real repo: loading the project doc (a 25KB AGENTS.md) pushed a
+ * ghost-suggestion turn from ~12k to ~22k input tokens and 7s to 10-16s. These
+ * side jobs get a self-contained prompt, so project instructions and MCP tool
+ * definitions are pure overhead — dropping both removes the spikes.
+ *
+ * Deliberately NOT `--ignore-user-config`: that would also discard custom
+ * `model_providers`/auth wiring that users legitimately depend on.
+ */
+const CODEX_LEAN_CONFIG_ARGS: ReadonlyArray<string> = [
+  "--config",
+  "project_doc_max_bytes=0",
+  "--config",
+  "mcp_servers={}",
+];
 const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
 /**
  * Build a Codex text-generation closure bound to a specific `CodexSettings`
@@ -161,6 +186,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     imagePaths = [],
     cleanupPaths = [],
     modelSelection,
+    lean = false,
+    timeoutMs = CODEX_TIMEOUT_MS,
   }: {
     operation:
       | "generateCommitMessage"
@@ -174,6 +201,10 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     imagePaths?: ReadonlyArray<string>;
     cleanupPaths?: ReadonlyArray<string>;
     modelSelection: ModelSelection;
+    /** Skip project docs and MCP servers (see CODEX_LEAN_CONFIG_ARGS). */
+    lean?: boolean;
+    /** Overrides CODEX_TIMEOUT_MS for latency-sensitive operations. */
+    timeoutMs?: number;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
     const schemaJson = yield* encodeJsonForOperation(
       operation,
@@ -208,6 +239,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           "--config",
           `model_reasoning_effort="${reasoningEffort}"`,
           ...(serviceTier ? ["--config", `service_tier="${serviceTier}"`] : []),
+          ...(lean ? CODEX_LEAN_CONFIG_ARGS : []),
           "--output-schema",
           schemaPath,
           "--output-last-message",
@@ -283,7 +315,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     return yield* Effect.gen(function* () {
       yield* runCodexCommand().pipe(
         Effect.scoped,
-        Effect.timeoutOption(CODEX_TIMEOUT_MS),
+        Effect.timeoutOption(timeoutMs),
         Effect.flatMap(
           Option.match({
             onNone: () =>
@@ -418,6 +450,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         outputSchemaJson: outputSchema,
         imagePaths,
         modelSelection: input.modelSelection,
+        // A title summarizes the user's own message, so repo conventions add
+        // nothing — unlike commit/PR text, which is left un-lean on purpose.
+        lean: true,
       });
 
       return {
@@ -437,6 +472,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         prompt,
         outputSchemaJson: outputSchema,
         modelSelection: input.modelSelection,
+        lean: true,
+        timeoutMs: CODEX_PROMPT_SUGGESTION_TIMEOUT_MS,
       });
 
       const sanitized = sanitizePromptSuggestion(generated.suggestion);

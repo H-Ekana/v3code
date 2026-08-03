@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -196,6 +197,10 @@ export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
     } satisfies SuggestNextPromptResult;
   }
 
+  // Generation dominates this RPC and is the only part that can regress into
+  // "too late to be useful", so it is timed on its own rather than inferred
+  // from the RPC histogram (which also covers the projection reads above).
+  const startedAt = yield* Clock.currentTimeMillis;
   const generated = yield* textGeneration
     .generatePromptSuggestion({
       cwd,
@@ -213,16 +218,20 @@ export const suggestNextPrompt = Effect.fn("suggestNextPrompt")(function* (
       Effect.orElseSucceed(() => ({ suggestion: null as string | null })),
     );
 
+  const durationMs = (yield* Clock.currentTimeMillis) - startedAt;
+
   if (generated.suggestion === null) {
     yield* Effect.logInfo("No next-prompt suggestion.", {
       reason: "model-returned-nothing-or-sanitizer-rejected",
       threadId,
       model: modelSelection.model,
+      durationMs,
     });
   } else {
     yield* Effect.logInfo("Next-prompt suggestion ready.", {
       threadId,
       suggestion: generated.suggestion,
+      durationMs,
     });
   }
 

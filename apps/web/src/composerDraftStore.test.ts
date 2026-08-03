@@ -1137,6 +1137,39 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(draftByKey(draftId)).toBeUndefined();
   });
 
+  it("hands a draft-keyed ghost suggestion to the promoted thread on finalize", () => {
+    const store = useComposerDraftStore.getState();
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    // The ghost suggestion is generated once the turn settles, so it is written
+    // against the (pre-promotion) draft key.
+    store.setGhostSuggestion(draftId, "run the tests");
+    markPromotedDraftThread(threadId);
+
+    finalizePromotedDraftThreadByRef(threadRef);
+
+    // The draft-keyed state is torn down, but the suggestion is preserved under
+    // the thread key the promoted composer reads — otherwise it would never
+    // display on the thread the user ends up viewing.
+    expect(draftByKey(draftId)).toBeUndefined();
+    expect(useComposerDraftStore.getState().getComposerDraft(threadRef)?.ghostSuggestion).toBe(
+      "run the tests",
+    );
+  });
+
+  it("does not synthesize a thread draft on finalize when there is no ghost suggestion", () => {
+    const store = useComposerDraftStore.getState();
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setPrompt(draftId, "promote me");
+    markPromotedDraftThread(threadId);
+
+    finalizePromotedDraftThreadByRef(threadRef);
+
+    expect(draftByKey(draftId)).toBeUndefined();
+    expect(useComposerDraftStore.getState().getComposerDraft(threadRef)).toBeNull();
+  });
+
   it("updates branch context on an existing draft thread", () => {
     const store = useComposerDraftStore.getState();
     store.setProjectDraftThreadId(projectRef, draftId, {
