@@ -77,6 +77,7 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  resolveTimelineSettleFold,
   resolveWorkEntryToolStatus,
   toolLifecycleFlashKey,
   type StableMessagesTimelineRowsState,
@@ -86,8 +87,13 @@ import {
   type TimelineLatestTurn,
   type TimelineLifecycleLedger,
   timelineLifecycleHasOneShots,
+  type TimelineSettleFoldState,
 } from "./MessagesTimeline.logic";
-import { resolveSentMessageRevealOffset } from "./timelineScrollAnchoring";
+import {
+  resolveFoldScrollCorrectionFromCandidates,
+  resolveSentMessageRevealOffset,
+  type TimelineAnchorSample,
+} from "./timelineScrollAnchoring";
 import { type ComposerInterruptState } from "./ComposerPrimaryActions";
 import { getStatusPresentation, type StatusAxes } from "~/lib/statusPresentation";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
@@ -137,7 +143,12 @@ import {
 // components (WorkingTimer, LiveElapsed) handle it.
 // ---------------------------------------------------------------------------
 
-interface TimelineRowSharedState {
+/**
+ * Exported so surfaces other than the main thread — today the sub-agent
+ * transcript panel — can render the same rows against their own data source.
+ * Any consumer must provide both contexts; the rows read them unconditionally.
+ */
+export interface TimelineRowSharedState {
   timestampFormat: TimestampFormat;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
@@ -153,7 +164,7 @@ interface TimelineRowSharedState {
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
 }
 
-interface TimelineRowActivityState {
+export interface TimelineRowActivityState {
   isWorking: boolean;
   isRevertingCheckpoint: boolean;
   activeTurnInProgress: boolean;
@@ -174,8 +185,8 @@ interface TimelineRowActivityState {
   completingToolIds: ReadonlySet<string>;
 }
 
-const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
-const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
+export const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
+export const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
@@ -191,6 +202,58 @@ const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "d
  * cost nothing.
  */
 const SEND_REVEAL_WINDOW_MS = 1200;
+/**
+ * Already stamped on every rendered row, and what a fold uses to find its
+ * anchor again after the commit. Re-querying by id rather than holding the
+ * element across the commit is deliberate: legend-list recycles row
+ * containers, so the same node can belong to a different row on the other side
+ * of a fold.
+ */
+const TIMELINE_ROW_ID_ATTRIBUTE = "data-timeline-row-id";
+
+function findTimelineRowElement(root: HTMLElement, rowId: string): HTMLElement | null {
+  for (const element of root.querySelectorAll<HTMLElement>(`[${TIMELINE_ROW_ID_ATTRIBUTE}]`)) {
+    if (element.dataset.timelineRowId === rowId) {
+      return element;
+    }
+  }
+  return null;
+}
+
+/** Every row overlapping the visible band, topmost first. */
+function captureTimelineAnchorCandidates(root: HTMLElement | null): TimelineAnchorSample[] {
+  if (!root) {
+    return [];
+  }
+
+  const viewport = root.getBoundingClientRect();
+  const candidates: TimelineAnchorSample[] = [];
+  for (const element of root.querySelectorAll<HTMLElement>(`[${TIMELINE_ROW_ID_ATTRIBUTE}]`)) {
+    const rowId = element.dataset.timelineRowId;
+    if (!rowId) {
+      continue;
+    }
+    const rect = element.getBoundingClientRect();
+    if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) {
+      continue;
+    }
+    candidates.push({ rowId, viewportTop: rect.top - viewport.top });
+  }
+
+  return candidates.sort((left, right) => left.viewportTop - right.viewportTop);
+}
+
+function measureTimelineRowViewportTop(root: HTMLElement | null, rowId: string): number | null {
+  if (!root) {
+    return null;
+  }
+  const element = findTimelineRowElement(root, rowId);
+  if (!element) {
+    return null;
+  }
+  return element.getBoundingClientRect().top - root.getBoundingClientRect().top;
+}
+
 const minimapPreviewCache = new WeakMap<object, string | null>();
 const TIMELINE_SCROLL_NAVIGATION_KEYS = new Set([
   " ",
@@ -292,18 +355,63 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
+  const expandedTurnIdsRef = useRef(expandedTurnIds);
+  expandedTurnIdsRef.current = expandedTurnIds;
+  const timelineViewportRef = useRef<HTMLDivElement | null>(null);
 
-  const onToggleTurnFold = useCallback((turnId: TurnId) => {
-    setExpandedTurnIds((existing) => {
-      const next = new Set(existing);
-      if (next.has(turnId)) {
-        next.delete(turnId);
-      } else {
-        next.add(turnId);
+  /**
+   * Commits a fold and puts the reader back where they were looking.
+   *
+   * A fold deletes rows above the viewport, so the content the reader is
+   * looking at slides up under them. legend-list's own
+   * `maintainVisibleContentPosition` normally absorbs that, but it is skipped
+   * entirely while an imperative `scrollToEnd` is pending — which is precisely
+   * the state the timeline is in around a turn boundary. Measuring the anchor
+   * in viewport space makes this safe to run either way: when MVCP did the
+   * work, the anchor did not move and the correction is a no-op.
+   */
+  const commitFoldWithScrollCompensation = useCallback(
+    (mutate: () => void) => {
+      const root = timelineViewportRef.current;
+      const candidates = captureTimelineAnchorCandidates(root);
+
+      flushSync(mutate);
+
+      const list = listRef.current;
+      const currentScroll = list?.getState?.().scroll;
+      if (!list || typeof currentScroll !== "number") {
+        return;
       }
-      return next;
-    });
-  }, []);
+
+      const offset = resolveFoldScrollCorrectionFromCandidates({
+        currentScroll,
+        candidates,
+        measureViewportTop: (rowId) => measureTimelineRowViewportTop(root, rowId),
+      });
+      if (offset === null) {
+        return;
+      }
+      void list.scrollToOffset({ offset, animated: false });
+    },
+    [listRef],
+  );
+
+  const onToggleTurnFold = useCallback(
+    (turnId: TurnId) => {
+      commitFoldWithScrollCompensation(() => {
+        setExpandedTurnIds((existing) => {
+          const next = new Set(existing);
+          if (next.has(turnId)) {
+            next.delete(turnId);
+          } else {
+            next.add(turnId);
+          }
+          return next;
+        });
+      });
+    },
+    [commitFoldWithScrollCompensation],
+  );
   const onToggleWorkGroup = useCallback(
     (groupId: string, anchorElement?: HTMLElement) => {
       const anchorBottomBeforeToggle = anchorElement?.getBoundingClientRect().bottom ?? null;
@@ -338,8 +446,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [listRef],
   );
 
-  // An in-session interrupt leaves its turn expanded so the user keeps their
-  // place; the next turn (or a reload, since this is local state) folds it.
+  // An in-session interrupt — and, via the settle deferral below, an ordinary
+  // completion — leaves its turn expanded so the user keeps their place; the
+  // next turn (or a reload, since this is local state) folds it.
   const previousLatestTurnRef = useRef(latestTurn);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
@@ -357,15 +466,49 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }
       return;
     }
-    setExpandedTurnIds((existing) => {
-      if (!existing.has(previous.turnId)) {
-        return existing;
-      }
-      const next = new Set(existing);
-      next.delete(previous.turnId);
-      return next;
+    const foldingTurnId = previous.turnId;
+    if (!expandedTurnIdsRef.current.has(foldingTurnId)) {
+      return;
+    }
+    // The deferred fold finally lands here, on the next turn. It is the same
+    // large collapse that used to run at the settle edge, so it is committed
+    // through the compensator rather than left to MVCP.
+    commitFoldWithScrollCompensation(() => {
+      setExpandedTurnIds((existing) => {
+        if (!existing.has(foldingTurnId)) {
+          return existing;
+        }
+        const next = new Set(existing);
+        next.delete(foldingTurnId);
+        return next;
+      });
     });
-  }, [latestTurn]);
+  }, [latestTurn, commitFoldWithScrollCompensation]);
+
+  const unsettledTurnId = useMemo(
+    () => deriveUnsettledTurnId(latestTurn ?? null, runningTurnId ?? null),
+    [latestTurn, runningTurnId],
+  );
+
+  // Settle deferral — render phase, not an effect. An effect would let the
+  // folded rows commit and paint (the jump this prevents) before un-folding
+  // them; a state update issued during render re-renders before the browser
+  // ever sees the folded frame. Guarded by the ref, so the retry is inert.
+  const settleFoldStateRef = useRef<TimelineSettleFoldState>({
+    threadKey: routeThreadKey,
+    unsettledTurnId,
+  });
+  const settleFold = resolveTimelineSettleFold(settleFoldStateRef.current, {
+    threadKey: routeThreadKey,
+    unsettledTurnId,
+  });
+  settleFoldStateRef.current = settleFold.next;
+  if (settleFold.deferFoldForTurnId !== null) {
+    const settledTurnId = settleFold.deferFoldForTurnId;
+    setExpandedTurnIds((existing) =>
+      existing.has(settledTurnId) ? existing : new Set(existing).add(settledTurnId),
+    );
+  }
 
   const rawRows = useMemo(
     () =>
@@ -393,10 +536,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const unsettledTurnId = useMemo(
-    () => deriveUnsettledTurnId(latestTurn ?? null, runningTurnId ?? null),
-    [latestTurn, runningTurnId],
-  );
   const interruptedTurnId =
     latestTurn?.state === "interrupted" ? (latestTurn.turnId ?? null) : null;
   const lifecycle = useTimelineLifecycle(
@@ -410,6 +549,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
+  // Mirrored into a ref as well: the fold compensator has to read the viewport
+  // synchronously from a stable callback, before the commit it is measuring.
+  const attachTimelineViewport = useCallback((element: HTMLDivElement | null) => {
+    timelineViewportRef.current = element;
+    setTimelineViewportElement(element);
+  }, []);
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
 
@@ -680,7 +825,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     <TimelineRowCtx value={sharedState}>
       <TimelineRowActivityCtx value={activityState}>
         <div
-          ref={setTimelineViewportElement}
+          ref={attachTimelineViewport}
           className="relative h-full min-h-0"
           onKeyDownCapture={handleTimelineKeyDown}
           onPointerDownCapture={handleManualNavigation}
@@ -1059,7 +1204,7 @@ type TimelineMessage = Extract<TimelineEntry, { kind: "message" }>["message"];
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
 
-const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
+export const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
   return (
     <div
       className={cn(

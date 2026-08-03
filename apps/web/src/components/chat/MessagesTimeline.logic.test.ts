@@ -9,6 +9,7 @@ import {
   isRunningToolWorkEntry,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveTimelineSettleFold,
   resolveWorkEntryToolStatus,
   TIMELINE_ONE_SHOT_TTL_MS,
   timelineLifecycleHasOneShots,
@@ -1604,5 +1605,68 @@ describe("advanceTimelineLifecycle replay prevention", () => {
     expect(nextTick.arrivingUserMessageIds).toBe(tick.arrivingUserMessageIds);
     expect(nextTick.resolvingStreamMessageIds).toBe(tick.resolvingStreamMessageIds);
     expect(nextTick.completingToolIds).toBe(tick.completingToolIds);
+  });
+});
+
+describe("resolveTimelineSettleFold", () => {
+  const thread = "local/thread-1";
+
+  // The fix for the "finished response jumps to the top" bug: the settle edge
+  // must be reported so the just-finished turn can stay unfolded until the
+  // next one starts.
+  it("reports the turn that just settled", () => {
+    const decision = resolveTimelineSettleFold(
+      { threadKey: thread, unsettledTurnId: "turn-1" as never },
+      { threadKey: thread, unsettledTurnId: null },
+    );
+
+    expect(decision.deferFoldForTurnId).toBe("turn-1");
+    expect(decision.next).toEqual({ threadKey: thread, unsettledTurnId: null });
+  });
+
+  it("reports nothing while a turn is still running", () => {
+    expect(
+      resolveTimelineSettleFold(
+        { threadKey: thread, unsettledTurnId: "turn-1" as never },
+        { threadKey: thread, unsettledTurnId: "turn-1" as never },
+      ).deferFoldForTurnId,
+    ).toBeNull();
+  });
+
+  // Re-entrancy guard: the deferral issues a state update during render, so
+  // the immediate re-render must resolve to a no-op or it would loop.
+  it("is inert when re-resolved over its own result", () => {
+    const settled = resolveTimelineSettleFold(
+      { threadKey: thread, unsettledTurnId: "turn-1" as never },
+      { threadKey: thread, unsettledTurnId: null },
+    );
+    const again = resolveTimelineSettleFold(settled.next, {
+      threadKey: thread,
+      unsettledTurnId: null,
+    });
+
+    expect(again.deferFoldForTurnId).toBeNull();
+    expect(again.next).toBe(settled.next);
+  });
+
+  it("reports nothing when the next turn starts", () => {
+    expect(
+      resolveTimelineSettleFold(
+        { threadKey: thread, unsettledTurnId: null },
+        { threadKey: thread, unsettledTurnId: "turn-2" as never },
+      ).deferFoldForTurnId,
+    ).toBeNull();
+  });
+
+  // Switching threads is not this thread's settle edge — a freshly opened
+  // thread folds its history normally.
+  it("never defers across a thread switch", () => {
+    const decision = resolveTimelineSettleFold(
+      { threadKey: thread, unsettledTurnId: "turn-1" as never },
+      { threadKey: "local/thread-2", unsettledTurnId: null },
+    );
+
+    expect(decision.deferFoldForTurnId).toBeNull();
+    expect(decision.next).toEqual({ threadKey: "local/thread-2", unsettledTurnId: null });
   });
 });

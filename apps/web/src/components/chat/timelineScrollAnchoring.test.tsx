@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   getRowBottom,
+  resolveFoldScrollCorrectionFromCandidates,
   resolveSentMessageRevealOffset,
   resolveTimelineEndSignal,
   resolveTimelineSendScroll,
@@ -307,5 +308,72 @@ describe("resolveTimelineEndSignal", () => {
       enterFreeScrolling: false,
       hideNewTextIndicator: true,
     });
+  });
+});
+
+describe("fold scroll compensation", () => {
+  // The reported bug: a settled turn folds away thousands of pixels sitting
+  // above the viewport, legend-list's MVCP is skipped because a scrollToEnd is
+  // pending, and the reader is left staring at the top of the thread.
+  it("pulls the reader back when a fold slides content up under them", () => {
+    const offset = resolveFoldScrollCorrectionFromCandidates({
+      currentScroll: 8_000,
+      candidates: [{ rowId: "assistant-message", viewportTop: 120 }],
+      measureViewportTop: () => -1_880,
+    });
+
+    expect(offset).toBe(6_000);
+  });
+
+  // Idempotent with legend-list: if MVCP already absorbed the fold, the anchor
+  // never moved on screen and there is nothing left to correct.
+  it("does nothing when the anchor held its place", () => {
+    expect(
+      resolveFoldScrollCorrectionFromCandidates({
+        currentScroll: 8_000,
+        candidates: [{ rowId: "assistant-message", viewportTop: 120 }],
+        measureViewportTop: () => 120.3,
+      }),
+    ).toBeNull();
+  });
+
+  it("skips anchors the fold deleted and measures the first survivor", () => {
+    const measured: string[] = [];
+    const offset = resolveFoldScrollCorrectionFromCandidates({
+      currentScroll: 500,
+      candidates: [
+        { rowId: "work:tool-a", viewportTop: 0 },
+        { rowId: "work:tool-b", viewportTop: 60 },
+        { rowId: "assistant-message", viewportTop: 200 },
+      ],
+      measureViewportTop: (rowId) => {
+        measured.push(rowId);
+        return rowId === "assistant-message" ? 100 : null;
+      },
+    });
+
+    expect(measured).toEqual(["work:tool-a", "work:tool-b", "assistant-message"]);
+    expect(offset).toBe(400);
+  });
+
+  it("never scrolls to a negative offset", () => {
+    expect(
+      resolveFoldScrollCorrectionFromCandidates({
+        currentScroll: 40,
+        candidates: [{ rowId: "row", viewportTop: 300 }],
+        measureViewportTop: () => 0,
+      }),
+    ).toBe(0);
+  });
+
+  // Every visible row was deleted: any correction would be a guess.
+  it("leaves the scroller alone when no anchor survived", () => {
+    expect(
+      resolveFoldScrollCorrectionFromCandidates({
+        currentScroll: 8_000,
+        candidates: [{ rowId: "work:tool-a", viewportTop: 0 }],
+        measureViewportTop: () => null,
+      }),
+    ).toBeNull();
   });
 });

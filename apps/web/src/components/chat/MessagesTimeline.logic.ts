@@ -297,6 +297,62 @@ export function deriveUnsettledTurnId(
   return isSettled ? null : latestTurn.turnId;
 }
 
+export interface TimelineSettleFoldState {
+  readonly threadKey: string;
+  readonly unsettledTurnId: TurnId | null;
+}
+
+export interface TimelineSettleFoldDecision {
+  readonly next: TimelineSettleFoldState;
+  /**
+   * The turn that just settled in this session and must NOT fold yet, or
+   * `null`. See {@link resolveTimelineSettleFold}.
+   */
+  readonly deferFoldForTurnId: TurnId | null;
+}
+
+/**
+ * Detects the settle edge so a turn can keep its work visible until the next
+ * turn starts.
+ *
+ * Folding at the settle edge is what made the chat jump to the top of the
+ * thread when a response finished. The fold deletes every work row and
+ * non-terminal message of the turn in one commit — often thousands of pixels
+ * of measured content sitting above the viewport. legend-list normally absorbs
+ * that with `maintainVisibleContentPosition`, but MVCP is skipped outright
+ * whenever an imperative `scrollToEnd` is already pending (`prepareMVCP`
+ * returns early on `state.pendingScrollToEnd`), and settle is exactly when
+ * ChatView fires one — the composer shrinks as the stop button goes away, and
+ * the `timelineEntries` re-pin effect runs. Losing the compensation, the
+ * browser clamps `scrollTop` to the much smaller content height (reading as a
+ * jump toward the first message) and the pending scroll-to-end then slams back
+ * down. Whether the race is lost varies per turn, which is why the jump was
+ * intermittent.
+ *
+ * Deferring to the next turn removes the collapse from that race entirely, and
+ * matches the interrupt precedent: an in-session interrupt likewise leaves its
+ * turn expanded so the reader keeps their place. Deferral is session state, so
+ * a reload folds the turn normally.
+ */
+export function resolveTimelineSettleFold(
+  previous: TimelineSettleFoldState,
+  input: TimelineSettleFoldState,
+): TimelineSettleFoldDecision {
+  // A different thread's settle edge is not this thread's business.
+  if (previous.threadKey !== input.threadKey) {
+    return { next: input, deferFoldForTurnId: null };
+  }
+  if (previous.unsettledTurnId === input.unsettledTurnId) {
+    return { next: previous, deferFoldForTurnId: null };
+  }
+
+  const settledTurnId =
+    previous.unsettledTurnId !== null && input.unsettledTurnId === null
+      ? previous.unsettledTurnId
+      : null;
+  return { next: input, deferFoldForTurnId: settledTurnId };
+}
+
 /**
  * Settled turns fold their commentary and tool activity behind a
  * "Worked for ..." row anchored at the turn's first foldable entry; the

@@ -106,6 +106,57 @@ export function resolveTimelineEndSignal(input: {
   };
 }
 
+/**
+ * A row's viewport-relative top, captured immediately before a fold commit.
+ *
+ * Folds are measured in VIEWPORT space, not content space, on purpose: it makes
+ * the correction idempotent with legend-list's own `maintainVisibleContentPosition`
+ * pass. When MVCP compensated the fold, the anchor did not visually move, the
+ * measured delta is ~0, and {@link resolveFoldScrollCorrectionFromCandidates}
+ * returns `null` instead of double-correcting.
+ */
+export interface TimelineAnchorSample {
+  readonly rowId: string;
+  readonly viewportTop: number;
+}
+
+/**
+ * The scroll offset that undoes a fold's visual jump, or `null` when there is
+ * nothing to undo.
+ *
+ * Candidates are supplied in viewport order (topmost first) because a fold
+ * deletes rows: the first candidate that still exists after the commit is the
+ * closest surviving anchor to where the reader was actually looking.
+ */
+export function resolveFoldScrollCorrectionFromCandidates(input: {
+  readonly currentScroll: number;
+  readonly candidates: readonly TimelineAnchorSample[];
+  readonly measureViewportTop: (rowId: string) => number | null;
+}): number | null {
+  if (!Number.isFinite(input.currentScroll)) {
+    return null;
+  }
+
+  for (const candidate of input.candidates) {
+    const viewportTopAfter = input.measureViewportTop(candidate.rowId);
+    if (viewportTopAfter === null || !Number.isFinite(viewportTopAfter)) {
+      continue;
+    }
+
+    const delta = viewportTopAfter - candidate.viewportTop;
+    if (Math.abs(delta) <= 0.5) {
+      return null;
+    }
+
+    const offset = Math.max(0, input.currentScroll + delta);
+    return Math.abs(offset - input.currentScroll) <= 0.5 ? null : offset;
+  }
+
+  // Every anchor the reader could see was deleted by the fold. There is no
+  // honest correction to make, so leave the scroller alone rather than guess.
+  return null;
+}
+
 export interface TimelineListMeasurementState {
   readonly data: readonly unknown[];
   readonly scroll: number;

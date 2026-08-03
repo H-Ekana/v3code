@@ -520,3 +520,119 @@ describe("MessagesTimeline send-morph landing hook (live DOM)", () => {
     act(() => root.unmount());
   });
 });
+
+function rowIds(container: HTMLElement): string[] {
+  return [...container.querySelectorAll("[data-timeline-row-id]")].map(
+    (element) => element.getAttribute("data-timeline-row-id") ?? "",
+  );
+}
+
+function foldButton(container: HTMLElement, turnId: TurnId): HTMLElement | null {
+  return (
+    container
+      .querySelector(`[data-timeline-row-id="turn-fold:${turnId}"]`)
+      ?.querySelector<HTMLElement>("button[aria-expanded]") ?? null
+  );
+}
+
+// The "finished response scrolls to the top of the thread" bug. Folding at the
+// settle edge deletes every work row of the turn in one commit — thousands of
+// pixels above the viewport — and legend-list's MVCP is skipped whenever an
+// imperative scrollToEnd is pending, which is exactly the state the timeline is
+// in when a turn completes. The reader gets clamped toward the first message
+// and then slammed back down by the pending scroll. Deferring the fold to the
+// next turn takes the collapse out of that race.
+describe("MessagesTimeline settled-turn fold deferral (live DOM)", () => {
+  const TURN_1 = TurnId.make("turn-1");
+  const TURN_2 = TurnId.make("turn-2");
+
+  function turnEntries(turnId: TurnId, suffix: string, streaming: boolean) {
+    return [
+      userEntry(`message-${suffix}`, `Question ${suffix}`),
+      workEntry({
+        entryId: `work-${suffix}`,
+        toolCallId: `call-${suffix}`,
+        status: "completed",
+        turnId,
+      }),
+      assistantEntry(`assistant-${suffix}`, `Answer ${suffix}`, streaming, turnId),
+    ];
+  }
+
+  it("keeps the just-finished turn's work visible until the next turn starts", () => {
+    const props = baseProps();
+    const runningEntries = turnEntries(TURN_1, "1", true);
+    const { container, root } = mount(
+      <MessagesTimeline
+        {...props}
+        isWorking
+        activeTurnInProgress
+        activeTurnStartedAt={AT}
+        runningTurnId={TURN_1}
+        latestTurn={{ turnId: TURN_1, state: "running", startedAt: AT, completedAt: null }}
+        timelineEntries={runningEntries}
+      />,
+    );
+
+    expect(rowIds(container)).toContain("entry-work-1");
+
+    // The turn completes. Pre-fix this commit collapsed the turn's work rows
+    // behind the fold; now they survive it.
+    const settledEntries = turnEntries(TURN_1, "1", false);
+    const settledProps = {
+      ...props,
+      runningTurnId: null,
+      latestTurn: { turnId: TURN_1, state: "completed" as const, startedAt: AT, completedAt: AT },
+      timelineEntries: settledEntries,
+    };
+    act(() => {
+      root.render(<MessagesTimeline {...settledProps} />);
+    });
+
+    const settledRows = rowIds(container);
+    expect(settledRows).toContain("entry-work-1");
+    // The "Worked for …" summary still appears — expanded, not collapsed.
+    expect(settledRows).toContain(`turn-fold:${TURN_1}`);
+    expect(foldButton(container, TURN_1)?.getAttribute("aria-expanded")).toBe("true");
+
+    // The next turn starts: the deferred fold lands, and now the work rows go.
+    act(() => {
+      root.render(
+        <MessagesTimeline
+          {...settledProps}
+          isWorking
+          activeTurnInProgress
+          activeTurnStartedAt={AT}
+          runningTurnId={TURN_2}
+          latestTurn={{ turnId: TURN_2, state: "running", startedAt: AT, completedAt: null }}
+          timelineEntries={[...settledEntries, ...turnEntries(TURN_2, "2", true)]}
+        />,
+      );
+    });
+
+    const nextTurnRows = rowIds(container);
+    expect(nextTurnRows).not.toContain("entry-work-1");
+    expect(nextTurnRows).toContain(`turn-fold:${TURN_1}`);
+    expect(foldButton(container, TURN_1)?.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => root.unmount());
+  });
+
+  // A thread opened after the fact has no settle edge to observe, so its
+  // history folds normally — the deferral is strictly a live-session behavior.
+  it("folds a turn that was already settled when the thread mounted", () => {
+    const props = baseProps();
+    const { container, root } = mount(
+      <MessagesTimeline
+        {...props}
+        latestTurn={{ turnId: TURN_1, state: "completed", startedAt: AT, completedAt: AT }}
+        timelineEntries={turnEntries(TURN_1, "1", false)}
+      />,
+    );
+
+    expect(rowIds(container)).not.toContain("entry-work-1");
+    expect(rowIds(container)).toContain(`turn-fold:${TURN_1}`);
+
+    act(() => root.unmount());
+  });
+});
