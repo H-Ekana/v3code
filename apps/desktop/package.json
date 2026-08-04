@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/desktop",
-  "version": "0.0.32-nightly.20260731.966.v3.0.0.9",
+  "version": "0.0.32-nightly.20260804.997.v3.0.0.10",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
