@@ -39,6 +39,16 @@ const EMPTY_TURN_IDS: ReadonlySet<TurnId> = new Set();
 const EMPTY_SKILLS: TimelineRowSharedState["skills"] = [];
 const noop = () => {};
 
+/**
+ * Every user-role turn in a sub-agent transcript was written by the agent that
+ * spawned it, not by the person reading the panel. Without a label the bubble
+ * reads as something the reader said, which is the single most confusing thing
+ * about replaying someone else's conversation.
+ */
+function isFromParentAgent(row: { kind: string; message?: { role: string } }): boolean {
+  return row.kind === "message" && row.message?.role === "user";
+}
+
 interface AgentTranscriptConversationProps {
   items: ReadonlyArray<AgentTranscriptItem>;
   threadRef: ScopedThreadRef;
@@ -74,6 +84,11 @@ export function AgentTranscriptConversation({
         activeTurnStartedAt: null,
         turnDiffSummaryByAssistantMessageId: EMPTY_TURN_DIFF_SUMMARIES,
         revertTurnCountByUserMessageId: EMPTY_REVERT_COUNTS,
+        // A transcript is settled by definition, so the live view's
+        // hide-settled-neutral rule would drop the agent's reasoning and any
+        // tool still in flight when the record was taken.
+        keepNeutralWorkEntries: true,
+        pinFailedWorkEntries: true,
       }),
     [expandedWorkGroupIds, timelineEntries],
   );
@@ -129,8 +144,15 @@ export function AgentTranscriptConversation({
     <TimelineRowCtx value={sharedState}>
       <TimelineRowActivityCtx value={activityState}>
         <div className="flex flex-col">
-          {rows.map((row) => (
-            <TimelineRowContent key={row.id} row={row} />
+          {rows.map((row, index) => (
+            <div key={row.id}>
+              {isFromParentAgent(row) ? (
+                <p className="mb-1 pr-1 text-right text-[11px] font-medium text-muted-foreground">
+                  {index === 0 ? "Task from the main agent" : "From the main agent"}
+                </p>
+              ) : null}
+              <TimelineRowContent row={row} />
+            </div>
           ))}
         </div>
       </TimelineRowActivityCtx>

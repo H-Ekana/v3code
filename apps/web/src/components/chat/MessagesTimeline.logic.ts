@@ -840,6 +840,25 @@ export function deriveMessagesTimelineRows(input: {
   activeTurnStartedAt: string | null;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
+  /**
+   * Keeps settled tool rows that carry no success/failure outcome — thinking
+   * blocks and tools still in flight when the record was taken.
+   *
+   * The live conversation hides them as noise, which is right when the reader
+   * also has the running view to look at. A replayed transcript has no live
+   * view and is settled by definition, so the same filter would hide the
+   * agent's reasoning and its in-flight work — the substance of the record.
+   */
+  keepNeutralWorkEntries?: boolean;
+  /**
+   * Exempts failed tool calls from the "show N more" group collapse.
+   *
+   * Same reasoning as {@link keepNeutralWorkEntries}: while a turn is live the
+   * reader watches work scroll past, so collapsing to the newest row loses
+   * nothing. Replaying a record, the failure is usually the reason you opened
+   * it, and it must not sit behind a disclosure.
+   */
+  pinFailedWorkEntries?: boolean;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
   const durationStartByMessageId = computeMessageDurationStart(
@@ -903,9 +922,10 @@ export function deriveMessagesTimelineRows(input: {
         groupedEntries.push(nextEntry.entry);
         cursor += 1;
       }
-      const visibleGroupedEntries = groupedEntries.filter(
-        (entry) => !workEntryIsHiddenNeutral(entry, unsettledTurnId),
-      );
+      const visibleGroupedEntries =
+        input.keepNeutralWorkEntries === true
+          ? groupedEntries
+          : groupedEntries.filter((entry) => !workEntryIsHiddenNeutral(entry, unsettledTurnId));
       if (visibleGroupedEntries.length > 0) {
         if (visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
           nextRows.push({
@@ -917,9 +937,20 @@ export function deriveMessagesTimelineRows(input: {
         } else {
           const groupId = `work-group:${timelineEntry.id}`;
           const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
-          const hiddenEntries = visibleGroupedEntries.slice(0, -MAX_VISIBLE_WORK_LOG_ENTRIES);
-          const visibleEntries = visibleGroupedEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES);
-          const renderedEntries = expanded ? [...hiddenEntries, ...visibleEntries] : visibleEntries;
+          const tailEntries = visibleGroupedEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES);
+          // A failed call is the highest-signal row in a group; collapsing it
+          // behind "show N more" while a neighbouring success stays visible
+          // buries the one thing worth reading.
+          const pinnedEntries =
+            input.pinFailedWorkEntries === true
+              ? visibleGroupedEntries.filter(
+                  (entry) => workEntryIndicatesToolFailure(entry) || tailEntries.includes(entry),
+                )
+              : tailEntries;
+          const hiddenEntries = visibleGroupedEntries.filter(
+            (entry) => !pinnedEntries.includes(entry),
+          );
+          const renderedEntries = expanded ? visibleGroupedEntries : pinnedEntries;
 
           for (const workEntry of renderedEntries) {
             nextRows.push({
@@ -930,15 +961,21 @@ export function deriveMessagesTimelineRows(input: {
             });
           }
 
-          nextRows.push({
-            kind: "work-toggle",
-            id: `work-toggle:${timelineEntry.id}`,
-            createdAt: timelineEntry.createdAt,
-            groupId,
-            hiddenCount: hiddenEntries.length,
-            expanded,
-            onlyToolEntries: visibleGroupedEntries.every((entry) => workLogEntryIsToolLike(entry)),
-          });
+          // Pinning can leave nothing hidden, and a "show 0 more" control is
+          // just noise.
+          if (hiddenEntries.length > 0) {
+            nextRows.push({
+              kind: "work-toggle",
+              id: `work-toggle:${timelineEntry.id}`,
+              createdAt: timelineEntry.createdAt,
+              groupId,
+              hiddenCount: hiddenEntries.length,
+              expanded,
+              onlyToolEntries: visibleGroupedEntries.every((entry) =>
+                workLogEntryIsToolLike(entry),
+              ),
+            });
+          }
         }
       }
       index = cursor - 1;

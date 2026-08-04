@@ -34,6 +34,13 @@ import { Badge } from "./ui/badge";
 import { ScrollArea } from "./ui/scroll-area";
 import ChatMarkdown from "./ChatMarkdown";
 import { AgentTranscriptConversation } from "./chat/AgentTranscriptConversation";
+import { CollapsibleText } from "./chat/CollapsibleText";
+import {
+  deriveAgentActivityTranscriptItems,
+  mergeCodexActivityWork,
+  shouldPreferActivityFeed,
+} from "./chat/agentActivityTranscript";
+import { mergeAgentTranscriptPages } from "./chat/agentTranscriptPages";
 
 interface AgentTranscriptPanelProps {
   agent: ThreadAgentSnapshot | null;
@@ -87,6 +94,86 @@ export function formatAgentHealth(agent: ThreadAgentSnapshot, now = Date.now()):
   if (elapsed < 60_000) return "Active now";
   const minutes = Math.floor(elapsed / 60_000);
   return elapsed < 120_000 ? `Active ${minutes}m ago` : `No activity for ${minutes}m`;
+}
+
+export interface AgentWorkChip {
+  readonly label: string;
+  readonly tone: "neutral" | "error";
+}
+
+/**
+ * A breakdown of what the agent did, by disjoint category.
+ *
+ * Deliberately does NOT restate a total: the roster's `usage.toolUses` is the
+ * authoritative count for the whole agent, while this is derived from the
+ * transcript page in hand, and printing both produced two different tool-call
+ * numbers side by side. Every work item has exactly one `category`, so these
+ * chips partition rather than overlap — "1 command · 2 searches" never
+ * double-counts the same call.
+ *
+ * Categories map identically across providers: Claude tool names are
+ * classified into the same lifecycle types Codex's item types already use, so
+ * a Codex sub-agent produces the same vocabulary here.
+ */
+/**
+ * `tool` and `other` are deliberately absent. They are the residual buckets —
+ * "everything not worth naming" — and the meta row above already prints the
+ * authoritative total. Emitting a chip for the remainder produced "5 tool
+ * calls" and "3 tool calls" a line apart, which reads as a contradiction even
+ * though the categories partition correctly.
+ */
+const WORK_CATEGORY_NOUNS: Record<string, { one: string; many: string }> = {
+  command: { one: "command", many: "commands" },
+  files: { one: "file edit", many: "file edits" },
+  search: { one: "search", many: "searches" },
+  delegation: { one: "delegation", many: "delegations" },
+};
+
+export function summarizeAgentWork(
+  items: ReadonlyArray<AgentTranscriptItem>,
+): ReadonlyArray<AgentWorkChip> {
+  const work = items.filter((item): item is WorkItem => item.kind === "work");
+  const counts = new Map<string, number>();
+  for (const item of work) {
+    // Thinking is reasoning, not work the agent performed.
+    if (item.category === "thinking") continue;
+    counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
+  }
+
+  const chips: Array<AgentWorkChip> = [];
+  for (const category of ["command", "files", "search", "delegation"]) {
+    const count = counts.get(category) ?? 0;
+    if (count === 0) continue;
+    const noun = WORK_CATEGORY_NOUNS[category];
+    if (!noun) continue;
+    chips.push({ label: `${count} ${count === 1 ? noun.one : noun.many}`, tone: "neutral" });
+  }
+
+  const changedFiles = new Set(work.flatMap((item) => item.changedFiles ?? []));
+  if (changedFiles.size > 0) {
+    chips.push({
+      label: `${changedFiles.size} ${changedFiles.size === 1 ? "file" : "files"} changed`,
+      tone: "neutral",
+    });
+  }
+  const failures = work.filter((item) => item.status === "failed").length;
+  if (failures > 0) chips.push({ label: `${failures} failed`, tone: "error" });
+  return chips;
+}
+
+/**
+ * A transcript that is mostly tool calls read as "1 message" — technically
+ * true and wildly misleading about how much is below. Counting both halves
+ * describes the section honestly for either provider.
+ */
+export function formatTranscriptSummaryLabel(items: ReadonlyArray<AgentTranscriptItem>): string {
+  const messages = items.filter((item) => item.kind === "message").length;
+  const work = items.filter((item) => item.kind === "work" && item.category !== "thinking").length;
+  const parts = [
+    ...(messages > 0 ? [`${messages} ${messages === 1 ? "message" : "messages"}`] : []),
+    ...(work > 0 ? [`${work} tool ${work === 1 ? "call" : "calls"}`] : []),
+  ];
+  return parts.length > 0 ? parts.join(" · ") : "No visible activity";
 }
 
 export function summarizeCompletionEvidence(
@@ -158,21 +245,54 @@ export function omitDuplicateObjective(
   return items.filter((_, index) => index !== firstMessageIndex);
 }
 
+/**
+ * `complete` gates the fallback because "the last assistant message we hold" is
+ * only the outcome when we hold the *end* of the transcript. Paging starts at
+ * the beginning, so on a long agent the last message of page one is mid-work
+ * commentary — presenting that as the result is worse than presenting nothing.
+ * A provider-declared `final` phase needs no such gate.
+ */
 export function findFinalTranscriptMessage(
   items: ReadonlyArray<AgentTranscriptItem>,
   status: ThreadAgentSnapshot["status"],
+  complete: boolean,
 ): TranscriptMessage | null {
   const explicitFinal = items.findLast(
     (item): item is TranscriptMessage =>
       item.kind === "message" && item.role === "assistant" && item.phase === "final",
   );
   if (explicitFinal) return explicitFinal;
-  if (!isTerminalStatus(status)) return null;
+  if (!isTerminalStatus(status) || !complete) return null;
   return (
     items.findLast(
       (item): item is TranscriptMessage => item.kind === "message" && item.role === "assistant",
     ) ?? null
   );
+}
+
+/**
+ * Describes who is doing the work and who is hosting it.
+ *
+ * `provider` is the adapter that emitted the events; `delegateProvider` is the
+ * provider actually working. When they differ, `model` belongs to the *host*,
+ * so pairing it with the delegate's name renders "Codex · claude-sonnet-5" — a
+ * card contradicting itself. The host is named explicitly instead, and the
+ * misleading model is dropped rather than silently attributed to the delegate.
+ */
+export function formatAgentIdentityLine(
+  agent: ThreadAgentSnapshot,
+  displayProvider: (provider: ThreadAgentSnapshot["provider"]) => string,
+): string {
+  const delegate = agent.delegateProvider;
+  const isDelegated = delegate !== undefined && delegate !== agent.provider;
+  if (isDelegated) {
+    return `${displayProvider(delegate)} job · hosted by ${displayProvider(agent.provider)}`;
+  }
+  return [
+    displayProvider(agent.provider),
+    ...(agent.model ? [agent.model] : []),
+    ...(agent.reasoningEffort ? [`${agent.reasoningEffort} reasoning`] : []),
+  ].join(" · ");
 }
 
 export function formatAgentCompletionSummary(agent: ThreadAgentSnapshot): string | null {
@@ -257,6 +377,44 @@ export default function AgentTranscriptPanel({
       : null,
   );
 
+  /**
+   * The transcript is fetched once when the panel opens and never again, so an
+   * agent that settles while you are watching keeps its mid-run page forever.
+   * That is not just staleness: the outcome card reads the *tail* of whatever
+   * page is held, so a stale page promotes mid-work commentary ("Now let me
+   * check the…") to the headline result.
+   *
+   * Refreshing on the settle transition rather than on every roster revision is
+   * deliberate — revision bumps many times a second while an agent works, and
+   * each refetch re-reads the provider's session log.
+   */
+  /**
+   * Deliberately excludes `updatedAt`. `idle` counts as terminal here but is
+   * not in `THREAD_AGENT_TERMINAL_STATUSES`, so the server never stamps
+   * `endedAt` for it — falling back to `updatedAt` minted a fresh token on
+   * every roster event and re-read the provider session log each time, which
+   * is exactly the per-revision refetch this token exists to avoid. Status and
+   * activation count already change on every transition worth re-reading for.
+   */
+  const settleToken =
+    agent && isTerminalStatus(agent.status)
+      ? `${transcriptKey}:${agent.status}:${agent.activationCount}:${agent.endedAt ?? ""}`
+      : null;
+  const settleRefreshedRef = useRef<{ key: string; token: string | null } | null>(null);
+  const refreshTranscript = transcript.refresh;
+  useEffect(() => {
+    const seen = settleRefreshedRef.current;
+    // First sight of this agent: whatever the query just fetched is the
+    // baseline, so an agent that was already settled on open needs no refresh.
+    if (seen === null || seen.key !== transcriptKey) {
+      settleRefreshedRef.current = { key: transcriptKey, token: settleToken };
+      return;
+    }
+    if (settleToken === null || seen.token === settleToken) return;
+    settleRefreshedRef.current = { key: transcriptKey, token: settleToken };
+    refreshTranscript();
+  }, [refreshTranscript, settleToken, transcriptKey]);
+
   useEffect(() => {
     setCursor(undefined);
     setLoaded(null);
@@ -284,18 +442,16 @@ export default function AgentTranscriptPanel({
     setLoaded((current) => ({
       key: transcriptKey,
       items:
-        cursor === undefined || current?.key !== transcriptKey
-          ? page.items
-          : [
-              ...current.items,
-              ...page.items.filter(
-                (item) => !current.items.some((existing) => existing.id === item.id),
-              ),
-            ],
+        current?.key === transcriptKey
+          ? // Merged rather than replaced even at cursor 0: a settle refresh
+            // re-reads page 1, and its items supersede the copies held from
+            // when the agent was still running.
+            mergeAgentTranscriptPages(current.items, page.items)
+          : page.items,
       ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       complete: page.complete,
     }));
-  }, [cursor, transcript.data, transcriptKey]);
+  }, [transcript.data, transcriptKey]);
 
   const loadedItemCount =
     loaded?.key === transcriptKey
@@ -331,7 +487,7 @@ export default function AgentTranscriptPanel({
     );
   }
 
-  const provider = agent.delegateProvider ?? agent.provider;
+  const identityLine = formatAgentIdentityLine(agent, formatProviderDisplayName);
   const agentName = formatAgentDisplayName(agent.name);
   const objective = agent.objective ? formatAgentObjective(agent.name, agent.objective) : null;
   const currentKind = agent.currentActivityKind ? ACTIVITY_LABEL[agent.currentActivityKind] : null;
@@ -344,16 +500,54 @@ export default function AgentTranscriptPanel({
   const conversationItems = availableTranscript
     ? omitDuplicateObjective(availableTranscript.items, agent.objective)
     : [];
-  const visibleMessageCount = availableTranscript
+  const transcriptMessageCount = availableTranscript
     ? conversationItems.filter((item) => item.kind === "message").length
     : 0;
-  const technicalActivity = compactTechnicalActivity(agent.recentActivity, visibleMessageCount > 0);
-  const finalMessage = findFinalTranscriptMessage(conversationItems, agent.status);
+  const technicalActivity = compactTechnicalActivity(
+    agent.recentActivity,
+    transcriptMessageCount > 0,
+  );
+  /**
+   * Source selection happens before anything is derived, so the header, the
+   * outcome card and the conversation all describe the same record. Deriving
+   * chips from the transcript while rendering the feed produced a header that
+   * contradicted the section directly beneath it.
+   */
+  const activityItems = deriveAgentActivityTranscriptItems(agent.recentActivity);
+  const transcriptState =
+    availableTranscript !== null
+      ? "available"
+      : transcript.data !== null && transcript.data !== undefined
+        ? "unavailable"
+        : "pending";
+  const usingActivityFeed = shouldPreferActivityFeed({
+    isDelegated: agent.delegateProvider !== undefined && agent.delegateProvider !== agent.provider,
+    transcriptState,
+    activityWorkCount: activityItems.filter((item) => item.kind === "work").length,
+  });
+  /**
+   * Codex is the one provider whose transcript is missing work it actually
+   * did, so its children get the feed folded in rather than swapped for it.
+   * Every other provider renders its transcript untouched.
+   */
+  const sourceItems = usingActivityFeed
+    ? activityItems
+    : agent.provider === "codex"
+      ? mergeCodexActivityWork(conversationItems, activityItems)
+      : conversationItems;
+  /**
+   * The feed is always the newest 50 entries, so it necessarily contains the
+   * end of the run; a transcript page only does once it reports `complete`.
+   */
+  const sourceReachesEnd = usingActivityFeed ? true : (availableTranscript?.complete ?? false);
+
+  const finalMessage = findFinalTranscriptMessage(sourceItems, agent.status, sourceReachesEnd);
   const outcomeText = finalMessage?.text ?? agent.resultSummary ?? null;
   const completionSummary = formatAgentCompletionSummary(agent);
   const health = formatAgentHealth(agent);
-  const completionEvidence = summarizeCompletionEvidence(conversationItems);
-  const hasFileChanges = conversationItems.some(
+  const completionEvidence = summarizeCompletionEvidence(sourceItems);
+  const workSummary = summarizeAgentWork(sourceItems);
+  const hasFileChanges = sourceItems.some(
     (item) => item.kind === "work" && item.category === "files",
   );
   /**
@@ -361,10 +555,19 @@ export default function AgentTranscriptPanel({
    * dropped from the transcript rather than rendered twice. Everything leading
    * up to it stays, which is what the conversation is for.
    */
-  const timelineItems =
+  const conversationSource =
     finalMessage && outcomeText === finalMessage.text
-      ? conversationItems.filter((item) => item.id !== finalMessage.id)
-      : conversationItems;
+      ? sourceItems.filter((item) => item.id !== finalMessage.id)
+      : sourceItems;
+  /**
+   * The conversation section only exists when the panel can address a
+   * transcript at all. Without it the feed has nowhere to be promoted to, so
+   * the collapsed fallback below is the only record left.
+   */
+  const conversationRendered =
+    Boolean(threadRef && sourceProvider && agentId) && conversationSource.length > 0;
+  /** Describes what the transcript actually renders, not what was fetched. */
+  const transcriptSummaryLabel = formatTranscriptSummaryLabel(conversationSource);
 
   return (
     <ScrollArea className="h-full min-h-0" viewportRef={viewportRef}>
@@ -373,11 +576,7 @@ export default function AgentTranscriptPanel({
           <div className="flex min-w-0 items-start justify-between gap-3">
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-foreground">{agentName}</h2>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {formatProviderDisplayName(provider)}
-                {agent.model ? ` · ${agent.model}` : ""}
-                {agent.reasoningEffort ? ` · ${agent.reasoningEffort} reasoning` : ""}
-              </p>
+              <p className="mt-1 text-xs text-muted-foreground">{identityLine}</p>
             </div>
             <Badge variant="outline" className="shrink-0 text-xs">
               {STATUS_LABEL[agent.status]}
@@ -385,12 +584,29 @@ export default function AgentTranscriptPanel({
           </div>
           {objective ? (
             <div>
-              <p className="mb-1 text-xs font-medium text-muted-foreground">Objective</p>
-              <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">
-                {objective}
+              {/*
+                This text is the prompt the spawning agent wrote, not anything
+                the reader typed. Saying so here is what "Objective" alone
+                never did — and it is the same relationship for every provider,
+                since a Codex child's prompt also comes from its parent.
+              */}
+              <p className="mb-1 text-xs font-medium text-muted-foreground">
+                Task from the main agent
               </p>
+              <CollapsibleText
+                text={objective}
+                className="text-foreground/90"
+                expandLabel="Show full task"
+                collapseLabel="Show less"
+              />
             </div>
           ) : null}
+          {/*
+            One meta row. `usage.toolUses` is the authoritative total for the
+            whole agent; the chips below it are a disjoint breakdown of the
+            transcript in hand. Printing a second total alongside produced two
+            different tool-call counts inches apart.
+          */}
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
             {currentKind ? <span>{currentKind}</span> : null}
             {health && health !== currentKind ? <span>{health}</span> : null}
@@ -404,6 +620,23 @@ export default function AgentTranscriptPanel({
               {agent.activationCount} {agent.activationCount === 1 ? "run" : "runs"}
             </span>
           </div>
+          {workSummary.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {workSummary.map((chip) => (
+                <span
+                  key={chip.label}
+                  className={cn(
+                    "rounded-md border px-1.5 py-0.5 text-[11px]",
+                    chip.tone === "error"
+                      ? "border-destructive/30 bg-destructive/10 text-destructive"
+                      : "border-border/70 text-muted-foreground",
+                  )}
+                >
+                  {chip.label}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </header>
 
         {outcomeText ? (
@@ -473,25 +706,37 @@ export default function AgentTranscriptPanel({
           <section className="space-y-2" aria-label="Provider conversation transcript">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-xs font-medium text-foreground">Conversation</h3>
-              {transcript.data?.status === "available" ? (
+              {conversationSource.length > 0 ? (
                 <span className="text-xs text-muted-foreground">
-                  {visibleMessageCount} {visibleMessageCount === 1 ? "message" : "messages"}
-                  {availableTranscript?.complete ? "" : " · more available"}
+                  {transcriptSummaryLabel}
+                  {!usingActivityFeed && availableTranscript && !availableTranscript.complete
+                    ? " · more available"
+                    : ""}
                 </span>
               ) : null}
             </div>
-            {transcript.isPending ? (
+            {usingActivityFeed ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                This agent delegated its work to a background job, so this is the job's live
+                activity rather than a full provider transcript — no tool arguments or outputs.
+              </p>
+            ) : null}
+            {/*
+              A read failure is reported before any fallback content: the feed
+              is a different, thinner record, and silently substituting it
+              would present a broken read as a successful one.
+            */}
+            {transcript.error && !usingActivityFeed ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                The conversation is temporarily unavailable.
+              </p>
+            ) : transcript.isPending && conversationSource.length === 0 ? (
               <p className="rounded-md border border-dashed border-border px-3 py-5 text-center text-xs text-muted-foreground">
                 Loading conversation…
               </p>
-            ) : transcript.error ? (
-              <p className="text-xs leading-5 text-muted-foreground">
-                The conversation is temporarily unavailable. Technical activity can still be viewed
-                below.
-              </p>
-            ) : transcript.data?.status === "available" && timelineItems.length > 0 ? (
+            ) : conversationSource.length > 0 ? (
               <AgentTranscriptConversation
-                items={timelineItems}
+                items={conversationSource}
                 threadRef={threadRef}
                 markdownCwd={markdownCwd}
               />
@@ -504,7 +749,8 @@ export default function AgentTranscriptPanel({
                 {transcript.data.message}
               </p>
             ) : null}
-            {availableTranscript &&
+            {!usingActivityFeed &&
+            availableTranscript &&
             !availableTranscript.complete &&
             availableTranscript.nextCursor !== undefined ? (
               <div className="flex justify-center pt-1">
@@ -534,7 +780,12 @@ export default function AgentTranscriptPanel({
           </section>
         ) : null}
 
-        {technicalActivity.length > 0 ? (
+        {/*
+          Last resort only. The feed is normally either redundant with the
+          transcript or already promoted into the conversation above, so it
+          renders here just when neither source produced anything.
+        */}
+        {!conversationRendered && technicalActivity.length > 0 ? (
           <details className="group border-t border-border/60 pt-3" aria-label="Technical activity">
             <summary className="flex cursor-pointer list-none items-center gap-2 text-xs [&::-webkit-details-marker]:hidden">
               <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />

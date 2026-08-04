@@ -8,7 +8,10 @@ import AgentTranscriptPanel, {
   findFinalTranscriptMessage,
   formatAgentCompletionSummary,
   formatAgentHealth,
+  formatAgentIdentityLine,
+  formatTranscriptSummaryLabel,
   omitDuplicateObjective,
+  summarizeAgentWork,
   summarizeCompletionEvidence,
 } from "./AgentTranscriptPanel";
 
@@ -75,7 +78,15 @@ describe("AgentTranscriptPanel", () => {
       activationCount: 1,
     } as ThreadAgentSnapshot;
 
-    expect(findFinalTranscriptMessage(items, completed.status)?.id).toBe("final");
+    expect(findFinalTranscriptMessage(items, completed.status, true)?.id).toBe("final");
+    // A provider-declared final phase stands on its own; the heuristic tail
+    // does not, because a partial page ends mid-work.
+    expect(findFinalTranscriptMessage(items, completed.status, false)?.id).toBe("final");
+    const withoutPhase = [
+      { id: "reply", kind: "message", role: "assistant", text: "Working." },
+    ] as const;
+    expect(findFinalTranscriptMessage(withoutPhase, completed.status, true)?.id).toBe("reply");
+    expect(findFinalTranscriptMessage(withoutPhase, completed.status, false)).toBeNull();
     expect(formatAgentCompletionSummary(completed)).toBe("Completed in 30s · 1 run");
     const html = renderToStaticMarkup(
       <AgentTranscriptPanel
@@ -85,6 +96,81 @@ describe("AgentTranscriptPanel", () => {
     );
     expect(html).toContain("Finished · resumable");
     expect(html).toContain("Completed in 30s · 1 run");
+  });
+
+  it("breaks work down by disjoint category without restating a total", () => {
+    const items = [
+      { id: "cmd", kind: "work", category: "command", label: "Bash", status: "failed" },
+      {
+        id: "edit-1",
+        kind: "work",
+        category: "files",
+        label: "Edit",
+        status: "completed",
+        changedFiles: ["a.ts", "b.ts"],
+      },
+      {
+        id: "edit-2",
+        kind: "work",
+        category: "files",
+        label: "Edit",
+        status: "completed",
+        // Same file touched twice must not double-count.
+        changedFiles: ["a.ts"],
+      },
+      { id: "read", kind: "work", category: "tool", label: "Read", status: "completed" },
+      { id: "think", kind: "work", category: "thinking", label: "Thinking", status: "completed" },
+      { id: "msg", kind: "message", role: "assistant", text: "Done." },
+    ] as const;
+
+    // Named categories only. The residual "tool" bucket is omitted because the
+    // meta row already prints the authoritative total, and a chip for the
+    // remainder read as a second, smaller tool-call count.
+    expect(summarizeAgentWork(items)).toEqual([
+      { label: "1 command", tone: "neutral" },
+      { label: "2 file edits", tone: "neutral" },
+      { label: "2 files changed", tone: "neutral" },
+      { label: "1 failed", tone: "error" },
+    ]);
+    expect(summarizeAgentWork([])).toEqual([]);
+    // An agent that only read files produces no chips rather than a chip that
+    // competes with the total.
+    expect(
+      summarizeAgentWork([
+        { id: "r", kind: "work", category: "tool", label: "Read", status: "completed" },
+      ] as const),
+    ).toEqual([]);
+  });
+
+  it("never pairs a delegate's name with its host's model", () => {
+    const displayProvider = (provider: string) => (provider === "codex" ? "Codex" : "Claude");
+    const delegated = {
+      ...agent,
+      provider: "claudeAgent",
+      delegateProvider: "codex",
+      model: "claude-sonnet-5",
+    } as ThreadAgentSnapshot;
+
+    // The model belongs to the wrapper, so "Codex · claude-sonnet-5" would be
+    // the card contradicting itself.
+    expect(formatAgentIdentityLine(delegated, displayProvider as never)).toBe(
+      "Codex job · hosted by Claude",
+    );
+    expect(formatAgentIdentityLine(agent, displayProvider as never)).toBe(
+      "Codex · gpt-5.6-sol · medium reasoning",
+    );
+  });
+
+  it("describes the transcript by messages and tool calls", () => {
+    const items = [
+      { id: "msg", kind: "message", role: "assistant", text: "Working." },
+      { id: "cmd", kind: "work", category: "command", label: "Bash", status: "completed" },
+      { id: "read", kind: "work", category: "tool", label: "Read", status: "completed" },
+      { id: "think", kind: "work", category: "thinking", label: "Thinking", status: "completed" },
+    ] as const;
+
+    expect(formatTranscriptSummaryLabel(items)).toBe("1 message · 2 tool calls");
+    expect(formatTranscriptSummaryLabel([])).toBe("No visible activity");
   });
 
   it("renders objective, progress, execution metadata, and captured transcript", () => {

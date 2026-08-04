@@ -43,17 +43,33 @@ function detailFor(item: Extract<AgentTranscriptItem, { kind: "work" }>): string
 }
 
 /**
- * Ordering falls back to array position when a provider omits `at`; the
- * synthesized stamps stay monotonic so the sort below is stable either way.
+ * `createdAt` is display metadata here, not the sort key.
+ *
+ * Several blocks of one provider record share a timestamp, and some records
+ * carry none, so it cannot order an interleaved transcript on its own. Rows
+ * are emitted in `ordinal` order and `createdAt` is synthesized to agree with
+ * it, so anything downstream that compares timestamps reaches the same answer.
  */
 function createdAtFor(item: AgentTranscriptItem, index: number): string {
   return item.at ?? new Date(index).toISOString();
 }
 
+/**
+ * Sorts by the server's absolute position when it is available, falling back
+ * to array order. `ordinal` survives pagination; `at` does not.
+ */
+function compareByOrdinal(left: AgentTranscriptItem, right: AgentTranscriptItem): number {
+  if (left.ordinal !== undefined && right.ordinal !== undefined) {
+    return left.ordinal - right.ordinal;
+  }
+  return 0;
+}
+
 export function deriveAgentTranscriptTimelineEntries(
   items: ReadonlyArray<AgentTranscriptItem>,
 ): TimelineEntry[] {
-  const entries = items.map((item, index): TimelineEntry => {
+  const ordered = [...items].sort(compareByOrdinal);
+  return ordered.map((item, index): TimelineEntry => {
     const createdAt = createdAtFor(item, index);
     if (item.kind === "message") {
       return {
@@ -91,8 +107,4 @@ export function deriveAgentTranscriptTimelineEntries(
     };
     return { id: item.id, kind: "work", createdAt, entry };
   });
-
-  return entries.toSorted((left, right) =>
-    left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0,
-  );
 }
