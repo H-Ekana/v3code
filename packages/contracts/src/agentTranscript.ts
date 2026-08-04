@@ -30,13 +30,21 @@ export const AgentTranscriptMessageItem = Schema.Struct({
   role: Schema.Literals(["user", "assistant", "system"]),
   text: TrimmedNonEmptyString,
   /**
-   * Provider timestamp. Optional because not every provider stamps every
-   * record; readers emit a strictly increasing sequence so the client can sort
-   * an interleaved transcript the same way the main timeline sorts by
-   * `createdAt`. Consumers must tolerate its absence and fall back to array
-   * order.
+   * Provider timestamp, for display. Optional because not every provider
+   * stamps every record, and never load-bearing for ordering — see
+   * {@link AgentTranscriptItem} `ordinal`.
    */
   at: Schema.optional(IsoDateTime),
+  /**
+   * Absolute position in the whole transcript, stable across pages.
+   *
+   * Ordering cannot ride on `at`: several blocks of one record share a
+   * timestamp, and a page is normalized without sight of its neighbours, so
+   * any per-page tie-breaking of timestamps makes page 2 sort into page 1's
+   * tail. This is derived from the provider's own record order, which is
+   * chronological, so sorting by it is correct however the pages arrive.
+   */
+  ordinal: Schema.optional(NonNegativeInt),
   phase: Schema.optional(Schema.Literals(["commentary", "final"])),
 });
 
@@ -48,6 +56,8 @@ export const AgentTranscriptWorkItem = Schema.Struct({
   status: Schema.Literals(["running", "completed", "failed"]),
   /** See {@link AgentTranscriptMessageItem} `at`. */
   at: Schema.optional(IsoDateTime),
+  /** See {@link AgentTranscriptMessageItem} `ordinal`. */
+  ordinal: Schema.optional(NonNegativeInt),
   detail: Schema.optional(TrimmedNonEmptyString),
   outcome: Schema.optional(TrimmedNonEmptyString),
   /**

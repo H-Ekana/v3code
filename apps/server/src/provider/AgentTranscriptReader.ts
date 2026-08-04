@@ -66,8 +66,8 @@ type TranscriptMessage = Pick<
 > & {
   /**
    * Present on every persisted session record but absent from the SDK's
-   * declared `SessionMessage` shape, so it is read defensively; the sequencer
-   * falls back to synthetic ordering when it is missing.
+   * declared `SessionMessage` shape, so it is read defensively. Display only —
+   * ordering rides on `ordinal`, so its absence costs a timestamp, not order.
    */
   readonly timestamp?: string;
 };
@@ -162,21 +162,23 @@ function skillInjectionName(value: string): string | undefined {
 }
 
 /**
- * Emits a strictly increasing timestamp per item.
- *
- * The client sorts an interleaved transcript by `at` exactly as the main
- * timeline sorts by `createdAt`, so equal or missing stamps would let a tool
- * result float above the call that produced it. Real provider timestamps are
- * preferred; anything non-monotonic is nudged forward rather than trusted.
+ * Blocks per record that `ordinal` reserves, so a record's blocks stay ordered
+ * between it and the next record no matter how many it has.
  */
-function makeSequencer(): (candidate: unknown) => string {
-  let lastMs = 0;
-  return (candidate) => {
-    const parsed = typeof candidate === "string" ? Date.parse(candidate) : Number.NaN;
-    const ms = Number.isFinite(parsed) && parsed > lastMs ? parsed : lastMs + 1;
-    lastMs = ms;
-    return DateTime.formatIso(DateTime.makeUnsafe(ms));
-  };
+const ORDINAL_BLOCKS_PER_RECORD = 1_000;
+
+/** Absolute position of a block, stable however the transcript is paginated. */
+function ordinalFor(recordIndex: number, blockIndex: number): number {
+  return (
+    recordIndex * ORDINAL_BLOCKS_PER_RECORD + Math.min(blockIndex, ORDINAL_BLOCKS_PER_RECORD - 1)
+  );
+}
+
+/** Provider timestamps are for display only; ordering rides on `ordinal`. */
+function displayTimestamp(candidate: unknown): string | undefined {
+  const parsed = typeof candidate === "string" ? Date.parse(candidate) : Number.NaN;
+  if (!Number.isFinite(parsed)) return undefined;
+  return DateTime.formatIso(DateTime.makeUnsafe(parsed));
 }
 
 function toolResultText(content: unknown): string | undefined {
@@ -206,23 +208,33 @@ function toolInputFacets(
   if (itemType === "command_execution" && command) {
     return { command, ...(text(args.description) ? { detail: text(args.description)! } : {}) };
   }
-  if (filePath) {
-    const detail = jsonDetail(input);
+  const detail = jsonDetail(input);
+  // `changedFiles` means *mutated*, and downstream counts it as such. A `Read`
+  // or a `Grep --path` also carries a path, so keying off path presence alone
+  // reported a read-only agent as having changed files.
+  if (filePath && itemType === "file_change") {
     return { changedFiles: [filePath], ...(detail ? { detail } : {}) };
   }
-  const detail = jsonDetail(input);
   return detail ? { detail } : {};
 }
 
 export function normalizeClaudeTranscriptMessages(
   messages: ReadonlyArray<TranscriptMessage>,
+  /**
+   * Message offset of this page within the whole transcript, so `ordinal` is
+   * absolute rather than page-relative. Without it page 2 would restart at
+   * zero and sort above page 1.
+   */
+  offset = 0,
 ): ReadonlyArray<AgentTranscriptItem> {
   const items: Array<AgentTranscriptItem> = [];
   /** Output index of each pending tool call, so its result collapses into it. */
   const toolIndexByUseId = new Map<string, number>();
-  const nextAt = makeSequencer();
 
+  let recordIndex = offset;
   for (const message of messages) {
+    const currentRecord = recordIndex;
+    recordIndex += 1;
     const body = decodeMessageBody(message.message);
     if (Option.isNone(body)) continue;
     const blocks =
@@ -233,10 +245,9 @@ export function normalizeClaudeTranscriptMessages(
     let blockIndex = 0;
     for (const candidate of blocks) {
       const id = `${message.uuid}:${blockIndex}`;
+      const ordinal = ordinalFor(currentRecord, blockIndex);
       blockIndex += 1;
-      // Stamped per block, not per message: several blocks share one record's
-      // timestamp, and the client sorts on `at` alone.
-      const at = nextAt(message.timestamp);
+      const at = displayTimestamp(message.timestamp);
 
       const textBlock = decodeTextContentBlock(candidate);
       if (Option.isSome(textBlock)) {
@@ -250,12 +261,20 @@ export function normalizeClaudeTranscriptMessages(
             category: "other",
             label: `Loaded skill ${skillName}`,
             status: "completed",
-            at,
+            ordinal,
+            ...(at ? { at } : {}),
             ...(bounded(value) ? { detail: bounded(value)! } : {}),
           });
           continue;
         }
-        items.push({ id, kind: "message", role: message.type, text: value, at });
+        items.push({
+          id,
+          kind: "message",
+          role: message.type,
+          text: value,
+          ordinal,
+          ...(at ? { at } : {}),
+        });
         continue;
       }
 
@@ -269,7 +288,8 @@ export function normalizeClaudeTranscriptMessages(
           category: "thinking",
           label: "Thinking",
           status: "completed",
-          at,
+          ordinal,
+          ...(at ? { at } : {}),
           ...(bounded(value) ? { detail: bounded(value)! } : {}),
         });
         continue;
@@ -286,7 +306,8 @@ export function normalizeClaudeTranscriptMessages(
           category: workCategoryForItemType(itemType),
           label: name,
           status: "running",
-          at,
+          ordinal,
+          ...(at ? { at } : {}),
           toolCallId: toolUseId,
           toolName: name,
           itemType,
@@ -314,7 +335,8 @@ export function normalizeClaudeTranscriptMessages(
           category: "other",
           label: "Tool result",
           status,
-          at,
+          ordinal,
+          ...(at ? { at } : {}),
           toolCallId: toolUseId,
           ...(outcome ? { outcome } : {}),
         });
@@ -405,14 +427,18 @@ function codexFileChangeDetail(
 export function normalizeCodexTranscriptItems(
   turns: ProviderThreadSnapshot["turns"],
 ): ReadonlyArray<AgentTranscriptItem> {
-  const nextAt = makeSequencer();
+  // Codex hands back the whole child thread rather than a page, so a running
+  // counter over its items is already an absolute position.
+  let ordinalCounter = 0;
   return turns.flatMap((turn) =>
     turn.items.flatMap((candidate): ReadonlyArray<AgentTranscriptItem> => {
       const item = record(candidate);
       const id = text(item?.id);
       const type = item?.type;
       if (!item || !id || typeof type !== "string") return [];
-      const at = nextAt(item.createdAt ?? item.timestamp);
+      const ordinal = ordinalFor(ordinalCounter, 0);
+      ordinalCounter += 1;
+      const at = displayTimestamp(item.createdAt ?? item.timestamp);
 
       if (type === "userMessage") {
         const value = userInputText(item.content);
@@ -427,7 +453,8 @@ export function normalizeCodexTranscriptItems(
                 kind: "message",
                 role: "assistant",
                 text: value,
-                at,
+                ordinal,
+                ...(at ? { at } : {}),
                 ...(item.phase === "final_answer"
                   ? { phase: "final" as const }
                   : item.phase === "commentary"
@@ -451,7 +478,8 @@ export function normalizeCodexTranscriptItems(
                 category: "thinking",
                 label: "Thinking",
                 status: "completed",
-                at,
+                ordinal,
+                ...(at ? { at } : {}),
                 detail: value,
               } as const,
             ]
@@ -477,7 +505,8 @@ export function normalizeCodexTranscriptItems(
             category: "command",
             label: actionLabel,
             status: exitCode !== undefined && exitCode !== 0 ? "failed" : workStatus(item.status),
-            at,
+            ordinal,
+            ...(at ? { at } : {}),
             toolCallId: id,
             itemType: "command_execution",
             ...(bounded(item.command) ? { command: bounded(item.command)! } : {}),
@@ -499,7 +528,8 @@ export function normalizeCodexTranscriptItems(
             category: "files",
             label: `Changed ${paths.length || changes.length} ${paths.length === 1 ? "file" : "files"}`,
             status: workStatus(item.status),
-            at,
+            ordinal,
+            ...(at ? { at } : {}),
             toolCallId: id,
             itemType: "file_change",
             ...(paths.length > 0 ? { changedFiles: paths } : {}),
@@ -520,7 +550,8 @@ export function normalizeCodexTranscriptItems(
             category: "tool",
             label: `Used ${server ? `${server} · ` : ""}${tool}`,
             status: workStatus(item.status),
-            at,
+            ordinal,
+            ...(at ? { at } : {}),
             toolCallId: id,
             toolName: tool,
             itemType: type === "mcpToolCall" ? "mcp_tool_call" : "dynamic_tool_call",
@@ -539,7 +570,8 @@ export function normalizeCodexTranscriptItems(
                 category: "search",
                 label: `Searched for “${query}”`,
                 status: "completed",
-                at,
+                ordinal,
+                ...(at ? { at } : {}),
                 toolCallId: id,
                 itemType: "web_search",
               } as const,
@@ -561,7 +593,8 @@ export function normalizeCodexTranscriptItems(
             category: "delegation",
             label: labels[String(item.tool)] ?? "Coordinated agents",
             status: workStatus(item.status),
-            at,
+            ordinal,
+            ...(at ? { at } : {}),
             toolCallId: id,
             itemType: "collab_agent_tool_call",
             ...(bounded(item.prompt) ? { detail: bounded(item.prompt)! } : {}),
@@ -578,7 +611,8 @@ export function normalizeCodexTranscriptItems(
                 category: "other",
                 label: "Updated the plan",
                 status: "completed",
-                at,
+                ordinal,
+                ...(at ? { at } : {}),
                 detail: value,
               } as const,
             ]
@@ -711,7 +745,7 @@ export const readAgentTranscript = Effect.fn("readAgentTranscript")(function* (
   const complete = raw.length <= limit;
   return {
     status: "available",
-    items: normalizeClaudeTranscriptMessages(page),
+    items: normalizeClaudeTranscriptMessages(page, offset),
     ...(complete ? {} : { nextCursor: offset + page.length }),
     complete,
     ...(rosterAgent.revision === undefined ? {} : { revision: rosterAgent.revision }),

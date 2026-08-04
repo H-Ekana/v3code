@@ -14,7 +14,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
-import { readAgentTranscript } from "./AgentTranscriptReader.ts";
+import { normalizeClaudeTranscriptMessages, readAgentTranscript } from "./AgentTranscriptReader.ts";
 
 const threadId = ThreadId.make("thread-1");
 const claudeProvider = ProviderDriverKind.make("claudeAgent");
@@ -149,7 +149,10 @@ describe("readAgentTranscript", () => {
             category: "thinking",
             label: "Thinking",
             status: "completed",
+            // Both blocks keep the record's real timestamp — ordering is
+            // carried by `ordinal`, which is absolute (page offset 4).
             at: "2026-08-01T00:00:05.000Z",
+            ordinal: 4_000,
             detail: "private reasoning",
           },
           {
@@ -157,7 +160,8 @@ describe("readAgentTranscript", () => {
             kind: "message",
             role: "assistant",
             text: "Visible answer",
-            at: "2026-08-01T00:00:05.001Z",
+            at: "2026-08-01T00:00:05.000Z",
+            ordinal: 4_001,
           },
         ],
         complete: true,
@@ -213,6 +217,53 @@ describe("readAgentTranscript", () => {
           outcome: "2 failed",
         },
       ]);
+    }),
+  );
+
+  it("keeps page ordinals absolute so a later page cannot sort into an earlier one", () => {
+    const record = (uuid: string, timestamp: string) => ({
+      type: "assistant" as const,
+      uuid,
+      session_id: "s",
+      parent_tool_use_id: null,
+      timestamp,
+      message: { content: [{ type: "text", text: `from ${uuid}` }] },
+    });
+
+    // Page 2's record is stamped in the same millisecond as page 1's tail —
+    // routine in Claude's log, and the case a timestamp sort gets wrong.
+    const pageOne = normalizeClaudeTranscriptMessages([record("a", "2026-08-01T00:00:00.000Z")], 0);
+    const pageTwo = normalizeClaudeTranscriptMessages([record("b", "2026-08-01T00:00:00.000Z")], 1);
+
+    expect(pageOne[0]?.ordinal).toBe(0);
+    expect(pageTwo[0]?.ordinal).toBe(1_000);
+    expect(pageOne[0]!.ordinal!).toBeLessThan(pageTwo[0]!.ordinal!);
+  });
+
+  it.effect("reports changed files only for tools that mutate them", () =>
+    Effect.gen(function* () {
+      const result = yield* readClaude([
+        {
+          type: "assistant",
+          uuid: "calls",
+          session_id: "parent-session-1",
+          parent_tool_use_id: null,
+          message: {
+            content: [
+              // Reads and searches carry a path too; counting them as changed
+              // files reported a read-only agent as having edited the repo.
+              { type: "tool_use", id: "t1", name: "Read", input: { file_path: "a.ts" } },
+              { type: "tool_use", id: "t2", name: "Grep", input: { pattern: "x", path: "src" } },
+              { type: "tool_use", id: "t3", name: "Edit", input: { file_path: "b.ts" } },
+            ],
+          },
+        },
+      ]);
+
+      const changed = claudeItems(result).flatMap((item) =>
+        item.kind === "work" && item.changedFiles ? [...item.changedFiles] : [],
+      );
+      expect(changed).toEqual(["b.ts"]);
     }),
   );
 
@@ -305,8 +356,10 @@ describe("readAgentTranscript", () => {
 
       expect(result).toMatchObject({ nextCursor: 2, complete: false, revision: 7 });
       expect(claudeItems(result)).toMatchObject([
-        { id: "first:0", kind: "work", category: "thinking" },
-        { id: "visible:0", kind: "message", role: "user", text: "Prompt" },
+        { id: "first:0", kind: "work", category: "thinking", ordinal: 0 },
+        // Ordinals are absolute, so page 2 (offset 2) starts at 2000 and can
+        // never sort into this page's tail.
+        { id: "visible:0", kind: "message", role: "user", text: "Prompt", ordinal: 1_000 },
       ]);
     }),
   );
@@ -385,9 +438,9 @@ describe("readAgentTranscript", () => {
           phase: "final",
         },
       ]);
-      // Ordering is carried by `at`, not array position, once the client sorts.
-      const stamps = claudeItems(result).map((item) => item.at);
-      expect(stamps).toEqual([...stamps].sort());
+      // Ordering is carried by `ordinal`, not array position or timestamps.
+      const ordinals = claudeItems(result).map((item) => item.ordinal ?? -1);
+      expect(ordinals).toEqual([...ordinals].sort((left, right) => left - right));
     }),
   );
 
