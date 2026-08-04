@@ -20,6 +20,7 @@ const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHO
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
+const emitXAiTurnError = process.env.T3_ACP_EMIT_XAI_TURN_ERROR === "1";
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
@@ -520,6 +521,30 @@ const program = Effect.gen(function* () {
 
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {
         return yield* Effect.never;
+      }
+
+      // Grok's shape for an upstream API failure: the terminal status rides on
+      // _x.ai/session/update while session/prompt still answers end_turn.
+      if (emitXAiTurnError) {
+        writeJsonRpcNotification("_x.ai/session/update", {
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "retry_state",
+            type: "failed",
+            error_type: "api",
+            message: "API error (status 521): Connection to Grok timed out.",
+          },
+        });
+        writeJsonRpcNotification("_x.ai/session/update", {
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "turn_completed",
+            prompt_id: promptIdFromRequestMeta(request) ?? "mock-xai-prompt-1",
+            stop_reason: "error",
+            agent_result: "API error (status 521): Connection to Grok timed out.",
+          },
+        });
+        return { stopReason: "end_turn" };
       }
 
       if (emitXAiPromptCompleteThenHang) {

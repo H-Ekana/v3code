@@ -16,14 +16,48 @@ const XAiPromptCompleteNotification = Schema.Struct({
 
 type XAiPromptCompleteNotification = typeof XAiPromptCompleteNotification.Type;
 
+/**
+ * Grok reports terminal turn status over `_x.ai/session/update`, not over the
+ * `session/prompt` response: a turn that died on an upstream API error still
+ * answers the RPC with `end_turn`. Only this notification carries
+ * `stop_reason: "error"` and the `agent_result` text, so a dropped notification
+ * shows up as an empty assistant turn with no error anywhere.
+ *
+ * Field names arrive snake_case on the wire; camelCase is accepted for
+ * forward compatibility. Content updates use standard `session/update` and
+ * never reach this handler.
+ */
+const XAiSessionUpdateNotification = Schema.Struct({
+  sessionId: Schema.optional(Schema.String),
+  update: Schema.Struct({
+    sessionUpdate: Schema.optional(Schema.String),
+    prompt_id: Schema.optional(Schema.String),
+    promptId: Schema.optional(Schema.String),
+    stop_reason: Schema.optional(Schema.String),
+    stopReason: Schema.optional(Schema.String),
+    agent_result: Schema.optional(Schema.NullOr(Schema.Unknown)),
+    agentResult: Schema.optional(Schema.NullOr(Schema.Unknown)),
+  }),
+});
+
+type XAiSessionUpdateNotification = typeof XAiSessionUpdateNotification.Type;
+
 interface PendingXAiPromptCompletion {
   readonly sessionId: string;
   readonly promptId: string;
   readonly deferred: Deferred.Deferred<EffectAcpSchema.PromptResponse>;
 }
 
+interface XAiTurnFailure {
+  readonly promptId: string | undefined;
+  readonly message: string;
+}
+
 const completedXAiPromptIdLimit = 128;
+const pendingXAiTurnFailureLimit = 32;
 const xAiStopReasonMissingMetaKey = "xAiStopReasonMissing";
+const xAiTurnFailureMetaKey = "xAiTurnFailure";
+const xAiErrorStopReason = "error";
 
 const XAiAskUserQuestionOption = Schema.Struct({
   label: Schema.String,
@@ -205,6 +239,7 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
     const activeSessionIdRef = yield* Ref.make<string | undefined>(undefined);
     const pendingRef = yield* Ref.make<ReadonlyArray<PendingXAiPromptCompletion>>([]);
     const completedPromptIdsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+    const turnFailuresRef = yield* Ref.make<ReadonlyArray<XAiTurnFailure>>([]);
     let nextPromptFallbackId = 0;
     const allocatePromptFallbackId = Effect.sync(() => {
       nextPromptFallbackId += 1;
@@ -220,6 +255,12 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
           completedPromptIdsRef,
           notification,
         }),
+    );
+
+    yield* runtime.handleExtNotification(
+      "_x.ai/session/update",
+      XAiSessionUpdateNotification,
+      (notification) => recordXAiTurnFailure(turnFailuresRef, notification),
     );
 
     return {
@@ -254,6 +295,12 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
             runtime.prompt(requestPayload),
             Deferred.await(fallback.deferred),
           ).pipe(
+            // The turn_completed notification precedes the prompt response on
+            // the same stdout stream, so a recorded failure is already visible
+            // by the time the winning response settles.
+            Effect.flatMap((response) =>
+              attachXAiTurnFailure(turnFailuresRef, fallback.promptId, response),
+            ),
             Effect.tap((response) =>
               rememberCompletedXAiPromptId(completedPromptIdsRef, response, fallback.promptId),
             ),
@@ -395,6 +442,97 @@ export function promptResponseHasMissingXAiStopReason(
   return meta !== null && typeof meta === "object" && meta[xAiStopReasonMissingMetaKey] === true;
 }
 
+/**
+ * Error text for a turn Grok ended with `stop_reason: "error"`, or undefined
+ * for a turn that ended normally. Callers settle a turn with this as a failure
+ * rather than as a silent empty completion.
+ */
+export function xAiTurnFailureFromResponse(
+  response: EffectAcpSchema.PromptResponse,
+): string | undefined {
+  const meta = response._meta;
+  if (meta === null || typeof meta !== "object") {
+    return undefined;
+  }
+  const message = meta[xAiTurnFailureMetaKey];
+  return typeof message === "string" && message.trim().length > 0 ? message.trim() : undefined;
+}
+
+function xAiFailureMessage(
+  stopReason: string | undefined,
+  agentResult: unknown,
+): string | undefined {
+  if (stopReason !== xAiErrorStopReason) {
+    return undefined;
+  }
+  const text = typeof agentResult === "string" ? agentResult.trim() : "";
+  return text.length > 0 ? text : "Grok ended the turn with an error.";
+}
+
+const recordXAiTurnFailure = (
+  turnFailuresRef: Ref.Ref<ReadonlyArray<XAiTurnFailure>>,
+  notification: XAiSessionUpdateNotification,
+) =>
+  Effect.suspend(() => {
+    const update = notification.update;
+    if (update.sessionUpdate !== "turn_completed") {
+      // retry_state and every other x.ai update kind is informational; only a
+      // completed turn carries terminal status.
+      return Effect.void;
+    }
+    const message = xAiFailureMessage(
+      update.stop_reason ?? update.stopReason,
+      update.agent_result ?? update.agentResult,
+    );
+    if (message === undefined) {
+      return Effect.void;
+    }
+    return Ref.update(turnFailuresRef, (failures) =>
+      [...failures, { promptId: update.prompt_id ?? update.promptId, message }].slice(
+        -pendingXAiTurnFailureLimit,
+      ),
+    );
+  });
+
+const attachXAiTurnFailure = (
+  turnFailuresRef: Ref.Ref<ReadonlyArray<XAiTurnFailure>>,
+  promptId: string,
+  response: EffectAcpSchema.PromptResponse,
+) =>
+  Ref.modify(turnFailuresRef, (failures) => {
+    // A user-cancelled turn already settles as cancelled and must not be
+    // rewritten into a failure.
+    if (response.stopReason === "cancelled") {
+      return [undefined, failures] as const;
+    }
+    const index = failures.findIndex(
+      (failure) => failure.promptId === undefined || failure.promptId === promptId,
+    );
+    const failure = index < 0 ? undefined : failures[index];
+    return [
+      failure,
+      index < 0 ? failures : [...failures.slice(0, index), ...failures.slice(index + 1)],
+    ] as const;
+  }).pipe(
+    Effect.map((failure) =>
+      failure === undefined ? response : withXAiTurnFailureMeta(response, failure.message),
+    ),
+  );
+
+function withXAiTurnFailureMeta(
+  response: EffectAcpSchema.PromptResponse,
+  message: string,
+): EffectAcpSchema.PromptResponse {
+  const meta = response._meta;
+  return {
+    ...response,
+    _meta: {
+      ...(meta !== null && typeof meta === "object" ? meta : {}),
+      [xAiTurnFailureMetaKey]: message,
+    },
+  };
+}
+
 function promptResponseFromXAi(
   notification: XAiPromptCompleteNotification,
 ): EffectAcpSchema.PromptResponse {
@@ -411,6 +549,10 @@ function promptResponseFromXAi(
   }
   if (notification.agentResult !== undefined) {
     meta.agentResult = notification.agentResult;
+  }
+  const failureMessage = xAiFailureMessage(notification.stopReason, notification.agentResult);
+  if (failureMessage !== undefined) {
+    meta[xAiTurnFailureMetaKey] = failureMessage;
   }
   return {
     stopReason,

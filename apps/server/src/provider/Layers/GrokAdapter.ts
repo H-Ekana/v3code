@@ -65,6 +65,7 @@ import {
   makeXAiAskUserQuestionResponse,
   promptResponseHasMissingXAiStopReason,
   XAiAskUserQuestionRequest,
+  xAiTurnFailureFromResponse,
 } from "../acp/XAiAcpExtension.ts";
 import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -1184,16 +1185,25 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
                 const completedStopReason = completedStopReasonFromPromptResponse(result);
+                // Grok answers session/prompt with end_turn even when the turn
+                // died upstream; the real status rides on _x.ai/session/update.
+                const turnFailureMessage = xAiTurnFailureFromResponse(result);
                 yield* offerRuntimeEvent({
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),
                   provider: PROVIDER,
                   threadId: input.threadId,
                   turnId: prepared.turnId,
-                  payload: {
-                    state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                    stopReason: completedStopReason,
-                  },
+                  payload:
+                    turnFailureMessage !== undefined
+                      ? {
+                          state: "failed",
+                          errorMessage: turnFailureMessage,
+                        }
+                      : {
+                          state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+                          stopReason: completedStopReason,
+                        },
                 });
                 ctx.interruptedTurnIds.delete(prepared.turnId);
                 yield* Ref.set(promptSettled, true);

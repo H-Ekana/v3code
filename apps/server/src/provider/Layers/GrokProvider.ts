@@ -42,7 +42,10 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-const GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+// Covers spawn, initialize, authenticate and session/new. A healthy initialize
+// alone has been measured at ~8s on Windows, so a tighter budget reports a
+// working Grok CLI as broken whenever the machine or xAI is briefly slow.
+const GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 45_000;
 
 const GROK_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {

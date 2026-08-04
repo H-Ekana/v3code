@@ -14,6 +14,7 @@ import {
   makeXAiAskUserQuestionResponse,
   makeXAiPromptCompletionRuntime,
   XAiAskUserQuestionRequest,
+  xAiTurnFailureFromResponse,
 } from "./XAiAcpExtension.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
@@ -296,6 +297,42 @@ describe("XAiAcpExtension", () => {
           requestId: promptId,
         },
       });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("surfaces an xAI turn error that session/prompt reports as end_turn", () =>
+    Effect.gen(function* () {
+      const runtime = yield* makePromptCompletionRuntime({
+        T3_ACP_EMIT_XAI_TURN_ERROR: "1",
+      });
+      yield* runtime.start();
+
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "hi" }],
+      });
+
+      // The RPC still says end_turn: without reading _x.ai/session/update the
+      // failure is invisible and the turn settles as an empty success.
+      expect(promptResult.stopReason).toBe("end_turn");
+      expect(xAiTurnFailureFromResponse(promptResult)).toBe(
+        "API error (status 521): Connection to Grok timed out.",
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("leaves a normally completed xAI turn unmarked", () =>
+    Effect.gen(function* () {
+      const runtime = yield* makePromptCompletionRuntime({
+        T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG: "1",
+      });
+      yield* runtime.start();
+
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "hi" }],
+      });
+
+      expect(promptResult.stopReason).toBe("end_turn");
+      expect(xAiTurnFailureFromResponse(promptResult)).toBeUndefined();
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
