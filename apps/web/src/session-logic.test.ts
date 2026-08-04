@@ -13,6 +13,7 @@ import { ComposerPendingUserInputPanel } from "./components/chat/ComposerPending
 import {
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
+  deriveAnsweredUserInputs,
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
@@ -461,6 +462,161 @@ describe("derivePendingUserInputs", () => {
   });
 });
 
+describe("deriveAnsweredUserInputs", () => {
+  function askedActivity(
+    requestId: string,
+    questions: ReadonlyArray<Record<string, unknown>>,
+    createdAt = "2026-02-23T00:00:01.000Z",
+  ) {
+    return makeActivity({
+      id: `asked-${requestId}`,
+      createdAt,
+      kind: "user-input.requested",
+      summary: "User input requested",
+      tone: "info",
+      payload: { requestId, questions },
+    });
+  }
+
+  const LIBRARY_QUESTION = {
+    id: "Which library should we use?",
+    header: "Library",
+    question: "Which library should we use?",
+    options: [
+      { label: "date-fns", description: "Small and tree-shakeable" },
+      { label: "Luxon", description: "Rich timezone support" },
+      { label: "Day.js", description: "Tiny moment-compatible API" },
+    ],
+    multiSelect: false,
+  };
+
+  it("pairs a request with its answer, keyed by question text", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      askedActivity("req-answered-1", [LIBRARY_QUESTION]),
+      makeActivity({
+        id: "answered-1",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        tone: "info",
+        payload: {
+          requestId: "req-answered-1",
+          answers: { "Which library should we use?": "Luxon" },
+        },
+      }),
+    ];
+
+    const answered = deriveAnsweredUserInputs(activities);
+    expect(answered).toHaveLength(1);
+    expect(answered[0]?.status).toBe("answered");
+    // The resolution timestamp, not the request's, so the block sorts to where
+    // the user actually answered.
+    expect(answered[0]?.createdAt).toBe("2026-02-23T00:00:05.000Z");
+    expect(answered[0]?.questions[0]?.selectedLabels).toEqual(["Luxon"]);
+    expect(answered[0]?.questions[0]?.customAnswers).toEqual([]);
+  });
+
+  it("orders multi-select answers by the options offered, not by click order", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      askedActivity("req-multi", [{ ...LIBRARY_QUESTION, multiSelect: true }]),
+      makeActivity({
+        id: "answered-multi",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        tone: "info",
+        payload: {
+          requestId: "req-multi",
+          answers: { "Which library should we use?": ["Day.js", "date-fns"] },
+        },
+      }),
+    ];
+
+    expect(deriveAnsweredUserInputs(activities)[0]?.questions[0]?.selectedLabels).toEqual([
+      "date-fns",
+      "Day.js",
+    ]);
+  });
+
+  it("separates free-text answers from declared option labels", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      askedActivity("req-other", [{ ...LIBRARY_QUESTION, multiSelect: true }]),
+      makeActivity({
+        id: "answered-other",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        tone: "info",
+        payload: {
+          requestId: "req-other",
+          answers: { "Which library should we use?": ["date-fns", "Temporal, once it ships"] },
+        },
+      }),
+    ];
+
+    const question = deriveAnsweredUserInputs(activities)[0]?.questions[0];
+    expect(question?.selectedLabels).toEqual(["date-fns"]);
+    expect(question?.customAnswers).toEqual(["Temporal, once it ships"]);
+  });
+
+  it("marks a restart-expired request as expired with no answers", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      askedActivity("req-expired", [LIBRARY_QUESTION]),
+      makeActivity({
+        id: "expired",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "user-input.resolved",
+        summary: "Structured question expired after restart",
+        tone: "info",
+        payload: { requestId: "req-expired", status: "expired" },
+      }),
+    ];
+
+    const answered = deriveAnsweredUserInputs(activities);
+    expect(answered[0]?.status).toBe("expired");
+    expect(answered[0]?.questions[0]?.selectedLabels).toEqual([]);
+    expect(answered[0]?.questions[0]?.customAnswers).toEqual([]);
+  });
+
+  it("marks a stale orphaned request as failed", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      askedActivity("req-stale", [LIBRARY_QUESTION]),
+      makeActivity({
+        id: "stale",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "provider.user-input.respond.failed",
+        summary: "Provider user input response failed",
+        tone: "error",
+        payload: {
+          requestId: "req-stale",
+          detail: "Unknown pending user-input request: req-stale",
+        },
+      }),
+    ];
+
+    expect(deriveAnsweredUserInputs(activities)[0]?.status).toBe("failed");
+  });
+
+  it("omits requests that are still open", () => {
+    expect(deriveAnsweredUserInputs([askedActivity("req-open", [LIBRARY_QUESTION])])).toEqual([]);
+  });
+
+  it("omits a resolution whose request is outside the activity window", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "orphan-resolved",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        tone: "info",
+        payload: { requestId: "req-missing", answers: { "Which library?": "Luxon" } },
+      }),
+    ];
+
+    expect(deriveAnsweredUserInputs(activities)).toEqual([]);
+  });
+});
+
 describe("deriveActivePlanState", () => {
   it("returns the latest plan update for the active turn", () => {
     const activities: OrchestrationThreadActivity[] = [
@@ -843,6 +999,54 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("omits every AskUserQuestion row so only the answered-question block remains", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "ask-tool-start",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.started",
+        summary: "Tool call",
+        payload: {
+          // Ingestion strips `data` from `tool.started`, so `detail` is the
+          // only signal available on this leg.
+          detail: 'AskUserQuestion: {"questions":[{"question":"Which library?"',
+        },
+      }),
+      makeActivity({
+        id: "ask-tool-complete",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Tool call complete",
+        payload: { data: { toolName: "AskUserQuestion" } },
+      }),
+      makeActivity({
+        id: "ask-requested",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: { requestId: "req-1", questions: [] },
+      }),
+      makeActivity({
+        id: "ask-resolved",
+        createdAt: "2026-02-23T00:00:04.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        tone: "info",
+        payload: { requestId: "req-1", answers: {} },
+      }),
+      makeActivity({
+        id: "unrelated-tool",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.completed",
+        summary: "Tool call complete",
+        payload: { detail: "Read: src/index.ts" },
+      }),
+    ];
+
+    expect(deriveWorkLogEntries(activities).map((entry) => entry.id)).toEqual(["unrelated-tool"]);
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

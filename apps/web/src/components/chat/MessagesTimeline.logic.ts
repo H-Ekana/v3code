@@ -5,6 +5,7 @@ import {
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
   workLogEntryIsToolLike,
+  type AnsweredUserInput,
   type TimelineEntry,
   type WorkLogEntry,
 } from "../../session-logic";
@@ -193,6 +194,12 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string;
       proposedPlan: ProposedPlan;
+    }
+  | {
+      kind: "answered-question";
+      id: string;
+      createdAt: string;
+      answeredUserInput: AnsweredUserInput;
     }
   | { kind: "working"; id: string; createdAt: string | null }
   | { kind: "interrupted"; id: string; createdAt: string | null; turnId: TurnId };
@@ -992,6 +999,16 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    if (timelineEntry.kind === "answered-question") {
+      nextRows.push({
+        kind: "answered-question",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        answeredUserInput: timelineEntry.answeredUserInput,
+      });
+      continue;
+    }
+
     const assistantTurnStillInProgress =
       timelineEntry.message.role === "assistant" &&
       unsettledTurnId !== null &&
@@ -1089,6 +1106,9 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "proposed-plan":
       return a.proposedPlan === (b as typeof a).proposedPlan;
+
+    case "answered-question":
+      return Equal.equals(a.answeredUserInput, (b as typeof a).answeredUserInput);
 
     case "work":
       return Equal.equals(a.groupedEntries, (b as typeof a).groupedEntries);

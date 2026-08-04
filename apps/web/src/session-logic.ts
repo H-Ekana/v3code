@@ -114,6 +114,38 @@ export interface PendingUserInput {
   questions: ReadonlyArray<UserInputQuestion>;
 }
 
+export interface AnsweredUserInputQuestion {
+  question: UserInputQuestion;
+  /**
+   * Labels the user picked that match a declared option, in the order the
+   * options were offered (not the order they were clicked) so the block reads
+   * the same as the picker did.
+   */
+  selectedLabels: ReadonlyArray<string>;
+  /**
+   * Free-text answers — the "Other" escape hatch. These match no declared
+   * option, and are the majority of real answers, so they are kept separate
+   * rather than folded into `selectedLabels`.
+   */
+  customAnswers: ReadonlyArray<string>;
+}
+
+/**
+ * `answered` covers every case where the user actually replied. The two
+ * terminal failures are distinct because they mean opposite things to the
+ * reader: `expired` is the restart-drop (KNOWN-ISSUES.md), `failed` is a
+ * request the provider had already forgotten.
+ */
+export type AnsweredUserInputStatus = "answered" | "expired" | "failed";
+
+export interface AnsweredUserInput {
+  requestId: ApprovalRequestId;
+  /** The resolution timestamp, so the block sorts to where the answer happened. */
+  createdAt: string;
+  status: AnsweredUserInputStatus;
+  questions: ReadonlyArray<AnsweredUserInputQuestion>;
+}
+
 export interface ActivePlanState {
   createdAt: string;
   turnId: TurnId | null;
@@ -152,6 +184,12 @@ export type TimelineEntry =
       kind: "work";
       createdAt: string;
       entry: WorkLogEntry;
+    }
+  | {
+      id: string;
+      kind: "answered-question";
+      createdAt: string;
+      answeredUserInput: AnsweredUserInput;
     };
 
 export function workLogEntryIsToolLike(entry: WorkLogEntry): boolean {
@@ -519,6 +557,134 @@ export function derivePendingUserInputs(
   );
 }
 
+/**
+ * Answers arrive keyed by the *full question text* — `UserInputQuestion.id` is
+ * deliberately set to the question text by the adapters (see ClaudeAdapter's
+ * `handleAskUserQuestion`), because the Claude SDK looks answers up that way.
+ */
+function parseUserInputAnswers(
+  payload: Record<string, unknown> | null,
+): Record<string, ReadonlyArray<string>> | null {
+  const answers = payload?.answers;
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) {
+    return null;
+  }
+  const parsed: Record<string, ReadonlyArray<string>> = {};
+  for (const [questionId, value] of Object.entries(answers as Record<string, unknown>)) {
+    if (typeof value === "string") {
+      parsed[questionId] = value.length > 0 ? [value] : [];
+      continue;
+    }
+    if (Array.isArray(value)) {
+      parsed[questionId] = value.filter(
+        (entry): entry is string => typeof entry === "string" && entry.length > 0,
+      );
+    }
+  }
+  return parsed;
+}
+
+function toAnsweredUserInputQuestions(
+  questions: ReadonlyArray<UserInputQuestion>,
+  answers: Record<string, ReadonlyArray<string>> | null,
+): ReadonlyArray<AnsweredUserInputQuestion> {
+  return questions.map((question) => {
+    const given = answers?.[question.id] ?? [];
+    const declared = new Set(question.options.map((option) => option.label));
+    // Order by the offered options rather than by click order, so re-reading
+    // the block matches the layout of the picker the user actually saw.
+    const selectedLabels = question.options
+      .map((option) => option.label)
+      .filter((label) => given.includes(label));
+    const customAnswers = given.filter((entry) => !declared.has(entry));
+    return { question, selectedLabels, customAnswers };
+  });
+}
+
+/**
+ * Pairs each `user-input.requested` with its resolution so the transcript can
+ * show what was asked *and* what was chosen. Both halves are already persisted
+ * in activity payloads, correlated by `requestId`.
+ *
+ * Requests that are still open are intentionally absent: the composer picker is
+ * still showing them, and `derivePendingUserInputs` owns that state.
+ */
+export function deriveAnsweredUserInputs(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): AnsweredUserInput[] {
+  const openByRequestId = new Map<
+    ApprovalRequestId,
+    { createdAt: string; questions: ReadonlyArray<UserInputQuestion> }
+  >();
+  const answered: AnsweredUserInput[] = [];
+  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+
+  for (const activity of ordered) {
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    const requestId =
+      payload && typeof payload.requestId === "string"
+        ? ApprovalRequestId.make(payload.requestId)
+        : null;
+    if (!requestId) {
+      continue;
+    }
+    const detail = typeof payload?.detail === "string" ? payload.detail : undefined;
+
+    if (activity.kind === "user-input.requested") {
+      const questions = parseUserInputQuestions(payload);
+      if (questions) {
+        openByRequestId.set(requestId, { createdAt: activity.createdAt, questions });
+      }
+      continue;
+    }
+
+    if (activity.kind === "user-input.resolved") {
+      const open = openByRequestId.get(requestId);
+      if (!open) {
+        // A resolution whose request never made it into this activity window
+        // has no questions to render against. Dropping it is better than
+        // rendering a block of answers to questions nobody can see.
+        continue;
+      }
+      openByRequestId.delete(requestId);
+      const status: AnsweredUserInputStatus =
+        payload?.status === "expired" ? "expired" : "answered";
+      answered.push({
+        requestId,
+        createdAt: activity.createdAt,
+        status,
+        questions: toAnsweredUserInputQuestions(
+          open.questions,
+          status === "expired" ? null : parseUserInputAnswers(payload),
+        ),
+      });
+      continue;
+    }
+
+    if (
+      activity.kind === "provider.user-input.respond.failed" &&
+      isStalePendingRequestFailureDetail(detail)
+    ) {
+      const open = openByRequestId.get(requestId);
+      if (!open) {
+        continue;
+      }
+      openByRequestId.delete(requestId);
+      answered.push({
+        requestId,
+        createdAt: activity.createdAt,
+        status: "failed",
+        questions: toAnsweredUserInputQuestions(open.questions, null),
+      });
+    }
+  }
+
+  return answered.toSorted((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
 export function deriveActivePlanState(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
@@ -654,6 +820,13 @@ export function deriveWorkLogEntries(
     if (activity.kind === "agent.snapshot") continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
+    // The whole AskUserQuestion interaction renders as a single
+    // `answered-question` timeline row instead. Left in the work log it
+    // produced three rows per question: a raw truncated-JSON tool call plus
+    // "User input requested" / "User input submitted", none of which recorded
+    // what was actually asked or chosen.
+    if (isUserInputActivity(activity)) continue;
+    if (isAskUserQuestionToolActivity(activity)) continue;
     const entry = toDerivedWorkLogEntry(activity);
     if (activity.kind === "context-compaction.started") {
       pendingContextCompactionIndex = entries.length;
@@ -684,6 +857,37 @@ export function deriveWorkLogEntries(
     const { activityKind, collapseKey: _collapseKey, ...rest } = entry;
     return Object.assign(rest, { sourceActivityKind: activityKind });
   });
+}
+
+function isUserInputActivity(activity: OrchestrationThreadActivity): boolean {
+  return activity.kind === "user-input.requested" || activity.kind === "user-input.resolved";
+}
+
+/**
+ * The tool-call twin of the `user-input.*` pair. Adapters emit AskUserQuestion
+ * as an ordinary `dynamic_tool_call`, whose detail is `summarizeToolRequest`'s
+ * `AskUserQuestion: {"questions":[…` — unreadable, and redundant now that the
+ * answered block carries the same content.
+ *
+ * `tool.started` is matched too: ingestion strips `data` from it, so `detail`
+ * is the only signal available on that leg.
+ */
+function isAskUserQuestionToolActivity(activity: OrchestrationThreadActivity): boolean {
+  if (
+    activity.kind !== "tool.started" &&
+    activity.kind !== "tool.updated" &&
+    activity.kind !== "tool.completed"
+  ) {
+    return false;
+  }
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  if (typeof payload?.detail === "string" && payload.detail.startsWith("AskUserQuestion:")) {
+    return true;
+  }
+  return asRecord(payload?.data)?.toolName === "AskUserQuestion";
 }
 
 function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): boolean {
@@ -1393,6 +1597,7 @@ export function deriveTimelineEntries(
   messages: ReadonlyArray<ChatMessage>,
   proposedPlans: ReadonlyArray<ProposedPlan>,
   workEntries: ReadonlyArray<WorkLogEntry>,
+  answeredUserInputs: ReadonlyArray<AnsweredUserInput> = [],
 ): TimelineEntry[] {
   const messageRows: TimelineEntry[] = messages.map((message) => ({
     id: message.id,
@@ -1412,8 +1617,14 @@ export function deriveTimelineEntries(
     createdAt: entry.createdAt,
     entry,
   }));
-  return [...messageRows, ...proposedPlanRows, ...workRows].toSorted((a, b) =>
-    a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0,
+  const answeredUserInputRows: TimelineEntry[] = answeredUserInputs.map((answeredUserInput) => ({
+    id: `answered-question:${answeredUserInput.requestId}`,
+    kind: "answered-question",
+    createdAt: answeredUserInput.createdAt,
+    answeredUserInput,
+  }));
+  return [...messageRows, ...proposedPlanRows, ...workRows, ...answeredUserInputRows].toSorted(
+    (a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0),
   );
 }
 

@@ -78,6 +78,7 @@ import {
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
+  deriveAnsweredUserInputs,
   derivePendingApprovals,
   derivePendingUserInputs,
   derivePhase,
@@ -2399,6 +2400,13 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThreadId]);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+  // Memoized on `threadActivities` like `workLogEntries` rather than derived
+  // per render like `pendingUserInputs`: this feeds `timelineEntries`, and an
+  // unstable array identity here would defeat that memo on every render.
+  const answeredUserInputs = useMemo(
+    () => deriveAnsweredUserInputs(threadActivities),
+    [threadActivities],
+  );
   const threadAgents = useMemo(
     () => deriveLatestAgentSnapshot(threadActivities),
     [threadActivities],
@@ -2737,8 +2745,13 @@ function ChatViewContent(props: ChatViewProps) {
   }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
   const timelineEntries = useMemo(
     () =>
-      deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
-    [activeThread?.proposedPlans, timelineMessages, workLogEntries],
+      deriveTimelineEntries(
+        timelineMessages,
+        activeThread?.proposedPlans ?? [],
+        workLogEntries,
+        answeredUserInputs,
+      ),
+    [activeThread?.proposedPlans, answeredUserInputs, timelineMessages, workLogEntries],
   );
   const latestAssistantTextVersion = useMemo(() => {
     for (let index = timelineEntries.length - 1; index >= 0; index -= 1) {

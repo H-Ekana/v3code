@@ -25,7 +25,12 @@ import {
 import { flushSync } from "react-dom";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { FileDiff } from "@pierre/diffs/react";
-import { deriveTimelineEntries, workLogEntryIsToolLike } from "../../session-logic";
+import {
+  deriveTimelineEntries,
+  workLogEntryIsToolLike,
+  type AnsweredUserInputQuestion,
+  type AnsweredUserInputStatus,
+} from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
 import {
   getRenderablePatch,
@@ -1283,6 +1288,7 @@ export const TimelineRowContent = memo(function TimelineRowContent({ row }: { ro
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
+      {row.kind === "answered-question" ? <AnsweredQuestionsTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "interrupted" ? <InterruptedTimelineRow /> : null}
     </div>
@@ -1582,6 +1588,152 @@ function ProposedPlanTimelineRow({
         workspaceRoot={ctx.workspaceRoot}
       />
     </div>
+  );
+}
+
+const ANSWERED_QUESTIONS_HEADING: Record<AnsweredUserInputStatus, string> = {
+  answered: "Your answers",
+  // The restart-drop. Naming it plainly beats a silent gap in the transcript,
+  // because the questions were asked and the user never got to answer them.
+  expired: "Questions expired before you answered",
+  failed: "Questions were dropped before you answered",
+};
+
+/**
+ * The single artifact an AskUserQuestion leaves in the transcript. Collapsed it
+ * reads as `question → answer` lines; expanded it also shows the options that
+ * were offered and not taken, which is the thing you actually want when coming
+ * back to a decision later.
+ */
+export function AnsweredQuestionsTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "answered-question" }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { answeredUserInput } = row;
+  const heading = ANSWERED_QUESTIONS_HEADING[answeredUserInput.status];
+  // Nothing to reveal when every question's options were all taken (or there
+  // were none), so the row stays inert rather than offering an empty drawer.
+  const canExpand = answeredUserInput.questions.some((entry) =>
+    entry.question.options.some((option) => !entry.selectedLabels.includes(option.label)),
+  );
+  const toggle = () => {
+    if (canExpand) setExpanded((value) => !value);
+  };
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col rounded-md px-0.5 py-0.5 transition-colors duration-200 motion-reduce:transition-none",
+        canExpand &&
+          "cursor-pointer hover:bg-primary/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+      )}
+      {...(canExpand
+        ? {
+            role: "button" as const,
+            tabIndex: 0,
+            "aria-expanded": expanded,
+            "aria-label": heading,
+            onClick: toggle,
+            onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                toggle();
+              }
+            },
+          }
+        : {})}
+    >
+      <div className="flex select-none items-center gap-1.5">
+        <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground/65">
+          <WorkEntryIconSvg
+            name="message-circle"
+            className="block size-3.5 shrink-0 stroke-[1.8] opacity-80"
+          />
+        </span>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <p className="min-w-0 flex-1 truncate text-[12px] font-medium leading-5 text-foreground/82">
+            {heading}
+          </p>
+          <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/55">
+            {canExpand ? (
+              <ChevronDownIcon
+                className={cn(
+                  "size-3 shrink-0 opacity-70 transition-transform duration-200",
+                  expanded && "rotate-180",
+                )}
+                aria-hidden
+              />
+            ) : null}
+          </span>
+        </div>
+      </div>
+      <ul className="mt-0.5 ms-7 flex flex-col gap-1 text-[12px] leading-5">
+        {answeredUserInput.questions.map((entry) => (
+          <AnsweredQuestionLine entry={entry} expanded={expanded} key={entry.question.id} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function AnsweredQuestionLine({
+  entry,
+  expanded,
+}: {
+  entry: AnsweredUserInputQuestion;
+  expanded: boolean;
+}) {
+  const { question, selectedLabels, customAnswers } = entry;
+  const unselected = question.options.filter((option) => !selectedLabels.includes(option.label));
+
+  return (
+    <li className="min-w-0">
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+        <span className="text-muted-foreground/60">{question.question}</span>
+        <span aria-hidden className="text-muted-foreground/40">
+          →
+        </span>
+        {selectedLabels.length === 0 && customAnswers.length === 0 ? (
+          <span className="italic text-muted-foreground/45">no answer</span>
+        ) : (
+          <span className="min-w-0 text-foreground/82">
+            {/* Multi-select answers are joined explicitly. Claude Code
+                interpolates the raw array and the labels run together with no
+                separator at all — a bug worth not inheriting. */}
+            {selectedLabels.join(", ")}
+            {selectedLabels.length > 0 && customAnswers.length > 0 ? ", " : null}
+            {/* Free text is the "Other" escape hatch. It is set apart because
+                it was typed, not picked, and often changes the instruction. */}
+            {customAnswers.map((answer, index) => (
+              <span className="italic" key={answer}>
+                {index > 0 ? ", " : null}
+                {answer}
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+      {unselected.length > 0 ? (
+        <div
+          className="conversation-disclosure"
+          data-expanded={expanded ? "true" : "false"}
+          inert={!expanded}
+          aria-hidden={!expanded}
+        >
+          <div className="conversation-disclosure-track">
+            <ul className="mt-0.5 flex flex-col text-[11px] leading-5 text-muted-foreground/40">
+              {unselected.map((option) => (
+                <li className="min-w-0 truncate" key={option.label}>
+                  {option.label}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+    </li>
   );
 }
 
