@@ -2583,6 +2583,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     );
   });
 
+  /**
+   * The roster snapshot is a complete latest-wins payload re-persisted on every
+   * material update, so an unbounded Codex answer would be rewritten in full on
+   * each one. The card only needs enough to read as the outcome; the untruncated
+   * text still reaches the thread through {@link deliverCompanionResult}.
+   */
+  const COMPANION_RESULT_SUMMARY_LIMIT = 2_000;
+
+  const boundCompanionResultSummary = (result: string | undefined): string | undefined => {
+    const trimmed = result?.trim();
+    if (!trimmed) return undefined;
+    return trimmed.length <= COMPANION_RESULT_SUMMARY_LIMIT
+      ? trimmed
+      : `${trimmed.slice(0, COMPANION_RESULT_SUMMARY_LIMIT)}\n…`;
+  };
+
   const deliverCompanionResult = Effect.fn("deliverCompanionResult")(function* (
     context: ClaudeSessionContext,
     jobId: string,
@@ -2878,6 +2894,40 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             timelineBypass: true,
           },
         });
+
+        /**
+         * The job's own answer, onto the job's own card.
+         *
+         * `deliverCompanionResult` below posts the full output into the parent
+         * thread, which is what the orchestrating model needs. Nothing was
+         * putting it on the agent, so a delegated agent's outcome card was
+         * stuck forever on the wrapper's "task launched in the background"
+         * line while the real answer sat elsewhere. `task.completed` is the
+         * only event that populates `resultSummary`, and the `task.updated`
+         * above cannot carry it — hence both.
+         */
+        const resultSummary = boundCompanionResultSummary(record.result);
+        if (resultSummary) {
+          const summaryStamp = yield* makeEventStamp();
+          yield* offerRuntimeEvent({
+            type: "task.completed",
+            eventId: summaryStamp.eventId,
+            provider: PROVIDER,
+            createdAt: summaryStamp.createdAt,
+            threadId: context.session.threadId,
+            payload: {
+              taskId,
+              status:
+                record.status === "completed"
+                  ? "completed"
+                  : record.status === "cancelled"
+                    ? "stopped"
+                    : "failed",
+              summary: resultSummary,
+              timelineBypass: true,
+            },
+          });
+        }
 
         if (record.status === "failed" && !deliverResult) {
           yield* deliverCompanionFailure(
