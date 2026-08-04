@@ -14,6 +14,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -243,6 +244,16 @@ function captureTimelineAnchorCandidates(root: HTMLElement | null): TimelineAnch
   return candidates.sort((left, right) => left.viewportTop - right.viewportTop);
 }
 
+/**
+ * The real scrolling element behind the list, for corrections that must land
+ * before the next paint. legend-list's imperative scroll API can defer by a
+ * frame or more; the DOM cannot.
+ */
+function resolveTimelineScrollElement(list: LegendListRef | null): HTMLElement | null {
+  const node = list?.getScrollableNode?.();
+  return node instanceof HTMLElement ? node : null;
+}
+
 function measureTimelineRowViewportTop(root: HTMLElement | null, rowId: string): number | null {
   if (!root) {
     return null;
@@ -360,41 +371,36 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const timelineViewportRef = useRef<HTMLDivElement | null>(null);
 
   /**
-   * Commits a fold and puts the reader back where they were looking.
+   * Commits a fold and puts the reader back where they were looking, in the
+   * same frame the fold commits.
    *
    * A fold deletes rows above the viewport, so the content the reader is
    * looking at slides up under them. legend-list's own
    * `maintainVisibleContentPosition` normally absorbs that, but it is skipped
    * entirely while an imperative `scrollToEnd` is pending — which is precisely
-   * the state the timeline is in around a turn boundary. Measuring the anchor
-   * in viewport space makes this safe to run either way: when MVCP did the
-   * work, the anchor did not move and the correction is a no-op.
+   * the state the timeline is in around a turn boundary. ChatView keeps one
+   * pending on both edges of a send: the composer shrinks as the text clears,
+   * and the `timelineEntries` re-pin effect fires on the new user message.
+   *
+   * This records the anchors and lets the fold commit normally; the correction
+   * is applied by the layout effect below. It deliberately does NOT use
+   * `flushSync`:
+   *
+   * React refuses to flush from inside an effect ("React cannot flush when
+   * React is already rendering") because passive effects run with the commit
+   * context set. The deferred fold IS dispatched from an effect, so a
+   * `flushSync` here silently does nothing: the mutate lands in a later commit,
+   * the measurement below runs against a DOM the fold has not touched yet,
+   * every anchor reads as unmoved, and the correction is always `null`. That is
+   * why the fold still jumped after it was moved off the settle edge — the
+   * compensation was never running on this path at all, only on the click path
+   * through `onToggleTurnFold`, where `flushSync` is legal.
    */
-  const commitFoldWithScrollCompensation = useCallback(
-    (mutate: () => void) => {
-      const root = timelineViewportRef.current;
-      const candidates = captureTimelineAnchorCandidates(root);
-
-      flushSync(mutate);
-
-      const list = listRef.current;
-      const currentScroll = list?.getState?.().scroll;
-      if (!list || typeof currentScroll !== "number") {
-        return;
-      }
-
-      const offset = resolveFoldScrollCorrectionFromCandidates({
-        currentScroll,
-        candidates,
-        measureViewportTop: (rowId) => measureTimelineRowViewportTop(root, rowId),
-      });
-      if (offset === null) {
-        return;
-      }
-      void list.scrollToOffset({ offset, animated: false });
-    },
-    [listRef],
-  );
+  const pendingFoldAnchorsRef = useRef<ReadonlyArray<TimelineAnchorSample> | null>(null);
+  const commitFoldWithScrollCompensation = useCallback((mutate: () => void) => {
+    pendingFoldAnchorsRef.current = captureTimelineAnchorCandidates(timelineViewportRef.current);
+    mutate();
+  }, []);
 
   const onToggleTurnFold = useCallback(
     (turnId: TurnId) => {
@@ -536,6 +542,53 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+
+  /**
+   * Applies a pending fold's scroll correction after the fold's DOM mutation
+   * and before the browser paints — the only window in which the reader never
+   * sees the intermediate position.
+   *
+   * A layout effect is what makes this work at all. The fold's own commit
+   * cannot be forced synchronously from the effect that triggers it (see
+   * `commitFoldWithScrollCompensation`), so the measurement has to happen on
+   * the far side of that commit instead. `useLayoutEffect` runs there,
+   * synchronously, before paint.
+   *
+   * The offset is written straight to the scroller rather than through
+   * `scrollToOffset`, which legend-list defers behind an rAF settle loop while
+   * the list is recovering from a data change (`runScrollRequest` →
+   * `runWhenReady`) — a correction that lands a frame later means the
+   * uncorrected frame paints first, which is the jump this exists to prevent.
+   * `scrollToOffset` still runs afterwards so legend-list's own scroll state
+   * agrees with the DOM.
+   */
+  useLayoutEffect(() => {
+    const candidates = pendingFoldAnchorsRef.current;
+    if (candidates === null) {
+      return;
+    }
+    pendingFoldAnchorsRef.current = null;
+
+    const list = listRef.current;
+    const scroller = resolveTimelineScrollElement(list);
+    if (!list || !scroller) {
+      return;
+    }
+
+    const offset = resolveFoldScrollCorrectionFromCandidates({
+      currentScroll: scroller.scrollTop,
+      candidates,
+      measureViewportTop: (rowId) =>
+        measureTimelineRowViewportTop(timelineViewportRef.current, rowId),
+    });
+    if (offset === null) {
+      return;
+    }
+
+    scroller.scrollTop = offset;
+    void list.scrollToOffset({ offset, animated: false });
+  }, [rows, listRef]);
+
   const interruptedTurnId =
     latestTurn?.state === "interrupted" ? (latestTurn.turnId ?? null) : null;
   const lifecycle = useTimelineLifecycle(

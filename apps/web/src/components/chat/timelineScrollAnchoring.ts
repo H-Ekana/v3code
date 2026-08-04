@@ -154,6 +154,12 @@ export function resolveFoldScrollCorrectionFromCandidates(input: {
 
   // Every anchor the reader could see was deleted by the fold. There is no
   // honest correction to make, so leave the scroller alone rather than guess.
+  //
+  // Deriving one from the content-height delta instead is tempting and wrong:
+  // it assumes the fold deleted rows only ABOVE the viewport. When the reader
+  // had scrolled up into the turn being folded, the deletion straddles them,
+  // and "preserve the distance from the end" drives the offset negative —
+  // pinning them to the very top, which is worse than the browser's clamp.
   return null;
 }
 
