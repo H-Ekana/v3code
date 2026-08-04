@@ -111,11 +111,16 @@ function normalizeRequestedModel(model) {
   if (model == null) {
     return null;
   }
-  const normalized = String(model).trim();
+  const normalized = String(model).trim().toLowerCase();
   if (!normalized) {
     return null;
   }
-  return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
+  // Lowercased before forwarding, not just for the alias lookup. Codex matches
+  // model ids exactly and every id is lowercase, but the names users see are
+  // display-cased ("GPT-5.6-Terra"), so a copied name reached Codex as
+  // `gpt-5.6-Terra` and came back "not supported by this account" — which
+  // reads as an entitlement problem rather than a typo.
+  return MODEL_ALIASES.get(normalized) ?? normalized;
 }
 
 function normalizeReasoningEffort(effort) {
