@@ -826,7 +826,10 @@ function SidebarContent({
 function SidebarGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
-      className={cn("relative flex w-full min-w-0 flex-col p-2", className)}
+      className={cn(
+        "relative flex w-full min-w-0 flex-col p-[var(--sidebar-content-inset)]",
+        className,
+      )}
       data-sidebar="group"
       data-slot="sidebar-group"
       {...props}
@@ -906,7 +909,13 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
 }
 
 const sidebarMenuButtonVariants = cva(
-  "peer/menu-button flex w-full cursor-pointer items-center gap-2 overflow-hidden rounded-lg p-2 text-left text-sm outline-hidden ring-ring transition-[width,height,padding,background-color,color,box-shadow] duration-200 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-primary/50 active:bg-sidebar-row-active active:text-sidebar-foreground disabled:pointer-events-none disabled:opacity-50 group-has-data-[sidebar=menu-action]/menu-item:pe-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-primary/10 data-[active=true]:font-medium data-[active=true]:text-sidebar-foreground data-[active=true]:ring-1 data-[active=true]:ring-primary/15 data-[state=open]:bg-sidebar-row-hover data-[state=open]:text-sidebar-foreground data-[state=open]:hover:bg-sidebar-row-hover motion-reduce:transition-none dark:data-[active=true]:bg-primary/15 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0",
+  // Upstream's token structure — gap, icon color, and geometry moved out of the
+  // base into the `size` variants — with three fork behaviours kept on top: the
+  // active row's primary-tinted accent (upstream flattened it to
+  // `bg-sidebar-row-selected`), the wider transition list and
+  // `motion-reduce:transition-none` the rest of our motion work relies on, and an
+  // open row staying highlighted while its menu is up rather than only on hover.
+  "peer/menu-button flex w-full cursor-pointer items-center gap-[var(--sidebar-control-gap)] overflow-hidden text-left outline-hidden ring-ring transition-[width,height,padding,background-color,color,box-shadow] duration-200 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-primary/50 active:bg-sidebar-row-active active:text-sidebar-foreground disabled:pointer-events-none disabled:opacity-50 group-has-data-[sidebar=menu-action]/menu-item:pe-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-primary/10 data-[active=true]:font-medium data-[active=true]:text-sidebar-foreground data-[active=true]:ring-1 data-[active=true]:ring-primary/15 data-[state=open]:bg-sidebar-row-hover data-[state=open]:text-sidebar-foreground data-[state=open]:hover:bg-sidebar-row-hover motion-reduce:transition-none dark:data-[active=true]:bg-primary/15 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-[var(--sidebar-content-inset)]! [&>span:last-child]:truncate [&>svg:not([class*='size-'])]:size-4 [&>svg]:shrink-0 [&>svg]:text-[var(--sidebar-icon-color)] hover:[&>svg]:text-sidebar-foreground active:[&>svg]:text-sidebar-foreground data-[active=true]:[&>svg]:text-sidebar-foreground",
   {
     defaultVariants: {
       size: "default",
@@ -914,8 +923,9 @@ const sidebarMenuButtonVariants = cva(
     },
     variants: {
       size: {
-        default: "h-8 rounded-md px-2.5 py-1.5 text-sm",
-        icon: "size-8 justify-center rounded-md p-0",
+        default:
+          "h-8 rounded-[var(--control-radius)] px-[var(--sidebar-row-content-inset)] py-1.5 text-sm",
+        icon: "size-8 justify-center rounded-[var(--control-radius)] p-0",
         lg: "h-12 rounded-lg p-2 text-sm group-data-[collapsible=icon]:p-0!",
         sm: "h-7 rounded-lg p-2 text-xs",
       },

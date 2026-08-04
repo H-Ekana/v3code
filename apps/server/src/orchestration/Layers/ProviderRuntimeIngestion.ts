@@ -49,6 +49,7 @@ import {
   ProviderRuntimeIngestionService,
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
+import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
@@ -2456,17 +2457,19 @@ const make = Effect.gen(function* () {
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
-      yield* Effect.forkScoped(
+      yield* forkParked(
         Stream.runForEach(serverSettingsService.streamChanges, (settings) =>
           Ref.set(enableAssistantStreamingRef, settings.enableAssistantStreaming),
         ),
       );
-      yield* Effect.forkScoped(
+      yield* forkParked(
+        // `runtimeEventsForIngestion` is ours — it trims per-event work before the
+        // stream reaches the worker, so it stays wrapped around upstream's source.
         runtimeEventsForIngestion(providerService.streamEvents).pipe(
           Stream.runForEach((event) => worker.enqueue({ source: "runtime", event })),
         ),
       );
-      yield* Effect.forkScoped(
+      yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
           if (event.type !== "thread.turn-start-requested" && event.type !== "thread.reverted") {
             return Effect.void;

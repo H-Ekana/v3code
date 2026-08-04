@@ -13,6 +13,7 @@ import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
+import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion, isV3ForkDesktopVersion } from "../updates/updateChannels.ts";
 
 export interface MakeDesktopEnvironmentInput {
@@ -66,6 +67,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly appUserModelId: string;
     readonly linuxDesktopEntryName: string;
     readonly linuxWmClass: string;
+    readonly linuxApplicationsDir: string;
+    readonly appImagePath: Option.Option<string>;
     readonly userDataDirName: string;
     readonly legacyUserDataDirName: string;
     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
@@ -156,8 +159,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const configuredBaseDir = config.t3Home;
-  const baseDir = Option.getOrElse(configuredBaseDir, () => path.join(homeDirectory, ".t3"));
+  const baseDir = resolveDesktopBaseDir({
+    homeDirectory,
+    joinPath: path.join,
+    t3Home: config.t3Home,
+  });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const branding = resolveDesktopAppBranding({
@@ -167,20 +173,27 @@ const make = Effect.fn("desktop.environment.make")(function* (
   });
   const displayName = branding.displayName;
   const isV3Fork = !isDevelopment && isV3ForkDesktopVersion(input.appVersion);
-  const stateDir = path.join(
-    baseDir,
-    isDevelopment && Option.isNone(configuredBaseDir)
-      ? "dev"
-      : isV3Fork
-        ? "userdata-v3"
-        : "userdata",
-  );
+  // The fork keeps its own state dir so a V3 build and an upstream build can sit
+  // side by side. `isV3Fork` implies `!isDevelopment`, and upstream's helper
+  // resolves that case to "userdata", so this only redirects the fork build.
+  const stateDir = isV3Fork
+    ? path.join(baseDir, "userdata-v3")
+    : resolveDesktopStateDir({
+        baseDir,
+        isDevelopment,
+        joinPath: path.join,
+        t3Home: config.t3Home,
+      });
   const userDataDirName = isDevelopment ? "v3code-dev" : isV3Fork ? "v3code-v3" : "v3code";
   const legacyUserDataDirName = isDevelopment
     ? "V3 Code (Dev)"
     : isV3Fork
       ? "V3 Code (V3 Nightly)"
       : "V3 Code (Alpha)";
+  const linuxApplicationsDir = path.join(
+    Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
+    "applications",
+  );
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -232,6 +245,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
         ? "v3code-v3.desktop"
         : "v3code.desktop",
     linuxWmClass: isDevelopment ? "v3code-dev" : isV3Fork ? "v3code-v3" : "v3code",
+    linuxApplicationsDir,
+    appImagePath: config.appImagePath,
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

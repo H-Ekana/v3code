@@ -42,6 +42,9 @@ function TooltipPopup({
       <TooltipPrimitive.Positioner
         align={align}
         anchor={anchor}
+        // `layer-tooltip` (80) already clears `layer-dropdown` (60), which our
+        // popovers and menus use, so upstream's bump from a raw z-50 to z-70 is
+        // already satisfied here. Staying on the token keeps the scale honest.
         className="layer-tooltip pointer-events-none h-(--positioner-height) w-(--positioner-width) max-w-(--available-width) transition-[top,left,right,bottom,transform] duration-150 data-instant:transition-none motion-reduce:transition-none"
         data-slot="tooltip-positioner"
         side={side}

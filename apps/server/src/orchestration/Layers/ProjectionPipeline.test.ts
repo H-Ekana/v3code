@@ -36,7 +36,7 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
 
-const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
   OrchestrationProjectionPipelineLive.pipe(

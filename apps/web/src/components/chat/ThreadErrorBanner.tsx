@@ -20,7 +20,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
        * translate — nothing is mounted late, hidden, or deferred, so the
        * announcement fires immediately regardless of the animation.
        */}
-      <Alert className="motion-arrival" variant="error">
+      <Alert className="motion-arrival" variant="error" controlAlignment="first-line">
         <CircleAlertIcon />
         <AlertDescription>
           <Tooltip>

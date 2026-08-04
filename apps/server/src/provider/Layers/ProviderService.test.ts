@@ -60,7 +60,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 
-const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 

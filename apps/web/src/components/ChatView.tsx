@@ -195,6 +195,7 @@ import { useNowMinute } from "../hooks/useNowMinute";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
+import { preventRepeatedTerminalCloseShortcut } from "../lib/terminalCloseShortcut";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -4705,6 +4706,10 @@ function ChatViewContent(props: ChatViewProps) {
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (preventRepeatedTerminalCloseShortcut(event, keybindings)) {
+        event.stopPropagation();
+        return;
+      }
       if (!activeThreadId || isCommandPaletteOpen()) {
         return;
       }
@@ -6184,7 +6189,9 @@ function ChatViewContent(props: ChatViewProps) {
     />
   );
   const panelLayoutControls = (
-    <div className="workspace-titlebar-controls z-50 gap-1 [-webkit-app-region:no-drag]">
+    <div className="workspace-titlebar-controls z-50 mr-px gap-1 [-webkit-app-region:no-drag]">
+      {/* `rightPanelShellPresent`, not `rightPanelOpen`: the control stays mounted
+          through the close animation, matching the other panel-phase checks. */}
       {rightPanelShellPresent && !shouldUsePlanSidebarSheet ? (
         <RightPanelMaximizeControl
           maximized={rightPanelMaximized}

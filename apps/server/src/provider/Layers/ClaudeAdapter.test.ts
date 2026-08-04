@@ -48,7 +48,7 @@ import {
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 
-const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // The bundled Codex plugin is vendored in this checkout, so without an explicit

@@ -65,7 +65,7 @@ const CODEX_LEAN_CONFIG_ARGS: ReadonlyArray<string> = [
   "--config",
   "mcp_servers={}",
 ];
-const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
+const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 /**
  * Build a Codex text-generation closure bound to a specific `CodexSettings`
  * payload. See `makeCodexAdapter` for the overall per-instance rationale.

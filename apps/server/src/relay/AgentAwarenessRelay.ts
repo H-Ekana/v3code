@@ -45,6 +45,7 @@ import { getOrCreateEnvironmentKeyPairFromSecretStore } from "../cloud/environme
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { forkParked } from "../serverActivation.ts";
 
 export class AgentAwarenessRelay extends Context.Service<
   AgentAwarenessRelay,
@@ -557,18 +558,25 @@ export const make = Effect.gen(function* () {
    * a long idle period keeps runtime linking working while making the unlinked
    * case effectively free.
    */
-  const publishActiveThreadsOnceWhenConfigured = Effect.gen(function* () {
-    let retryDelayMs = ACTIVE_SNAPSHOT_RETRY_MIN_MS;
-    while (!(yield* Ref.get(activeSnapshotPublishedRef))) {
-      const published = yield* publishActiveThreadsUnsafe.pipe(Effect.orElseSucceed(() => false));
-      if (published) {
-        yield* Ref.set(activeSnapshotPublishedRef, true);
-        return;
+  const publishActiveThreadsOnceWhenConfigured = (logEnabledWhenReady: boolean) =>
+    Effect.gen(function* () {
+      let retryDelayMs = ACTIVE_SNAPSHOT_RETRY_MIN_MS;
+      while (!(yield* Ref.get(activeSnapshotPublishedRef))) {
+        const published = yield* publishActiveThreadsUnsafe.pipe(Effect.orElseSucceed(() => false));
+        if (published) {
+          yield* Ref.set(activeSnapshotPublishedRef, true);
+          if (logEnabledWhenReady) {
+            const relayConfig = yield* readRelayConfig.pipe(Effect.orElseSucceed(() => null));
+            yield* Effect.logInfo("agent activity publishing enabled after link reconciliation", {
+              relayUrl: relayConfig?.url,
+            });
+          }
+          return;
+        }
+        yield* Effect.sleep(Duration.millis(retryDelayMs));
+        retryDelayMs = Math.min(retryDelayMs * 2, ACTIVE_SNAPSHOT_RETRY_MAX_MS);
       }
-      yield* Effect.sleep(Duration.millis(retryDelayMs));
-      retryDelayMs = Math.min(retryDelayMs * 2, ACTIVE_SNAPSHOT_RETRY_MAX_MS);
-    }
-  });
+    });
 
   const worker = yield* makeDrainableWorker(publishThread);
 
@@ -610,11 +618,12 @@ export const make = Effect.gen(function* () {
           });
           break;
       }
-
-      yield* Effect.forkScoped(
-        Effect.sleep("1 second").pipe(Effect.andThen(publishActiveThreadsOnceWhenConfigured)),
+      yield* forkParked(
+        Effect.sleep("1 second").pipe(
+          Effect.andThen(publishActiveThreadsOnceWhenConfigured(startupState !== "enabled")),
+        ),
       );
-      yield* Effect.forkScoped(
+      yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
           if (threadId === null) {
