@@ -9,7 +9,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { canSettle, canSnooze } from "@t3tools/client-runtime/state/thread-settled";
-import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, type LocalApi, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -97,6 +97,49 @@ export class ThreadSnoozeBlockedError extends Schema.TaggedErrorClass<ThreadSnoo
   }
 }
 
+/** How long a durable delete may stay in flight before the user hears about it. */
+const DELETE_STALL_WARNING_MS = 10_000;
+
+export type DestructiveConfirmationOutcome = "confirmed" | "cancelled" | "failed";
+
+/**
+ * Ask the local confirmation dialog a destructive yes/no question.
+ *
+ * Callers must branch on all three outcomes: a `failed` dialog is not a refusal.
+ * Treating it as one is what let confirmed deletions disappear without a trace,
+ * so this reports the failure to the user and logs it under `label`.
+ *
+ * With no local API — a remote browser or the mobile client — there is no dialog
+ * to ask, so the answer is `confirmed`: the caller already has an in-app
+ * confirmation and must not be blocked by a surface that cannot prompt. Callers
+ * for whom silence is not consent should check for the API themselves first.
+ */
+export async function confirmDestructiveAction(input: {
+  readonly localApi: Pick<LocalApi, "dialogs"> | null | undefined;
+  readonly message: string;
+  readonly label: string;
+  readonly failureTitle: string;
+}): Promise<DestructiveConfirmationOutcome> {
+  if (!input.localApi) {
+    return "confirmed";
+  }
+  const confirmation = await settlePromise(() => input.localApi!.dialogs.confirm(input.message));
+  if (confirmation._tag === "Failure") {
+    const error = squashAtomCommandFailure(confirmation);
+    console.error(`[${input.label}] confirmation dialog failed`, { error });
+    toastManager.add({
+      type: "error",
+      title: input.failureTitle,
+      description:
+        error instanceof Error
+          ? `The confirmation dialog failed: ${error.message}`
+          : "The confirmation dialog failed. Try again.",
+    });
+    return "failed";
+  }
+  return confirmation.value ? "confirmed" : "cancelled";
+}
+
 interface DurableThreadDeleteOptions<A, E> {
   readonly target: ScopedThreadRef;
   readonly providerName: string | null | undefined;
@@ -126,11 +169,26 @@ export async function dispatchDurableThreadDelete<A, E>({
   };
 
   console.info(`[thread-delete] dispatching durable delete for ${diagnostic}`, logContext);
+  // A command that never settles used to look exactly like a command that was
+  // never sent. Say so out loud instead of leaving the row sitting there.
+  const stallWatchdog = setTimeout(() => {
+    console.warn(`[thread-delete] durable delete has not settled for ${diagnostic}`, logContext);
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Delete is taking longer than expected",
+        description: `${diagnostic} is still being deleted. If the row does not disappear, reconnect the environment and try again.`,
+        data: { threadRef: target },
+      }),
+    );
+  }, DELETE_STALL_WARNING_MS);
   let result: AtomCommandResult<A, E>;
   try {
     result = await dispatch();
   } catch (defect) {
     result = AsyncResult.failure<A, E>(Cause.die(defect));
+  } finally {
+    clearTimeout(stallWatchdog);
   }
   if (result._tag === "Success") {
     console.info(`[thread-delete] durable delete completed for ${diagnostic}`, logContext);
@@ -328,24 +386,6 @@ export function useThreadActions() {
         ? formatWorktreePathForDisplay(orphanedWorktreePath)
         : null;
       const canDeleteWorktree = orphanedWorktreePath !== null && threadProject !== null;
-      const localApi = readLocalApi();
-      let shouldDeleteWorktree = false;
-      if (canDeleteWorktree && localApi) {
-        const confirmationResult = await settlePromise(() =>
-          localApi.dialogs.confirm(
-            [
-              "This thread is the only one linked to this worktree:",
-              displayWorktreePath ?? orphanedWorktreePath,
-              "",
-              "Delete the worktree too?",
-            ].join("\n"),
-          ),
-        );
-        if (confirmationResult._tag === "Failure") {
-          return confirmationResult;
-        }
-        shouldDeleteWorktree = confirmationResult.value;
-      }
 
       const deletedThreadIds = deletedIds ?? new Set<ThreadId>();
       const currentRouteThreadRef = getCurrentRouteThreadRef();
@@ -414,7 +454,29 @@ export function useThreadActions() {
         }
       }
 
-      if (!shouldDeleteWorktree || !orphanedWorktreePath || !threadProject) {
+      // No local dialog means no way to ask, and removing a worktree unasked is
+      // not a safe default — leave it on disk for a surface that can prompt.
+      const worktreeDialogApi = readLocalApi();
+      if (!canDeleteWorktree || !orphanedWorktreePath || !threadProject || !worktreeDialogApi) {
+        return deleteResult;
+      }
+
+      // Asked only after the thread is durably gone. Nothing may sit between the
+      // user's "delete this" and the command that deletes it — a dialog that
+      // hangs, rejects, or is answered "no" must not be able to cancel a
+      // deletion the user already confirmed.
+      const worktreeConfirmation = await confirmDestructiveAction({
+        localApi: worktreeDialogApi,
+        message: [
+          "The thread you deleted was the only one linked to this worktree:",
+          displayWorktreePath ?? orphanedWorktreePath,
+          "",
+          "Delete the worktree too?",
+        ].join("\n"),
+        label: "thread-delete",
+        failureTitle: "Thread deleted, but the worktree prompt failed",
+      });
+      if (worktreeConfirmation !== "confirmed") {
         return deleteResult;
       }
 
@@ -604,18 +666,16 @@ export function useThreadActions() {
 
       if (confirmThreadDelete && localApi) {
         const title = resolved?.thread.title ?? "this thread";
-        const confirmationResult = await settlePromise(() =>
-          localApi.dialogs.confirm(
-            [
-              `Delete thread "${title}"?`,
-              "This permanently clears conversation history for this thread.",
-            ].join("\n"),
-          ),
-        );
-        if (confirmationResult._tag === "Failure") {
-          return confirmationResult;
-        }
-        if (!confirmationResult.value) {
+        const confirmation = await confirmDestructiveAction({
+          localApi,
+          message: [
+            `Delete thread "${title}"?`,
+            "This permanently clears conversation history for this thread.",
+          ].join("\n"),
+          label: "thread-delete",
+          failureTitle: "Could not delete thread",
+        });
+        if (confirmation !== "confirmed") {
           return AsyncResult.success(undefined);
         }
       }

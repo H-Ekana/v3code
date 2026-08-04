@@ -109,7 +109,7 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 
-import { useThreadActions } from "../hooks/useThreadActions";
+import { confirmDestructiveAction, useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
@@ -1830,13 +1830,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (clicked !== "delete") return;
 
       if (appSettingsConfirmThreadDelete) {
-        const confirmed = await api.dialogs.confirm(
-          [
+        const confirmation = await confirmDestructiveAction({
+          localApi: api,
+          message: [
             `Delete ${count} thread${count === 1 ? "" : "s"}?`,
             "This permanently clears conversation history for these threads.",
           ].join("\n"),
-        );
-        if (!confirmed) return;
+          label: "thread-delete",
+          failureTitle: "Could not delete threads",
+        });
+        if (confirmation !== "confirmed") return;
       }
 
       const deletedThreadKeys = new Set(threadKeys);
@@ -2180,13 +2183,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
       if (clicked !== "delete") return;
       if (appSettingsConfirmThreadDelete) {
-        const confirmed = await api.dialogs.confirm(
-          [
+        const confirmation = await confirmDestructiveAction({
+          localApi: api,
+          message: [
             `Delete thread "${thread.title}"?`,
             "This permanently clears conversation history for this thread.",
           ].join("\n"),
-        );
-        if (!confirmed) {
+          label: "thread-delete",
+          failureTitle: "Could not delete thread",
+        });
+        if (confirmation !== "confirmed") {
           return;
         }
       }

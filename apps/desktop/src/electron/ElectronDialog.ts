@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 
 import * as Electron from "electron";
 
+const CANCEL_BUTTON_INDEX = 0;
 const CONFIRM_BUTTON_INDEX = 1;
 
 export class ElectronDialogPickFolderError extends Schema.TaggedErrorClass<ElectronDialogPickFolderError>()(
@@ -143,11 +144,18 @@ export const make = ElectronDialog.of({
       return false;
     }
 
+    // "No"/"Yes" with the default on "No" made the safe answer indistinguishable
+    // from the destructive one: Enter, Esc, and a reflex click on the focused
+    // leading button all read as a refusal, and every caller treats a refusal as
+    // "do nothing, silently". That is how confirmed thread deletions turned into
+    // no-ops. "Cancel" names the refusal explicitly, and the affirmative carries
+    // the keyboard default so answering the question actually answers it. Esc
+    // still cancels.
     const options = {
       type: "question" as const,
-      buttons: ["No", "Yes"],
-      defaultId: 0,
-      cancelId: 0,
+      buttons: ["Cancel", "Yes"],
+      defaultId: CONFIRM_BUTTON_INDEX,
+      cancelId: CANCEL_BUTTON_INDEX,
       noLink: true,
       message: normalizedMessage,
     };

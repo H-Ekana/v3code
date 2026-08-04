@@ -98,7 +98,7 @@ import {
 } from "../sidebarProjectGrouping";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
-import { useThreadActions } from "../hooks/useThreadActions";
+import { confirmDestructiveAction, useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -2406,15 +2406,16 @@ export default function SidebarV2() {
       }
       if (clicked.value !== "delete") return;
       if (confirmThreadDelete) {
-        const confirmed = await settlePromise(() =>
-          api.dialogs.confirm(
-            [
-              `Delete ${count} thread${count === 1 ? "" : "s"}?`,
-              "This permanently clears conversation history for these threads.",
-            ].join("\n"),
-          ),
-        );
-        if (confirmed._tag === "Failure" || !confirmed.value) return;
+        const confirmation = await confirmDestructiveAction({
+          localApi: api,
+          message: [
+            `Delete ${count} thread${count === 1 ? "" : "s"}?`,
+            "This permanently clears conversation history for these threads.",
+          ].join("\n"),
+          label: "thread-delete",
+          failureTitle: "Could not delete threads",
+        });
+        if (confirmation !== "confirmed") return;
       }
       // Grown as deletions actually land, never seeded with the whole batch:
       // orphaned-worktree detection must only discount threads that are
@@ -2627,15 +2628,16 @@ export default function SidebarV2() {
             return;
           case "delete": {
             if (confirmThreadDelete) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(
-                  [
-                    `Delete thread "${thread.title}"?`,
-                    "This permanently clears conversation history for this thread.",
-                  ].join("\n"),
-                ),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
+              const confirmation = await confirmDestructiveAction({
+                localApi: api,
+                message: [
+                  `Delete thread "${thread.title}"?`,
+                  "This permanently clears conversation history for this thread.",
+                ].join("\n"),
+                label: "thread-delete",
+                failureTitle: "Could not delete thread",
+              });
+              if (confirmation !== "confirmed") return;
             }
             const result = await deleteThread(threadRef);
             if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {

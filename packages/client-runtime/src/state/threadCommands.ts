@@ -67,6 +67,7 @@ export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
 ) {
   const scheduler = createAtomCommandScheduler();
+  const deletionScheduler = createAtomCommandScheduler();
   const concurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
@@ -79,11 +80,17 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    // Deletion runs on its own lane. On the shared serial lane it queued behind
+    // every other command for the same thread, so one never-settling turn,
+    // interrupt, or stop-session request made the thread undeletable — silently,
+    // because a queued command never resolves and never reports. Nothing about a
+    // tombstone needs to wait for the work it is tombstoning. `singleFlight`
+    // additionally folds repeat Delete clicks into the one in-flight request.
     delete: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:delete",
       execute: (input: DeleteThreadInput) => deleteThread(input),
-      scheduler,
-      concurrency,
+      scheduler: deletionScheduler,
+      concurrency: { ...concurrency, mode: "singleFlight" as const },
     }),
     archive: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:archive",
