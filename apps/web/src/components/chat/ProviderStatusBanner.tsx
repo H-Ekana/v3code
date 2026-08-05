@@ -50,11 +50,12 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
           // is already mounted with its full text content, so the live region
           // announces at mount and nothing is hidden until motion finishes.
           // `motion-arrival` degrades to an opacity settle under reduced motion.
-          "motion-arrival relative inline-flex items-center gap-3 rounded-xl border py-3 ps-3.5 pe-10 text-card-foreground text-sm",
+          "alert-glass motion-arrival relative inline-flex items-center gap-3 rounded-xl border py-3 ps-3.5 pe-10 text-card-foreground text-sm",
           status.status === "warning"
-            ? "border-warning/32 bg-warning/4 [&_svg]:text-warning"
-            : "border-destructive/32 bg-destructive/4 text-destructive-foreground [&_svg]:text-destructive",
+            ? "border-warning/32 [&_svg]:text-warning"
+            : "border-destructive/32 text-destructive-foreground [&_svg]:text-destructive",
         )}
+        data-variant={status.status === "warning" ? "warning" : "error"}
         role="alert"
       >
         <InfoIcon className="size-4 shrink-0" aria-hidden />

@@ -764,8 +764,9 @@ export function BranchToolbarBranchSelector({
               <GitBranchIcon className="size-3 shrink-0 opacity-70" />
             )}
             <span
+              data-composer-label
               className={cn(
-                "min-w-0 max-w-[240px] truncate",
+                "min-w-0 max-w-[240px] truncate transition-[max-width,opacity] duration-300 ease-out group-data-[compact]/composer-context:max-w-0 group-data-[compact]/composer-context:opacity-0",
                 confirmedBranchLabelKey !== null && "feedback-label-crossfade",
               )}
               key={confirmedBranchLabelKey ?? "confirmed-initial"}

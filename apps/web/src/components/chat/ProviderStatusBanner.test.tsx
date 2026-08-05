@@ -58,6 +58,15 @@ describe("ProviderStatusBanner", () => {
     expect(markup).not.toContain("display:none");
   });
 
+  it("renders on a glass surface so the timeline never reads through the banner", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderStatusBanner status={warningProvider()} onDismiss={() => {}} />,
+    );
+
+    expect(markup).toContain("alert-glass");
+    expect(markup).toContain('data-variant="warning"');
+  });
+
   it("labels error dismiss controls with the correct severity", () => {
     const markup = renderToStaticMarkup(
       <ProviderStatusBanner

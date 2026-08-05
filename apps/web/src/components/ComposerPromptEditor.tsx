@@ -2007,12 +2007,14 @@ function ComposerPromptEditorInner({
 
   return (
     <ComposerTerminalContextActionsContext value={terminalContextActions}>
-      <div className="relative">
+      <div className="composer-editor-surface relative">
         <PlainTextPlugin
           contentEditable={
             <ContentEditable
               className={cn(
-                "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent text-[16px] leading-relaxed text-foreground focus:outline-none sm:text-[14px]",
+                // The size comes from .composer-editor-surface so Settings -> Appearance
+                // can drive it; keep everything else here.
+                "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none",
                 className,
               )}
               data-testid="composer-editor"
@@ -2025,15 +2027,15 @@ function ComposerPromptEditorInner({
             terminalContexts.length > 0 || largePastes.length > 0 ? null : ghostSuggestion ? (
               <div
                 data-composer-ghost-suggestion="true"
-                className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/45 sm:text-[14px]"
+                className="pointer-events-none absolute inset-0 leading-relaxed text-muted-foreground/45"
               >
                 <span>{ghostSuggestion}</span>
-                <span className="ml-2 text-[12px] text-muted-foreground/35">Tab to use</span>
+                <span className="ml-2 text-[0.85em] text-muted-foreground/35">Tab to use</span>
               </div>
             ) : (
               <div
                 data-composer-placeholder="true"
-                className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/55 sm:text-[14px]"
+                className="pointer-events-none absolute inset-0 leading-relaxed text-muted-foreground/35"
               >
                 {placeholder}
               </div>

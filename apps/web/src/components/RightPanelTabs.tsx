@@ -331,14 +331,14 @@ function surfaceTitle(
 function PreviewFavicon({ url }: { url: string | null }) {
   const faviconUrl = faviconUrlForOrigin(url, 32);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  if (!faviconUrl || failedUrl === faviconUrl) return <Globe2 className="size-3.5 shrink-0" />;
+  if (!faviconUrl || failedUrl === faviconUrl) return <Globe2 className="size-3 shrink-0" />;
   return (
     <img
       src={faviconUrl}
       alt=""
       aria-hidden
       draggable={false}
-      className="size-3.5 shrink-0 rounded-sm"
+      className="size-3 shrink-0 rounded-sm"
       onError={() => setFailedUrl(faviconUrl)}
     />
   );
@@ -360,26 +360,26 @@ function SurfaceIcon({
       return <PreviewFavicon url={url} />;
     }
     case "diff":
-      return <FileDiff className="size-3.5 shrink-0" />;
+      return <FileDiff className="size-3 shrink-0" />;
     case "files":
-      return <Files className="size-3.5 shrink-0" />;
+      return <Files className="size-3 shrink-0" />;
     case "file":
       return (
         <PierreEntryIcon
           pathValue={surface.relativePath}
           kind="file"
           theme={theme}
-          className="size-3.5"
+          className="size-3"
         />
       );
     case "terminal":
-      return <TerminalSquare className="size-3.5 shrink-0" />;
+      return <TerminalSquare className="size-3 shrink-0" />;
     case "plan":
-      return <ClipboardList className="size-3.5 shrink-0" />;
+      return <ClipboardList className="size-3 shrink-0" />;
     case "agents":
-      return <Bot className="size-3.5 shrink-0" />;
+      return <Bot className="size-3 shrink-0" />;
     case "agent-detail":
-      return <Bot className="size-3.5 shrink-0" />;
+      return <Bot className="size-3 shrink-0" />;
   }
 }
 
@@ -644,7 +644,7 @@ function LegacyRightPanelTabs(props: RightPanelTabsProps) {
       <div
         className={cn(
           "workspace-topbar gap-1 border-b border-primary/10 bg-background pl-2",
-          !ownsDesktopTitleBar && "[--workspace-topbar-height:--spacing(11)]",
+          props.mode !== "inline" && "[--workspace-topbar-height:--spacing(11)]",
           props.mode === "inline" ? "pr-28" : "pr-3",
           ownsDesktopTitleBar && "wco:pr-[calc(var(--workspace-native-controls-inset)+6rem)]",
           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
@@ -704,54 +704,54 @@ function LegacyRightPanelTabs(props: RightPanelTabsProps) {
                       // so without the explicit exemption it becomes titlebar chrome
                       // and `onClick` below never fires. The ✕ kept working precisely
                       // because it is still a `<button>`.
-                      "workbench-terminal-tab group relative flex h-7 min-w-25 max-w-44 shrink-0 cursor-default items-center gap-1.5 overflow-hidden rounded-md px-2 text-sm outline-none [-webkit-app-region:no-drag] focus-visible:ring-2 focus-visible:ring-ring",
+                      "workbench-terminal-tab group/tab relative flex h-6 max-w-36 shrink-0 cursor-default items-center gap-0.5 overflow-hidden rounded-md pr-2 pl-1.5 text-xs outline-none [-webkit-app-region:no-drag] focus-visible:ring-2 focus-visible:ring-ring",
                       active
                         ? "bg-primary/10 text-foreground inset-ring-1 inset-ring-primary/15"
                         : "text-muted-foreground hover:bg-primary/8 hover:text-foreground",
                     )}
                   >
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                            <SurfaceIcon
-                              surface={surface}
-                              sessions={props.previewSessions}
-                              theme={resolvedTheme}
-                            />
-                            <span className="truncate">{title}</span>
-                          </span>
-                        }
-                      />
-                      <TooltipPopup>{title}</TooltipPopup>
-                    </Tooltip>
+                    {/*
+                     * Upstream #5260 folds the close affordance into the surface
+                     * icon: the icon is shown at rest and swaps to an ✕ while the
+                     * tab is hovered or the button itself is focused.
+                     */}
                     <button
                       type="button"
                       // Out of the document tab order so the strip stays a single
                       // tab stop; Delete/Backspace on the focused tab closes it.
                       tabIndex={-1}
-                      className={cn(
-                        "relative flex size-4 shrink-0 items-center justify-center rounded hover:bg-muted focus:opacity-100",
-                        pending ? "opacity-100" : "opacity-0 group-hover:opacity-100",
-                      )}
+                      className="group/close relative flex size-4 shrink-0 items-center justify-center rounded-sm hover:bg-muted"
                       aria-label={`Close ${title}`}
                       onClick={(event) => {
                         event.stopPropagation();
                         props.onCloseSurface(surface);
                       }}
                     >
-                      {pending ? (
-                        <>
+                      <span className="relative flex size-3 items-center justify-center group-hover/tab:hidden group-focus-visible/close:hidden">
+                        <SurfaceIcon
+                          surface={surface}
+                          sessions={props.previewSessions}
+                          theme={resolvedTheme}
+                        />
+                        {pending ? (
                           <span
-                            className="size-2 animate-status-pulse rounded-full bg-primary group-hover:hidden motion-reduce:animate-none"
+                            className="absolute -right-0.5 -bottom-0.5 size-1.5 animate-status-pulse rounded-full bg-primary motion-reduce:animate-none"
                             aria-hidden
                           />
-                          <X className="hidden size-3 group-hover:block" />
-                        </>
-                      ) : (
-                        <X className="size-3" />
-                      )}
+                        ) : null}
+                      </span>
+                      <X className="hidden size-3 group-hover/tab:block group-focus-visible/close:block" />
                     </button>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span className="flex min-w-0 flex-1 items-center">
+                            <span className="truncate">{title}</span>
+                          </span>
+                        }
+                      />
+                      <TooltipPopup>{title}</TooltipPopup>
+                    </Tooltip>
                   </div>
                 );
               })}
@@ -759,10 +759,10 @@ function LegacyRightPanelTabs(props: RightPanelTabsProps) {
             {props.surfaces.length > 0 ? (
               <Menu>
                 <MenuTrigger
-                  className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-[background-color,color] duration-200 ease-out hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+                  className="relative inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-[background-color,color] duration-200 ease-out hover:bg-primary/10 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
                   aria-label="Add panel surface"
                 >
-                  <Plus className="size-4" />
+                  <Plus className="size-3.5" />
                 </MenuTrigger>
                 <MenuPopup align="start" side="bottom" sideOffset={6} className="min-w-44">
                   <SurfaceMenuItem
@@ -812,6 +812,7 @@ function LegacyRightPanelTabs(props: RightPanelTabsProps) {
           ? { "aria-labelledby": tabDomId(selectedSurfaceIndex) }
           : {})}
         className="workbench-panel-content flex min-h-0 flex-1 flex-col"
+        data-right-panel-surface-content
       >
         {props.activeSurfaceId === null ? (
           <RightPanelEmptyState
@@ -1332,6 +1333,7 @@ function WorkspacePane(props: {
         role="tabpanel"
         {...(selectedIndex >= 0 ? { "aria-labelledby": paneTabDomId(pane.id, selectedIndex) } : {})}
         className="workbench-panel-content flex min-h-0 flex-1 flex-col"
+        data-right-panel-surface-content
       >
         {activeSurface ? (
           workspaceProps.renderSurface?.(activeSurface)

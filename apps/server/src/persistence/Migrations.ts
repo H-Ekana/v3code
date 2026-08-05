@@ -52,6 +52,9 @@ import Migration0036 from "./Migrations/036_ProjectionThreadsActiveBackgroundTas
 // Upstream shipped this as migration 035; this fork already owns 035 and 036, so it is
 // renumbered to 037 to keep already-migrated fork databases moving forward.
 import Migration0037 from "./Migrations/037_ProjectionThreadTitleRegeneration.ts";
+// Upstream shipped this as migration 036, which the fork already owns; renumbered to 038
+// for the same reason.
+import Migration0038 from "./Migrations/038_ProjectionThreadsPinned.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -101,6 +104,7 @@ export const migrationEntries = [
   [35, "ProjectionThreadsActiveAgents", Migration0035],
   [36, "ProjectionThreadsActiveBackgroundTasks", Migration0036],
   [37, "ProjectionThreadTitleRegeneration", Migration0037],
+  [38, "ProjectionThreadsPinned", Migration0038],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
